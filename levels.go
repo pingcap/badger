@@ -608,7 +608,7 @@ func (s *levelsController) runCompactDef(l int, cd compactDef) (err error) {
 	// Note: For level 0, while doCompact is running, it is possible that new tables are added.
 	// However, the tables are added only to the end, so it is ok to just delete the first table.
 
-	cd.elog.LazyPrintf("LOG Compact %d->%d, del %d tables, add %d tables, took %v\n",
+	s.kv.logger.Printf("Compact %d->%d, del %d tables, add %d tables, took %v\n",
 		l, l+1, len(cd.top)+len(cd.bot), len(newTables), time.Since(timeStart))
 	return nil
 }
@@ -673,11 +673,11 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 		// Stall. Make sure all levels are healthy before we unstall.
 		var timeStart time.Time
 		{
-			s.elog.Printf("STALLED STALLED STALLED STALLED STALLED STALLED STALLED STALLED: %v\n",
+			s.kv.logger.Printf("STALLED STALLED STALLED STALLED STALLED STALLED STALLED STALLED: %v\n",
 				time.Since(lastUnstalled))
 			s.cstatus.RLock()
 			for i := 0; i < s.kv.opt.MaxLevels; i++ {
-				s.elog.Printf("level=%d. Status=%s Size=%d\n",
+				s.kv.logger.Printf("level=%d. Status=%s Size=%d\n",
 					i, s.cstatus.levels[i].debug(), s.levels[i].getTotalSize())
 			}
 			s.cstatus.RUnlock()
@@ -697,12 +697,12 @@ func (s *levelsController) addLevel0Table(t *table.Table) error {
 			time.Sleep(10 * time.Millisecond)
 			if i%100 == 0 {
 				prios := s.pickCompactLevels()
-				s.elog.Printf("Waiting to add level 0 table. Compaction priorities: %+v\n", prios)
+				s.kv.logger.Printf("Waiting to add level 0 table. Compaction priorities: %+v\n", prios)
 				i = 0
 			}
 		}
 		{
-			s.elog.Printf("UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED: %v\n",
+			s.kv.logger.Printf("UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED: %v\n",
 				time.Since(timeStart))
 			lastUnstalled = time.Now()
 		}
