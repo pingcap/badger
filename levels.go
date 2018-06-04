@@ -425,9 +425,7 @@ func (s *levelsController) compactBuildTables(
 		// from not doing this ASAP after all file creation has finished because this is a
 		// background operation.
 		firstErr = syncDir(s.kv.opt.Dir)
-	}
-
-	if firstErr != nil {
+	} else {
 		// An error happened.  Delete all the newly created table files (by calling DecrRef
 		// -- we're the only holders of a ref).
 		for j := 0; j < numBuilds; j++ {
