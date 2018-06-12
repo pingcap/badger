@@ -59,17 +59,19 @@ type DB struct {
 	// nil if Dir and ValueDir are the same
 	valueDirGuard *directoryLockGuard
 
-	closers   closers
-	elog      trace.EventLog
-	mt        *skl.Skiplist   // Our latest (actively written) in-memory table
-	imm       []*skl.Skiplist // Add here only AFTER pushing to flushChan.
-	opt       Options
-	manifest  *manifestFile
-	lc        *levelsController
-	vlog      valueLog
-	vptr      valuePointer // less than or equal to a pointer to the last vlog value put into mt
-	writeCh   chan *request
-	flushChan chan flushTask // For flushing memtables.
+	closers    closers
+	elog       trace.EventLog
+	mt         *skl.Skiplist   // Our latest (actively written) in-memory table
+	imm        []*skl.Skiplist // Add here only AFTER pushing to flushChan.
+	opt        Options
+	manifest   *manifestFile
+	lc         *levelsController
+	vlog       valueLog
+	vptr       valuePointer // less than or equal to a pointer to the last vlog value put into mt
+	writeCh    chan *request
+	flushChan  chan flushTask // For flushing memtables.
+	logger     *log.Logger
+	loggerFile *os.File
 
 	orc *oracle
 }
@@ -240,6 +242,11 @@ func Open(opt Options) (db *DB, err error) {
 	}
 	orc.readMark.Init()
 
+	logPath := absDir + "/LOG"
+	loggerFile, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return nil, err
+	}
 	db = &DB{
 		imm:           make([]*skl.Skiplist, 0, opt.NumMemtables),
 		flushChan:     make(chan flushTask, opt.NumMemtables),
@@ -250,7 +257,10 @@ func Open(opt Options) (db *DB, err error) {
 		dirLockGuard:  dirLockGuard,
 		valueDirGuard: valueDirLockGuard,
 		orc:           orc,
+		loggerFile:    loggerFile,
+		logger:        log.New(loggerFile, "", log.LstdFlags),
 	}
+	db.logger.Println("open DB")
 
 	// Calculate initial size.
 	db.calculateSize()
@@ -424,6 +434,7 @@ func (db *DB) Close() (err error) {
 	if syncErr := syncDir(db.opt.ValueDir); err == nil {
 		err = errors.Wrap(syncErr, "DB.Close")
 	}
+	db.loggerFile.Close()
 
 	return err
 }
