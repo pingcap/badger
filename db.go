@@ -521,7 +521,7 @@ var requestPool = sync.Pool{
 }
 
 func (db *DB) shouldWriteValueToLSM(e Entry) bool {
-	return len(e.Value) < db.opt.ValueThreshold
+	return len(e.Value) < db.opt.ValueThreshold || (e.meta&bitValuePointer > 0)
 }
 
 func (db *DB) writeToLSM(b *request) error {

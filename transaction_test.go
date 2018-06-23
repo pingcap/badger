@@ -17,6 +17,7 @@
 package badger
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -775,4 +776,54 @@ func TestArmV7Issue311Fix(t *testing.T) {
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestValuePtr(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		key := []byte("abc")
+		newKey := []byte("def")
+		bigValue := bytes.Repeat(key, 100)
+
+		err := db.Update(func(txn *Txn) error {
+			return txn.Set(key, bigValue)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = db.Update(func(txn *Txn) error {
+			item, err := txn.Get(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vPtr := item.ValuePtr()
+			if bytes.Equal(vPtr, bigValue) {
+				t.Fatal(vPtr, bigValue)
+			}
+			return txn.SetValuePtr(newKey, vPtr)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = db.View(func(txn *Txn) error {
+			item, err := txn.Get(newKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			valPtr := item.ValuePtr()
+			val, err := item.Value()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Equal(valPtr, val) {
+				t.Fatal(valPtr, val)
+			}
+			if !bytes.Equal(val, bigValue) {
+				t.Fatal(val, bigValue)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 }

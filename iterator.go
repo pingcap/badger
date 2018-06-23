@@ -189,6 +189,11 @@ func (item *Item) EstimatedSize() int64 {
 	return int64(vp.Len) // includes key length.
 }
 
+// ValuePtr returns the value ptr of the item.
+func (item *Item) ValuePtr() []byte {
+	return y.SafeCopy(nil, item.vptr)
+}
+
 // UserMeta returns the userMeta set by the user. Typically, this byte, optionally set by the user
 // is used to interpret the value.
 func (item *Item) UserMeta() byte {
