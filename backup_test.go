@@ -37,10 +37,11 @@ func TestDumpLoad(t *testing.T) {
 
 	// Write some stuff
 	entries := []struct {
-		key      []byte
-		val      []byte
-		userMeta byte
-		version  uint64
+		key         []byte
+		val         []byte
+		userMeta    byte
+		userVersion uint64
+		version     uint64
 	}{
 		{key: []byte("answer1"), val: []byte("42"), version: 1},
 		{key: []byte("answer2"), val: []byte("43"), userMeta: 1, version: 2},
@@ -103,6 +104,7 @@ func TestDumpLoad(t *testing.T) {
 			require.Equal(t, entries[count].val, val)
 			require.Equal(t, entries[count].version, item.Version())
 			require.Equal(t, entries[count].userMeta, item.UserMeta())
+			require.Equal(t, entries[count].userVersion, item.UserVersion())
 			count++
 		}
 		require.Equal(t, count, 2)

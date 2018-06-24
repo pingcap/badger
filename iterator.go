@@ -34,19 +34,20 @@ const (
 // Item is returned during iteration. Both the Key() and Value() output is only valid until
 // iterator.Next() is called.
 type Item struct {
-	status   prefetchStatus
-	err      error
-	wg       sync.WaitGroup
-	db       *DB
-	key      []byte
-	vptr     []byte
-	meta     byte // We need to store meta to know about bitValuePointer.
-	userMeta byte
-	val      []byte
-	slice    *y.Slice // Used only during prefetching.
-	next     *Item
-	version  uint64
-	txn      *Txn
+	status      prefetchStatus
+	err         error
+	wg          sync.WaitGroup
+	db          *DB
+	key         []byte
+	vptr        []byte
+	meta        byte // We need to store meta to know about bitValuePointer.
+	userMeta    byte
+	userVersion uint64
+	val         []byte
+	slice       *y.Slice // Used only during prefetching.
+	next        *Item
+	version     uint64
+	txn         *Txn
 }
 
 // String returns a string representation of Item
@@ -120,10 +121,6 @@ func (item *Item) IsDeleted() bool {
 	return isDeleted(item.meta)
 }
 
-func (item *Item) DiscardEarlierVersions() bool {
-	return item.meta&bitDiscardEarlierVersions > 0
-}
-
 func (item *Item) yieldItemValue() ([]byte, error) {
 	if !item.hasValue() {
 		return nil, nil
@@ -193,6 +190,11 @@ func (item *Item) EstimatedSize() int64 {
 // is used to interpret the value.
 func (item *Item) UserMeta() byte {
 	return item.userMeta
+}
+
+// UserVersion returns the userVersion set by the user.
+func (item *Item) UserVersion() uint64 {
+	return item.userVersion
 }
 
 // TODO: Switch this to use linked list container in Go.
@@ -360,6 +362,10 @@ func isDeleted(meta byte) bool {
 	return meta&bitDelete > 0
 }
 
+func isPointer(meta byte) bool {
+	return meta&bitValuePointer > 0
+}
+
 // parseItem is a complex function because it needs to handle both forward and reverse iteration
 // implementation. We store keys such that their versions are sorted in descending order. This makes
 // forward iteration efficient, but revese iteration complicated. This tradeoff is better because
@@ -451,6 +457,7 @@ func (it *Iterator) fill(item *Item) {
 	vs := it.iitr.Value()
 	item.meta = vs.Meta
 	item.userMeta = vs.UserMeta
+	item.userVersion = vs.UserVersion
 
 	item.version = y.ParseTs(it.iitr.Key())
 	item.key = y.SafeCopy(item.key, y.ParseKey(it.iitr.Key()))

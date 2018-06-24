@@ -845,63 +845,6 @@ func TestGetSetRace(t *testing.T) {
 	})
 }
 
-func TestDiscardVersionsBelow(t *testing.T) {
-	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-		// Write 4 versions of the same key
-		for i := 0; i < 4; i++ {
-			err := db.Update(func(txn *Txn) error {
-				return txn.Set([]byte("answer"), []byte(fmt.Sprintf("%d", i)))
-			})
-			require.NoError(t, err)
-		}
-
-		opts := DefaultIteratorOptions
-		opts.AllVersions = true
-		opts.PrefetchValues = false
-
-		// Verify that there are 4 versions, and record 3rd version (2nd from top in iteration)
-		db.View(func(txn *Txn) error {
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			var count int
-			for it.Rewind(); it.Valid(); it.Next() {
-				count++
-				item := it.Item()
-				require.Equal(t, []byte("answer"), item.Key())
-				if item.DiscardEarlierVersions() {
-					break
-				}
-			}
-			require.Equal(t, 4, count)
-			return nil
-		})
-
-		// Set new version and discard older ones.
-		err := db.Update(func(txn *Txn) error {
-			return txn.SetWithDiscard([]byte("answer"), []byte("5"), 0)
-		})
-		require.NoError(t, err)
-
-		// Verify that there are only 2 versions left, and versions
-		// below ts have been deleted.
-		db.View(func(txn *Txn) error {
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			var count int
-			for it.Rewind(); it.Valid(); it.Next() {
-				count++
-				item := it.Item()
-				require.Equal(t, []byte("answer"), item.Key())
-				if item.DiscardEarlierVersions() {
-					break
-				}
-			}
-			require.Equal(t, 1, count)
-			return nil
-		})
-	})
-}
-
 func randBytes(n int) []byte {
 	recv := make([]byte, n)
 	in, err := rand.Read(recv)
@@ -1305,6 +1248,74 @@ func TestMinReadTs(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 		require.Equal(t, uint64(20), db.orc.readMark.MinReadTs())
+	})
+}
+
+type testCompactionFilterFactory struct {}
+
+type testCompactionFilter struct {
+}
+
+func (f *testCompactionFilter) Filter(key []byte, userMeta byte, userVersion uint64) bool {
+	if key[0] == 'b' {
+		return true
+	}
+	return false
+}
+
+func (ff *testCompactionFilterFactory) NewCompactionFilter() CompactionFilter  {
+	return new(testCompactionFilter)
+}
+
+func TestCompactionFilter(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+
+	opts := getTestOptions(dir)
+	opts.ValueLogFileSize = 15 << 20
+	opts.CompactionFilterFactory = new(testCompactionFilterFactory)
+	db, err := Open(opts)
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(txn *Txn) error {
+		txn.Set([]byte("abc"), []byte("x"))
+		txn.Set([]byte("bbc"), []byte("x"))
+		txn.Set([]byte("cbc"), []byte("x"))
+		return nil
+	}))
+	db.View(func(txn *Txn) error {
+		// Do nothing, just update minReadTS.
+		return nil
+	})
+	db.Close()
+	db, err = Open(opts)
+	defer db.Close()
+	db.View(func(txn *Txn) error {
+		_, err := txn.Get([]byte("abc"))
+		require.NoError(t, err)
+		_, err = txn.Get([]byte("bbc"))
+		require.Equal(t, err, ErrKeyNotFound)
+		_, err = txn.Get([]byte("cbc"))
+		require.NoError(t, err)
+		return nil
+	})
+}
+
+func TestUserVersion(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		require.NoError(t, db.Update(func(txn *Txn) error {
+			return txn.SetEntry(&Entry{
+				Key:         []byte("x"),
+				Value:       []byte("y"),
+				UserVersion: 100,
+			})
+		}))
+		db.View(func(txn *Txn) error {
+			item, err := txn.Get([]byte("x"))
+			require.NoError(t, err)
+			require.Equal(t, item.UserVersion(), uint64(100))
+			return nil
+		})
 	})
 }
 

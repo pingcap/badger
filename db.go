@@ -383,6 +383,9 @@ func (db *DB) Close() (err error) {
 		thisLevel: db.lc.levels[0],
 		nextLevel: db.lc.levels[1],
 	}
+	if db.opt.CompactionFilterFactory != nil {
+		cd.filter = db.opt.CompactionFilterFactory.NewCompactionFilter()
+	}
 	cd.elog.SetMaxEvents(100)
 	defer cd.elog.Finish()
 	if db.lc.fillTablesL0(&cd) {
@@ -536,17 +539,19 @@ func (db *DB) writeToLSM(b *request) error {
 		if db.shouldWriteValueToLSM(*entry) { // Will include deletion / tombstone case.
 			db.mt.Put(entry.Key,
 				y.ValueStruct{
-					Value:    entry.Value,
-					Meta:     entry.meta,
-					UserMeta: entry.UserMeta,
+					Value:       entry.Value,
+					Meta:        entry.meta,
+					UserMeta:    entry.UserMeta,
+					UserVersion: entry.UserVersion,
 				})
 		} else {
 			var offsetBuf [vptrSize]byte
 			db.mt.Put(entry.Key,
 				y.ValueStruct{
-					Value:    b.Ptrs[i].Encode(offsetBuf[:]),
-					Meta:     entry.meta | bitValuePointer,
-					UserMeta: entry.UserMeta,
+					Value:       b.Ptrs[i].Encode(offsetBuf[:]),
+					Meta:        entry.meta | bitValuePointer,
+					UserMeta:    entry.UserMeta,
+					UserVersion: entry.UserVersion,
 				})
 		}
 	}

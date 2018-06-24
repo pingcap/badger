@@ -284,13 +284,6 @@ func (s *levelsController) compactBuildTables(
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
 	// value log file should be GCed.
 	discardStats := make(map[uint32]int64)
-	updateStats := func(vs y.ValueStruct) {
-		if vs.Meta&bitValuePointer > 0 {
-			var vp valuePointer
-			vp.Decode(vs.Value)
-			discardStats[vp.Fid] += int64(vp.Len)
-		}
-	}
 
 	// Create iterators across all the tables involved first.
 	var iters []y.Iterator
@@ -330,7 +323,7 @@ func (s *levelsController) compactBuildTables(
 			if len(skipKey) > 0 {
 				if y.SameKey(it.Key(), skipKey) {
 					numSkips++
-					updateStats(it.Value())
+					updateStats(discardStats, it.Value())
 					continue
 				} else {
 					skipKey = skipKey[:0]
@@ -349,37 +342,41 @@ func (s *levelsController) compactBuildTables(
 			}
 
 			vs := it.Value()
-			version := y.ParseTs(it.Key())
+			key, version := y.ParseKeyAndTS(it.Key())
 			if version <= minReadTs {
+				remove := isDeleted(vs.Meta) || numVersions > s.kv.opt.NumVersionsToKeep
+				if !remove && cd.filter != nil {
+					remove = cd.filter.Filter(key, vs.UserMeta, vs.UserVersion)
+					if remove {
+						updateStats(discardStats, vs)
+						vs.Meta = bitDelete
+						vs.Value = nil
+					}
+				}
+
 				// Keep track of the number of versions encountered for this key. Only consider the
 				// versions which are below the minReadTs, otherwise, we might end up discarding the
 				// only valid version for a running transaction.
 				numVersions++
-				lastValidVersion := vs.Meta&bitDiscardEarlierVersions > 0
-				if isDeleted(vs.Meta) ||
-					numVersions > s.kv.opt.NumVersionsToKeep ||
-					lastValidVersion {
+				if remove {
 					// If this version of the key is deleted or expired, skip all the rest of the
 					// versions. Ensure that we're only removing versions below readTs.
 					skipKey = y.SafeCopy(skipKey, it.Key())
 
-					if lastValidVersion {
-						// Add this key. We have set skipKey, so the following key versions
-						// would be skipped.
-					} else if hasOverlap {
+					if hasOverlap {
 						// If this key range has overlap with lower levels, then keep the deletion
 						// marker with the latest version, discarding the rest. We have set skipKey,
 						// so the following key versions would be skipped.
 					} else {
 						// If no overlap, we can skip all the versions, by continuing here.
 						numSkips++
-						updateStats(vs)
+						updateStats(discardStats, vs)
 						continue // Skip adding this key.
 					}
 				}
 			}
 			numKeys++
-			y.Check(builder.Add(it.Key(), it.Value()))
+			y.Check(builder.Add(it.Key(), vs))
 		}
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
@@ -447,6 +444,14 @@ func (s *levelsController) compactBuildTables(
 	return newTables, func() error { return decrRefs(newTables) }, nil
 }
 
+func updateStats(discardStats map[uint32]int64, vs y.ValueStruct) {
+	if isPointer(vs.Meta) {
+		var vp valuePointer
+		vp.Decode(vs.Value)
+		discardStats[vp.Fid] += int64(vp.Len)
+	}
+}
+
 func buildChangeSet(cd *compactDef, newTables []*table.Table) protos.ManifestChangeSet {
 	changes := []*protos.ManifestChange{}
 	for _, table := range newTables {
@@ -474,6 +479,7 @@ type compactDef struct {
 	nextRange keyRange
 
 	thisSize int64
+	filter   CompactionFilter
 }
 
 func (cd *compactDef) lockLevels() {
@@ -623,6 +629,10 @@ func (s *levelsController) doCompact(p compactionPriority) (bool, error) {
 		thisLevel: s.levels[l],
 		nextLevel: s.levels[l+1],
 	}
+	if s.kv.opt.CompactionFilterFactory != nil {
+		cd.filter = s.kv.opt.CompactionFilterFactory.NewCompactionFilter()
+	}
+
 	cd.elog.SetMaxEvents(100)
 	defer cd.elog.Finish()
 

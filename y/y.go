@@ -126,7 +126,6 @@ func CompareKeys(key1 []byte, key2 []byte) int {
 	}
 	origKey1Len := len(key1) - 8
 	origkey2Len := len(key2) - 8
-	AssertTrue(origKey1Len > 0 && origkey2Len > 0)
 	return bytes.Compare(key1[:origKey1Len], key2[:origkey2Len])
 }
 
@@ -135,9 +134,12 @@ func ParseKey(key []byte) []byte {
 	if key == nil {
 		return nil
 	}
-
-	AssertTrue(len(key) > 8)
 	return key[:len(key)-8]
+}
+
+// ParseKeyAndTS parses the actual key from the key bytes and the Ts.
+func ParseKeyAndTS(key []byte) ([]byte, uint64) {
+	return key[:len(key)-8],  math.MaxUint64 - binary.BigEndian.Uint64(key[len(key)-8:])
 }
 
 // SameKey checks for key equality ignoring the version timestamp suffix.

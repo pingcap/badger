@@ -83,7 +83,10 @@ type Options struct {
 	// Number of compaction workers to run concurrently.
 	NumCompactors int
 
-	// Transaction start and commit timestamps are manaVgedTxns by end-user. This
+	// CompactionFilterFactory creates a compactionFilter that filter key values.
+	CompactionFilterFactory CompactionFilterFactory
+
+	// Transaction start and commit timestamps are managedTxns by end-user. This
 	// is a private option used by ManagedDB.
 	managedTxns bool
 
@@ -102,6 +105,17 @@ type Options struct {
 
 	// Truncate value log to delete corrupt data, if any. Would not truncate if ReadOnly is set.
 	Truncate bool
+}
+
+// CompactionFilter filters the entry during compaction.
+type CompactionFilter interface {
+	// Filter accepts the key, userMeta and userVersion, returns true if the entry can be removed.
+	Filter(key []byte, userMeta byte, userVersion uint64) (remove bool)
+}
+
+// CompactionFilterFactory creates compaction filters, each compaction creates a new compaction filter to use.
+type CompactionFilterFactory interface {
+	NewCompactionFilter() CompactionFilter
 }
 
 // DefaultOptions sets a list of recommended options for good performance.

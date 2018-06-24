@@ -165,10 +165,11 @@ func (pi *pendingWritesIterator) Value() y.ValueStruct {
 	y.AssertTrue(pi.Valid())
 	entry := pi.entries[pi.nextIdx]
 	return y.ValueStruct{
-		Value:    entry.Value,
-		Meta:     entry.meta,
-		UserMeta: entry.UserMeta,
-		Version:  pi.readTs,
+		Value:       entry.Value,
+		Meta:        entry.meta,
+		UserMeta:    entry.UserMeta,
+		UserVersion: entry.UserVersion,
+		Version:     pi.readTs,
 	}
 }
 
@@ -235,17 +236,6 @@ func (txn *Txn) SetWithMeta(key, val []byte, meta byte) error {
 	return txn.SetEntry(e)
 }
 
-// SetWithDiscard acts like SetWithMeta, but adds a marker to discard earlier versions of the key.
-func (txn *Txn) SetWithDiscard(key, val []byte, meta byte) error {
-	e := &Entry{
-		Key:      key,
-		Value:    val,
-		UserMeta: meta,
-		meta:     bitDiscardEarlierVersions,
-	}
-	return txn.SetEntry(e)
-}
-
 func (txn *Txn) modify(e *Entry) error {
 	if !txn.update {
 		return ErrReadOnlyTxn
@@ -302,6 +292,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 			item.meta = e.meta
 			item.val = e.Value
 			item.userMeta = e.UserMeta
+			item.userVersion = e.UserVersion
 			item.key = key
 			item.status = prefetched
 			item.version = txn.readTs
@@ -326,6 +317,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	item.version = vs.Version
 	item.meta = vs.Meta
 	item.userMeta = vs.UserMeta
+	item.userVersion = vs.UserVersion
 	item.db = txn.db
 	item.vptr = vs.Value
 	item.txn = txn
