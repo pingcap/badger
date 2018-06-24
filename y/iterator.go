@@ -16,42 +16,51 @@
 
 package y
 
+import (
+	"encoding/binary"
+)
+
 // ValueStruct represents the value info that can be associated with a key, but also the internal
 // Meta field.
 type ValueStruct struct {
-	Meta     byte
-	UserMeta byte
-	Value    []byte
+	Meta        byte
+	UserMeta    byte
+	UserVersion uint64
+	Value       []byte
 
 	Version uint64 // This field is not serialized. Only for internal usage.
 }
 
 // EncodedSize is the size of the ValueStruct when encoded
 func (v *ValueStruct) EncodedSize() uint16 {
-	return uint16(len(v.Value) + 2) // meta, usermeta.
+	return uint16(len(v.Value) + 10) // meta, user meta, user version.
 }
 
 // Decode uses the length of the slice to infer the length of the Value field.
 func (v *ValueStruct) Decode(b []byte) {
 	v.Meta = b[0]
 	v.UserMeta = b[1]
-	v.Value = b[2:]
-	// Reset the Version because *ValueStruct may be reused.
-	v.Version = 0
+	v.UserVersion = binary.LittleEndian.Uint64(b[2:])
+	v.Value = b[10:]
 }
 
 // Encode expects a slice of length at least v.EncodedSize().
 func (v *ValueStruct) Encode(b []byte) {
 	b[0] = v.Meta
 	b[1] = v.UserMeta
-	copy(b[2:], v.Value)
+	binary.LittleEndian.PutUint64(b[2:], v.UserVersion)
+	copy(b[10:], v.Value)
 }
 
 // EncodeTo should be kept in sync with the Encode function above. The reason
 // this function exists is to avoid creating byte arrays per key-value pair in
 // table/builder.go.
 func (v *ValueStruct) EncodeTo(buf []byte) []byte {
-	buf = append(buf, v.Meta, v.UserMeta)
+	buf = append(buf, v.Meta)
+	buf = append(buf, v.UserMeta)
+	var verBuf [8]byte
+	binary.LittleEndian.PutUint64(verBuf[:], v.UserVersion)
+	buf = append(buf, verBuf[:]...)
 	buf = append(buf, v.Value...)
 	return buf
 }

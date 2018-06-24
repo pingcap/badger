@@ -1155,6 +1155,24 @@ func TestMinReadTs(t *testing.T) {
 	})
 }
 
+func TestUserVersion(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		require.NoError(t, db.Update(func(txn *Txn) error {
+			return txn.SetEntry(&Entry{
+				Key:         []byte("x"),
+				Value:       []byte("y"),
+				UserVersion: 100,
+			})
+		}))
+		db.View(func(txn *Txn) error {
+			item, err := txn.Get([]byte("x"))
+			require.NoError(t, err)
+			require.Equal(t, item.UserVersion(), uint64(100))
+			return nil
+		})
+	})
+}
+
 func ExampleOpen() {
 	dir, err := ioutil.TempDir("", "badger")
 	if err != nil {

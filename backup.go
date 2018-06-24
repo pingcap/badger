@@ -68,10 +68,11 @@ func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
 			}
 
 			entry := &protos.KVPair{
-				Key:      y.Copy(item.Key()),
-				Value:    y.Copy(val),
-				UserMeta: []byte{item.UserMeta()},
-				Version:  item.Version(),
+				Key:         y.Copy(item.Key()),
+				Value:       y.Copy(val),
+				UserMeta:    []byte{item.UserMeta()},
+				UserVersion: item.userVersion,
+				Version:     item.Version(),
 			}
 
 			// Write entries to disk

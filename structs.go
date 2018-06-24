@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"unsafe"
 
 	"github.com/coocood/badger/y"
 )
@@ -47,38 +48,34 @@ func (p *valuePointer) Decode(b []byte) {
 
 // header is used in value log as a header before Entry.
 type header struct {
-	klen     uint32
-	vlen     uint32
-	meta     byte
-	userMeta byte
+	klen        uint32
+	vlen        uint32
+	userVersion uint64
+	userMeta    byte
+	meta        byte
 }
 
 const (
-	headerBufSize = 10
+	headerBufSize = 18
 )
 
 func (h header) Encode(out []byte) {
 	y.Assert(len(out) >= headerBufSize)
-	binary.BigEndian.PutUint32(out[0:4], h.klen)
-	binary.BigEndian.PutUint32(out[4:8], h.vlen)
-	out[8] = h.meta
-	out[9] = h.userMeta
+	*(*header)(unsafe.Pointer(&out[0])) = h
 }
 
 // Decodes h from buf.
 func (h *header) Decode(buf []byte) {
-	h.klen = binary.BigEndian.Uint32(buf[0:4])
-	h.vlen = binary.BigEndian.Uint32(buf[4:8])
-	h.meta = buf[8]
-	h.userMeta = buf[9]
+	*h = *(*header)(unsafe.Pointer(&buf[0]))
 }
 
 // Entry provides Key, Value, UserMeta. This struct can be used by the user to set data.
 type Entry struct {
-	Key      []byte
-	Value    []byte
-	UserMeta byte
-	meta     byte
+	Key         []byte
+	Value       []byte
+	UserVersion uint64
+	UserMeta    byte
+	meta        byte
 
 	// Fields maintained internally.
 	offset uint32
@@ -86,18 +83,19 @@ type Entry struct {
 
 func (e *Entry) estimateSize(threshold int) int {
 	if len(e.Value) < threshold {
-		return len(e.Key) + len(e.Value) + 2 // Meta, UserMeta
+		return len(e.Key) + len(e.Value) + 10 // Meta, UserMeta, UserVersion
 	}
-	return len(e.Key) + 12 + 2 // 12 for ValuePointer, 2 for metas.
+	return len(e.Key) + 12 + 10 // 12 for ValuePointer, 2 for metas and UserVersion.
 }
 
 // Encodes e to buf. Returns number of bytes written.
 func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 	h := header{
-		klen:     uint32(len(e.Key)),
-		vlen:     uint32(len(e.Value)),
-		meta:     e.meta,
-		userMeta: e.UserMeta,
+		klen:        uint32(len(e.Key)),
+		vlen:        uint32(len(e.Value)),
+		userVersion: e.UserVersion,
+		meta:        e.meta,
+		userMeta:    e.UserMeta,
 	}
 
 	var headerEnc [headerBufSize]byte

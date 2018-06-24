@@ -39,19 +39,20 @@ const (
 // Item is returned during iteration. Both the Key() and Value() output is only valid until
 // iterator.Next() is called.
 type Item struct {
-	status   prefetchStatus
-	err      error
-	wg       sync.WaitGroup
-	db       *DB
-	key      []byte
-	vptr     []byte
-	meta     byte // We need to store meta to know about bitValuePointer.
-	userMeta byte
-	val      []byte
-	slice    *y.Slice
-	next     *Item
-	version  uint64
-	txn      *Txn
+	status      prefetchStatus
+	err         error
+	wg          sync.WaitGroup
+	db          *DB
+	key         []byte
+	vptr        []byte
+	meta        byte // We need to store meta to know about bitValuePointer.
+	userMeta    byte
+	userVersion uint64
+	val         []byte
+	slice       *y.Slice // Used only during prefetching.
+	next        *Item
+	version     uint64
+	txn         *Txn
 }
 
 // String returns a string representation of Item
@@ -201,6 +202,11 @@ func (item *Item) EstimatedSize() int64 {
 // is used to interpret the value.
 func (item *Item) UserMeta() byte {
 	return item.userMeta
+}
+
+// UserVersion returns the userVersion set by the user.
+func (item *Item) UserVersion() uint64 {
+	return item.userVersion
 }
 
 // TODO: Switch this to use linked list container in Go.
@@ -630,6 +636,7 @@ FILL:
 func (it *Iterator) fill(item *Item) {
 	item.meta = it.vs.Meta
 	item.userMeta = it.vs.UserMeta
+	item.userVersion = it.vs.UserVersion
 
 	key := it.iitr.Key()
 	item.version = y.ParseTs(key)
