@@ -276,7 +276,7 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	tables, decr := txn.db.getMemTables()
 	defer decr()
 	txn.db.vlog.incrIteratorCount()
-	var iters []y.Iterator
+	iters := make([]y.Iterator, 0, len(tables)+1)
 	if itr := txn.newPendingWritesIterator(opt.Reverse); itr != nil {
 		iters = append(iters, itr)
 	}
