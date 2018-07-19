@@ -89,7 +89,7 @@ func (item *Item) Value() ([]byte, error) {
 	if item.status == prefetched {
 		return item.val, item.err
 	}
-	return item.yieldItemValue()
+	return item.yieldItemValue(nil)
 }
 
 // ValueCopy returns a copy of the value of the item from the value log, writing it to dst slice.
@@ -103,8 +103,8 @@ func (item *Item) ValueCopy(dst []byte) ([]byte, error) {
 	if item.status == prefetched {
 		return y.SafeCopy(dst, item.val), item.err
 	}
-	buf, err := item.yieldItemValue()
-	return y.SafeCopy(dst, buf), err
+	buf, err := item.yieldItemValue(dst)
+	return buf, err
 }
 
 func (item *Item) hasValue() bool {
@@ -124,19 +124,18 @@ func (item *Item) DiscardEarlierVersions() bool {
 	return item.meta&bitDiscardEarlierVersions > 0
 }
 
-func (item *Item) yieldItemValue() ([]byte, error) {
+func (item *Item) yieldItemValue(dst []byte) ([]byte, error) {
 	if !item.hasValue() {
 		return nil, nil
 	}
 
-	if item.slice == nil {
-		item.slice = new(y.Slice)
+	if (item.meta & bitValuePointer) == 0 {
+		dst = append(dst, item.vptr...)
+		return dst, nil
 	}
 
-	if (item.meta & bitValuePointer) == 0 {
-		val := item.slice.Resize(len(item.vptr))
-		copy(val, item.vptr)
-		return val, nil
+	if item.slice == nil {
+		item.slice = new(y.Slice)
 	}
 
 	var vp valuePointer
@@ -159,11 +158,11 @@ func (item *Item) yieldItemValue() ([]byte, error) {
 	}
 	item.vptr = vs.Value
 	item.meta |= vs.Meta // This meta would only be about value pointer.
-	return item.yieldItemValue()
+	return item.yieldItemValue(nil)
 }
 
 func (item *Item) prefetchValue() {
-	val, err := item.yieldItemValue()
+	val, err := item.yieldItemValue(nil)
 	item.err = err
 	item.status = prefetched
 	if val == nil {
