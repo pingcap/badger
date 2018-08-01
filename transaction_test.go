@@ -248,6 +248,68 @@ func TestTxnVersions(t *testing.T) {
 	})
 }
 
+func TestTxnWriteSkew(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		// Accounts
+		ax := []byte("x")
+		ay := []byte("y")
+
+		// Set balance to $100 in each account.
+		txn := db.NewTransaction(true)
+		defer txn.Discard()
+		val := []byte(strconv.Itoa(100))
+		txn.Set(ax, val)
+		txn.Set(ay, val)
+		require.NoError(t, txn.Commit(nil))
+		require.Equal(t, uint64(1), db.orc.readTs())
+
+		getBal := func(txn *Txn, key []byte) (bal int) {
+			item, err := txn.Get(key)
+			require.NoError(t, err)
+
+			val, err := item.Value()
+			require.NoError(t, err)
+			bal, err = strconv.Atoi(string(val))
+			require.NoError(t, err)
+			return bal
+		}
+
+		// Start two transactions, each would read both accounts and deduct from one account.
+		txn1 := db.NewTransaction(true)
+
+		sum := getBal(txn1, ax)
+		sum += getBal(txn1, ay)
+		require.Equal(t, 200, sum)
+		txn1.Set(ax, []byte("0")) // Deduct 100 from ax.
+
+		// Let's read this back.
+		sum = getBal(txn1, ax)
+		require.Equal(t, 0, sum)
+		sum += getBal(txn1, ay)
+		require.Equal(t, 100, sum)
+		// Don't commit yet.
+
+		txn2 := db.NewTransaction(true)
+
+		sum = getBal(txn2, ax)
+		sum += getBal(txn2, ay)
+		require.Equal(t, 200, sum)
+		txn2.Set(ay, []byte("0")) // Deduct 100 from ay.
+
+		// Let's read this back.
+		sum = getBal(txn2, ax)
+		require.Equal(t, 100, sum)
+		sum += getBal(txn2, ay)
+		require.Equal(t, 100, sum)
+
+		// Commit both now.
+		require.NoError(t, txn1.Commit(nil))
+		require.Error(t, txn2.Commit(nil)) // This should fail.
+
+		require.Equal(t, uint64(2), db.orc.readTs())
+	})
+}
+
 // a3, a2, b4 (del), b3, c2, c1
 // Read at ts=4 -> a3, c2
 // Read at ts=4(Uncomitted) -> a3, b4

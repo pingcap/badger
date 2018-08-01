@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 
 	"github.com/coocood/badger/y"
+	farm "github.com/dgryski/go-farm"
 	"github.com/pkg/errors"
 )
 
@@ -79,9 +80,26 @@ func (o *oracle) commitTs() uint64 {
 	return o.nextCommit
 }
 
+// hasConflict must be called while having a lock.
+func (o *oracle) hasConflict(txn *Txn) bool {
+	if len(txn.reads) == 0 {
+		return false
+	}
+	for _, ro := range txn.reads {
+		if ts, has := o.commits[ro]; has && ts > txn.readTs {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *oracle) newCommitTs(txn *Txn) uint64 {
 	o.Lock()
 	defer o.Unlock()
+
+	if o.hasConflict(txn) {
+		return 0
+	}
 
 	var ts uint64
 	if !o.isManaged {
@@ -94,6 +112,9 @@ func (o *oracle) newCommitTs(txn *Txn) uint64 {
 		ts = txn.commitTs
 	}
 
+	for _, w := range txn.writes {
+		o.commits[w] = ts // Update the commitTs.
+	}
 	return ts
 }
 
@@ -117,7 +138,9 @@ type Txn struct {
 	readTs   uint64
 	commitTs uint64
 
-	update bool // update is used to conditionally keep track of reads.
+	update bool     // update is used to conditionally keep track of reads.
+	reads  []uint64 // contains fingerprints of keys read.
+	writes []uint64 // contains fingerprints of keys written.
 
 	pendingWrites map[string]*Entry // cache stores any writes done by txn.
 
@@ -270,6 +293,8 @@ func (txn *Txn) modify(e *Entry) error {
 		return err
 	}
 
+	fp := farm.Fingerprint64(e.Key) // Avoid dealing with byte arrays.
+	txn.writes = append(txn.writes, fp)
 	txn.pendingWrites[string(e.Key)] = e
 	return nil
 }
@@ -316,6 +341,10 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 			// We probably don't need to set db on item here.
 			return item, nil
 		}
+		// Only track reads if this is update txn. No need to track read if txn serviced it
+		// internally.
+		fp := farm.Fingerprint64(key)
+		txn.reads = append(txn.reads, fp)
 	}
 
 	seek := y.KeyWithTs(key, txn.readTs)
@@ -386,7 +415,7 @@ func (txn *Txn) Commit(callback func(error)) error {
 		return ErrDiscardedTxn
 	}
 	defer txn.Discard()
-	if len(txn.pendingWrites) == 0 {
+	if len(txn.writes) == 0 {
 		return nil // Nothing to do.
 	}
 
