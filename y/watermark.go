@@ -19,8 +19,6 @@ package y
 import (
 	"container/heap"
 	"sync/atomic"
-
-	"golang.org/x/net/trace"
 )
 
 type uint64Heap []uint64
@@ -44,13 +42,11 @@ type mark struct {
 type WaterMark struct {
 	markCh    chan mark
 	minReadTs uint64
-	elog      trace.EventLog
 }
 
 // Init initializes a WaterMark struct. MUST be called before using it.
 func (w *WaterMark) Init() {
 	w.markCh = make(chan mark, 1000)
-	w.elog = trace.NewEventLog("Badger", "MinReadTs")
 	go w.process()
 }
 
@@ -91,11 +87,6 @@ func (w *WaterMark) process() {
 		pending[readTs] = prev + delta
 
 		loop++
-		if len(reads) > 0 && loop%1000 == 0 {
-			min := reads[0]
-			w.elog.Printf("ReadTs: %4d. Size: %4d MinReadTs: %-4d Looking for: %-4d. Value: %d\n",
-				readTs, len(reads), w.MinReadTs(), min, pending[min])
-		}
 
 		// Update mark by going through all reads in order; and checking if they have
 		// been done. Stop at the first readTs, which isn't done.
@@ -118,7 +109,6 @@ func (w *WaterMark) process() {
 		}
 		if until != minReadTs {
 			AssertTrue(atomic.CompareAndSwapUint64(&w.minReadTs, minReadTs, until))
-			w.elog.Printf("MinReadTs: %d. Loops: %d\n", until, loops)
 		}
 	}
 

@@ -23,8 +23,6 @@ import (
 	"math"
 	"sync"
 
-	"golang.org/x/net/trace"
-
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 )
@@ -121,19 +119,6 @@ func (lcs *levelCompactStatus) remove(dst keyRange) bool {
 type compactStatus struct {
 	sync.RWMutex
 	levels []*levelCompactStatus
-}
-
-func (cs *compactStatus) toLog(tr trace.Trace) {
-	cs.RLock()
-	defer cs.RUnlock()
-
-	tr.LazyPrintf("Compaction status:")
-	for i, l := range cs.levels {
-		if len(l.debug()) == 0 {
-			continue
-		}
-		tr.LazyPrintf("[%d] %s", i, l.debug())
-	}
 }
 
 func (cs *compactStatus) overlapsWith(level int, this keyRange) bool {

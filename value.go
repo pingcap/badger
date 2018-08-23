@@ -38,7 +38,6 @@ import (
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 	"github.com/pkg/errors"
-	"golang.org/x/net/trace"
 )
 
 // Values have their first byte being byteData or byteDelete. This helps us distinguish between
@@ -518,7 +517,6 @@ type lfDiscardStats struct {
 type valueLog struct {
 	buf     bytes.Buffer
 	dirPath string
-	elog    trace.EventLog
 
 	// guards our view of which files exist, which to be deleted, how many active iterators
 	filesLock        sync.RWMutex
@@ -641,16 +639,12 @@ func (vlog *valueLog) Open(kv *DB, opt Options) error {
 	if err := vlog.openOrCreateFiles(kv.opt.ReadOnly); err != nil {
 		return errors.Wrapf(err, "Unable to open value log")
 	}
-
-	vlog.elog = trace.NewEventLog("Badger", "Valuelog")
 	vlog.garbageCh = make(chan struct{}, 1) // Only allow one GC at a time.
 	vlog.lfDiscardStats = &lfDiscardStats{m: make(map[uint32]int64)}
 	return nil
 }
 
 func (vlog *valueLog) Close() error {
-	vlog.elog.Printf("Stopping garbage collection of values.")
-	defer vlog.elog.Finish()
 
 	var err error
 	for id, f := range vlog.filesMap {
@@ -695,7 +689,6 @@ func (vlog *valueLog) sortedFids() []uint32 {
 func (vlog *valueLog) Replay(ptr valuePointer, fn logEntry) error {
 	fid := ptr.Fid
 	offset := ptr.Offset + ptr.Len
-	vlog.elog.Printf("Seeking at value pointer: %+v\n", ptr)
 
 	fids := vlog.sortedFids()
 
@@ -779,14 +772,13 @@ func (vlog *valueLog) write(reqs []*request) error {
 		if vlog.buf.Len() == 0 {
 			return nil
 		}
-		vlog.elog.Printf("Flushing %d blocks of total size: %d", len(reqs), vlog.buf.Len())
+		log.Debugf("Flushing %d blocks of total size: %d", len(reqs), vlog.buf.Len())
 		n, err := curlf.fd.Write(vlog.buf.Bytes())
 		if err != nil {
 			return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
 		}
 		y.NumWrites.Add(1)
 		y.NumBytesWritten.Add(int64(n))
-		vlog.elog.Printf("Done")
 		atomic.AddUint32(&vlog.writableLogOffset, uint32(n))
 		vlog.buf.Reset()
 
@@ -900,7 +892,7 @@ func valueBytesToEntry(buf []byte) (e Entry) {
 	return
 }
 
-func (vlog *valueLog) pickLog(head valuePointer, tr trace.Trace) (files []*logFile) {
+func (vlog *valueLog) pickLog(head valuePointer) (files []*logFile) {
 	vlog.filesLock.RLock()
 	defer vlog.filesLock.RUnlock()
 	fids := vlog.sortedFids()
@@ -1062,7 +1054,6 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 			// This is still the active entry. This would need to be rewritten.
 
 		} else {
-			vlog.elog.Printf("Reason=%+v\n", r)
 
 			buf, err := vlog.readValueBytes(vp, s)
 			if err != nil {
@@ -1111,14 +1102,12 @@ func (vlog *valueLog) runGC(discardRatio float64, head valuePointer) error {
 	select {
 	case vlog.garbageCh <- struct{}{}:
 		// Pick a log file for GC.
-		tr := trace.New("Badger.ValueLog", "GC")
 		defer func() {
-			tr.Finish()
 			<-vlog.garbageCh
 		}()
 
 		var err error
-		files := vlog.pickLog(head, tr)
+		files := vlog.pickLog(head)
 		tried := make(map[uint32]bool)
 		for _, lf := range files {
 			if _, done := tried[lf.fid]; done {
