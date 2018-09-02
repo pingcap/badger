@@ -117,9 +117,7 @@ func encodeValue(valOffset uint32, valSize uint16) uint64 {
 }
 
 func decodeValue(value uint64) (valOffset uint32, valSize uint16) {
-	valOffset = uint32(value)
-	valSize = uint16(value >> 32)
-	return
+	return uint32(value), uint16(value >> 32)
 }
 
 // NewSkiplist makes a new empty skiplist, with a given arena size
