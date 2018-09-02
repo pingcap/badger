@@ -132,27 +132,27 @@ func NewSkiplist(arenaSize int64) *Skiplist {
 	}
 }
 
-func (s *node) getValueOffset() (uint32, uint16) {
-	value := atomic.LoadUint64(&s.value)
+func (n *node) getValueOffset() (uint32, uint16) {
+	value := atomic.LoadUint64(&n.value)
 	return decodeValue(value)
 }
 
-func (s *node) key(arena *Arena) []byte {
-	return arena.getKey(s.keyOffset, s.keySize)
+func (n *node) key(arena *Arena) []byte {
+	return arena.getKey(n.keyOffset, n.keySize)
 }
 
-func (s *node) setValue(arena *Arena, v y.ValueStruct) {
+func (n *node) setValue(arena *Arena, v y.ValueStruct) {
 	valOffset := arena.putVal(v)
 	value := encodeValue(valOffset, v.EncodedSize())
-	atomic.StoreUint64(&s.value, value)
+	atomic.StoreUint64(&n.value, value)
 }
 
-func (s *node) getNextOffset(h int) uint32 {
-	return atomic.LoadUint32(&s.tower[h])
+func (n *node) getNextOffset(h int) uint32 {
+	return atomic.LoadUint32(&n.tower[h])
 }
 
-func (s *node) casNextOffset(h int, old, val uint32) bool {
-	return atomic.CompareAndSwapUint32(&s.tower[h], old, val)
+func (n *node) casNextOffset(h int, old, val uint32) bool {
+	return atomic.CompareAndSwapUint32(&n.tower[h], old, val)
 }
 
 // Returns true if key is strictly > n.key.
