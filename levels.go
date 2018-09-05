@@ -254,44 +254,51 @@ func (s *levelsController) pickCompactLevels() (prios []compactionPriority) {
 	return prios
 }
 
+func (s *levelsController) hasOverlapTable(level int, tbls []*table.Table) bool {
+	kr := getKeyRange(tbls)
+	for i, lh := range s.levels {
+		if i <= level { // Skip upper levels.
+			continue
+		}
+		lh.RLock()
+		left, right := lh.overlappingTables(levelHandlerRLocked{}, kr)
+		lh.RUnlock()
+		if right-left > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func collectDiscardStats(discardStats map[uint32]int64, vs y.ValueStruct) {
+	if vs.Meta&bitValuePointer > 0 {
+		var vp valuePointer
+		vp.Decode(vs.Value)
+		discardStats[vp.Fid] += int64(vp.Len)
+	}
+}
+
+type newTableResult struct {
+	table *table.Table
+	err   error
+}
+
 // compactBuildTables merge topTables and botTables to form a list of new tables.
 func (s *levelsController) compactBuildTables(
-	l int, cd compactDef) ([]*table.Table, func() error, error) {
+	level int, cd compactDef) ([]*table.Table, func() error, error) {
 	topTables := cd.top
 	botTables := cd.bot
 
-	var hasOverlap bool
-	{
-		kr := getKeyRange(cd.top)
-		for i, lh := range s.levels {
-			if i <= l { // Skip upper levels.
-				continue
-			}
-			lh.RLock()
-			left, right := lh.overlappingTables(levelHandlerRLocked{}, kr)
-			lh.RUnlock()
-			if right-left > 0 {
-				hasOverlap = true
-				break
-			}
-		}
-		log.Infof("Key range overlaps with lower levels: %v", hasOverlap)
-	}
+	hasOverlap := s.hasOverlapTable(level, cd.top)
+	log.Infof("Key range overlaps with lower levels: %v", hasOverlap)
 
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
 	// value log file should be GCed.
 	discardStats := make(map[uint32]int64)
-	updateStats := func(vs y.ValueStruct) {
-		if vs.Meta&bitValuePointer > 0 {
-			var vp valuePointer
-			vp.Decode(vs.Value)
-			discardStats[vp.Fid] += int64(vp.Len)
-		}
-	}
 
 	// Create iterators across all the tables involved first.
 	var iters []y.Iterator
-	if l == 0 {
+	if level == 0 {
 		iters = appendIteratorsReversed(iters, topTables, false)
 	} else {
 		y.AssertTrue(len(topTables) == 1)
@@ -311,10 +318,6 @@ func (s *levelsController) compactBuildTables(
 	minReadTs := s.kv.orc.readMark.MinReadTs()
 
 	// Start generating new tables.
-	type newTableResult struct {
-		table *table.Table
-		err   error
-	}
 	resultCh := make(chan newTableResult)
 	var numBuilds, numVersions int
 	var lastKey, skipKey []byte
@@ -327,7 +330,7 @@ func (s *levelsController) compactBuildTables(
 			if len(skipKey) > 0 {
 				if y.SameKey(it.Key(), skipKey) {
 					numSkips++
-					updateStats(it.Value())
+					collectDiscardStats(discardStats, it.Value())
 					continue
 				} else {
 					skipKey = skipKey[:0]
@@ -370,7 +373,7 @@ func (s *levelsController) compactBuildTables(
 					} else {
 						// If no overlap, we can skip all the versions, by continuing here.
 						numSkips++
-						updateStats(vs)
+						collectDiscardStats(discardStats, vs)
 						continue // Skip adding this key.
 					}
 				}
