@@ -276,13 +276,13 @@ type DiscardStats struct {
 	numSkips      int64
 }
 
-func collectDiscardStats(stats *DiscardStats, vs y.ValueStruct) {
+func (ds *DiscardStats) collect(vs y.ValueStruct) {
 	if vs.Meta&bitValuePointer > 0 {
 		var vp valuePointer
 		vp.Decode(vs.Value)
-		stats.discardSpaces[vp.Fid] += int64(vp.Len)
+		ds.discardSpaces[vp.Fid] += int64(vp.Len)
 	}
-	stats.numSkips++
+	ds.numSkips++
 }
 
 type newTableResult struct {
@@ -336,7 +336,7 @@ func (s *levelsController) compactBuildTables(
 			// See if we need to skip this key.
 			if len(skipKey) > 0 {
 				if y.SameKey(it.Key(), skipKey) {
-					collectDiscardStats(discardStats, it.Value())
+					discardStats.collect(it.Value())
 					continue
 				} else {
 					skipKey = skipKey[:0]
@@ -378,7 +378,7 @@ func (s *levelsController) compactBuildTables(
 						// so the following key versions would be skipped.
 					} else {
 						// If no overlap, we can skip all the versions, by continuing here.
-						collectDiscardStats(discardStats, vs)
+						discardStats.collect(vs)
 						continue // Skip adding this key.
 					}
 				}
