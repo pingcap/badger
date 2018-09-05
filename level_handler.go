@@ -272,6 +272,7 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 			if version := y.ParseTs(it.Key()); maxVs.Version < version {
 				maxVs = it.Value()
 				maxVs.Version = version
+				break
 			}
 		}
 	}
