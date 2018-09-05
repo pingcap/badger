@@ -270,12 +270,19 @@ func (s *levelsController) hasOverlapTable(level int, tbls []*table.Table) bool 
 	return false
 }
 
-func collectDiscardStats(discardStats map[uint32]int64, vs y.ValueStruct) {
+type DiscardStats struct {
+	// discard spaces for each files
+	discardSpaces map[uint32]int64 // file ID and summary of discard length
+	numSkips      int64
+}
+
+func collectDiscardStats(stats *DiscardStats, vs y.ValueStruct) {
 	if vs.Meta&bitValuePointer > 0 {
 		var vp valuePointer
 		vp.Decode(vs.Value)
-		discardStats[vp.Fid] += int64(vp.Len)
+		stats.discardSpaces[vp.Fid] += int64(vp.Len)
 	}
+	stats.numSkips++
 }
 
 type newTableResult struct {
@@ -294,7 +301,7 @@ func (s *levelsController) compactBuildTables(
 
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
 	// value log file should be GCed.
-	discardStats := make(map[uint32]int64)
+	discardStats := &DiscardStats{discardSpaces: make(map[uint32]int64)}
 
 	// Create iterators across all the tables involved first.
 	var iters []y.Iterator
@@ -324,12 +331,11 @@ func (s *levelsController) compactBuildTables(
 	for it.Valid() {
 		timeStart := time.Now()
 		builder := table.NewTableBuilder(s.kv.opt.MaxTableSize)
-		var numKeys, numSkips uint64
+		var numKeys uint64
 		for ; it.Valid(); it.Next() {
 			// See if we need to skip this key.
 			if len(skipKey) > 0 {
 				if y.SameKey(it.Key(), skipKey) {
-					numSkips++
 					collectDiscardStats(discardStats, it.Value())
 					continue
 				} else {
@@ -372,18 +378,17 @@ func (s *levelsController) compactBuildTables(
 						// so the following key versions would be skipped.
 					} else {
 						// If no overlap, we can skip all the versions, by continuing here.
-						numSkips++
 						collectDiscardStats(discardStats, vs)
 						continue // Skip adding this key.
 					}
 				}
 			}
 			numKeys++
-			y.Check(builder.Add(it.Key(), it.Value()))
+			builder.Add(it.Key(), it.Value())
 		}
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
-		log.Infof("Added %d keys. Skipped %d keys.", numKeys, numSkips)
+		log.Infof("Added %d keys. Skipped %d keys.", numKeys, discardStats.numSkips)
 		log.Infof("LOG Compact. Iteration took: %v\n", time.Since(timeStart))
 		if !builder.Empty() {
 			numBuilds++
@@ -409,7 +414,7 @@ func (s *levelsController) compactBuildTables(
 		}
 	}
 
-	newTables := make([]*table.Table, 0, 20)
+	newTables := make([]*table.Table, 0, numBuilds)
 	// Wait for all table builders to finish.
 	var firstErr error
 	for x := 0; x < numBuilds; x++ {
@@ -442,7 +447,7 @@ func (s *levelsController) compactBuildTables(
 	sort.Slice(newTables, func(i, j int) bool {
 		return y.CompareKeys(newTables[i].Biggest(), newTables[j].Biggest()) < 0
 	})
-	s.kv.vlog.updateGCStats(discardStats)
+	s.kv.vlog.updateGCStats(discardStats.discardSpaces)
 	log.Infof("Discard stats: %v", discardStats)
 	return newTables, func() error { return decrRefs(newTables) }, nil
 }
