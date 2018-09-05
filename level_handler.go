@@ -95,9 +95,19 @@ func (s *levelHandler) deleteTables(toDel []*table.Table) error {
 	}
 	s.tables = newTables
 
+	assertTablesOrder(newTables)
+
 	s.Unlock() // Unlock s _before_ we DecrRef our tables, which can be slow.
 
 	return decrRefs(toDel)
+}
+
+func assertTablesOrder(tables []*table.Table) {
+	for i := 0; i < len(tables)-1; i++ {
+		y.AssertTrue(y.CompareKeys(tables[i].Smallest(), tables[i].Biggest()) <= 0)
+		y.AssertTrue(y.CompareKeys(tables[i].Smallest(), tables[i+1].Smallest()) < 0)
+		y.AssertTrue(y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) < 0)
+	}
 }
 
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
@@ -109,6 +119,9 @@ func (s *levelHandler) replaceTables(newTables []*table.Table) error {
 	if len(newTables) == 0 {
 		return nil
 	}
+
+	assertTablesOrder(newTables)
+	assertTablesOrder(s.tables)
 
 	s.Lock() // We s.Unlock() below.
 
@@ -142,6 +155,7 @@ func (s *levelHandler) replaceTables(newTables []*table.Table) error {
 	t = t[numAdded:]
 	y.AssertTrue(len(s.tables[right:]) == copy(t, s.tables[right:]))
 	s.tables = tables
+	assertTablesOrder(tables)
 	s.Unlock() // s.Unlock before we DecrRef tables -- that can be slow.
 	return decrRefs(toDecr)
 }
