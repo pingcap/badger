@@ -19,13 +19,14 @@ package badger
 import (
 	"encoding/binary"
 	"expvar"
-	"github.com/ngaut/log"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/ngaut/log"
 
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
@@ -67,6 +68,9 @@ type DB struct {
 	vptr      valuePointer // less than or equal to a pointer to the last vlog value put into mt
 	writeCh   chan *request
 	flushChan chan flushTask // For flushing memtables.
+
+	// mem table buffer to avoid expensive allocating big chunk of memory
+	memTableCh chan *skl.Skiplist
 
 	orc *oracle
 }
@@ -241,6 +245,7 @@ func Open(opt Options) (db *DB, err error) {
 		imm:           make([]*skl.Skiplist, 0, opt.NumMemtables),
 		flushChan:     make(chan flushTask, opt.NumMemtables),
 		writeCh:       make(chan *request, kvWriteChCapacity),
+		memTableCh:    make(chan *skl.Skiplist, 1),
 		opt:           opt,
 		manifest:      manifestFile,
 		dirLockGuard:  dirLockGuard,
@@ -248,11 +253,17 @@ func Open(opt Options) (db *DB, err error) {
 		orc:           orc,
 	}
 
+	go func() {
+		for {
+			db.memTableCh <- skl.NewSkiplist(arenaSize(db.opt))
+		}
+	}()
+
 	// Calculate initial size.
 	db.calculateSize()
 	db.closers.updateSize = y.NewCloser(1)
 	go db.updateSize(db.closers.updateSize)
-	db.mt = skl.NewSkiplist(arenaSize(opt))
+	db.mt = <-db.memTableCh
 
 	// newLevelsController potentially loads files in directory.
 	if db.lc, err = newLevelsController(db, &manifest); err != nil {
@@ -572,7 +583,7 @@ func (db *DB) ensureRoomForWrite() error {
 	if db.mt.MemSize() < db.opt.MaxTableSize {
 		return nil
 	}
-	newMemTable := skl.NewSkiplist(arenaSize(db.opt))
+	newMemTable := <-db.memTableCh
 	// Ensure value log is synced to disk so this memtable's contents wouldn't be lost.
 	err := db.vlog.sync()
 	if err != nil {
