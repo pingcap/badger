@@ -63,7 +63,7 @@ func (r keyRange) overlapsWith(dst keyRange) bool {
 }
 
 func getKeyRange(tables []*table.Table) keyRange {
-	y.AssertTrue(len(tables) > 0)
+	y.Assert(len(tables) > 0)
 	smallest := tables[0].Smallest()
 	biggest := tables[0].Biggest()
 	for i := 1; i < len(tables); i++ {

@@ -212,7 +212,7 @@ func (t *Table) readIndex() {
 }
 
 func (t *Table) block(idx int) (block, error) {
-	y.AssertTrue(idx >= 0)
+	y.Assert(idx >= 0)
 	if idx >= len(t.blockEndOffsets) {
 		return block{}, errors.New("block out of index")
 	}
@@ -260,7 +260,7 @@ func ParseFileID(name string) (uint64, bool) {
 	if err != nil {
 		return 0, false
 	}
-	y.AssertTrue(id >= 0)
+	y.Assert(id >= 0)
 	return uint64(id), true
 }
 

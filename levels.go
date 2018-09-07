@@ -72,7 +72,7 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 }
 
 func newLevelsController(kv *DB, mf *Manifest) (*levelsController, error) {
-	y.AssertTrue(kv.opt.NumLevelZeroTablesStall > kv.opt.NumLevelZeroTables)
+	y.Assert(kv.opt.NumLevelZeroTablesStall > kv.opt.NumLevelZeroTables)
 	s := &levelsController{
 		kv:     kv,
 		levels: make([]*levelHandler, kv.opt.MaxLevels),
@@ -308,7 +308,7 @@ func (s *levelsController) compactBuildTables(
 	if level == 0 {
 		iters = appendIteratorsReversed(iters, topTables, false)
 	} else {
-		y.AssertTrue(len(topTables) == 1)
+		y.Assert(len(topTables) == 1)
 		iters = []y.Iterator{topTables[0].NewIterator(false)}
 	}
 
@@ -619,7 +619,7 @@ func (s *levelsController) runCompactDef(l int, cd compactDef) (err error) {
 // doCompact picks some table on level l and compacts it away to the next level.
 func (s *levelsController) doCompact(p compactionPriority) (bool, error) {
 	l := p.level
-	y.AssertTrue(l+1 < s.kv.opt.MaxLevels) // Sanity check.
+	y.Assert(l+1 < s.kv.opt.MaxLevels) // Sanity check.
 
 	cd := compactDef{
 		thisLevel: s.levels[l],

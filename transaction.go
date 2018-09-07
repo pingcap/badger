@@ -179,13 +179,13 @@ func (pi *pendingWritesIterator) Seek(key []byte) {
 }
 
 func (pi *pendingWritesIterator) Key() []byte {
-	y.AssertTrue(pi.Valid())
+	y.Assert(pi.Valid())
 	entry := pi.entries[pi.nextIdx]
 	return y.KeyWithTs(entry.Key, pi.readTs)
 }
 
 func (pi *pendingWritesIterator) Value() y.ValueStruct {
-	y.AssertTrue(pi.Valid())
+	y.Assert(pi.Valid())
 	entry := pi.entries[pi.nextIdx]
 	return y.ValueStruct{
 		Value:    entry.Value,

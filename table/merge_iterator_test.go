@@ -88,7 +88,7 @@ func (s *SimpleIterator) Valid() bool {
 func newSimpleIterator(keys []string, vals []string, reversed bool) *SimpleIterator {
 	k := make([][]byte, len(keys))
 	v := make([][]byte, len(vals))
-	y.AssertTrue(len(keys) == len(vals))
+	y.Assert(len(keys) == len(vals))
 	for i := 0; i < len(keys); i++ {
 		k[i] = y.KeyWithTs([]byte(keys[i]), 0)
 		v[i] = []byte(vals[i])

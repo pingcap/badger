@@ -298,7 +298,7 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 	wb := make([]*Entry, 0, 1000)
 	var size int64
 
-	y.AssertTrue(vlog.kv != nil)
+	y.Assert(vlog.kv != nil)
 	var count, moved int
 	fe := func(e Entry) error {
 		count++
@@ -1000,7 +1000,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 
 	var r reason
 	start := time.Now()
-	y.AssertTrue(vlog.kv != nil)
+	y.Assert(vlog.kv != nil)
 	s := new(y.Slice)
 	var numIterations int
 	err = vlog.iterate(lf, 0, func(e Entry, vp valuePointer) error {
@@ -1037,7 +1037,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 		}
 
 		// Value is still present in value log.
-		y.AssertTrue(len(vs.Value) > 0)
+		y.Assert(len(vs.Value) > 0)
 		vp.Decode(vs.Value)
 
 		if vp.Fid > lf.fid {

@@ -131,8 +131,8 @@ func replayFunction(out *DB) func(Entry, valuePointer) error {
 			if err != nil {
 				return errors.Wrapf(err, "Unable to parse txn fin: %q", e.Value)
 			}
-			y.AssertTrue(lastCommit == txnTs)
-			y.AssertTrue(len(txn) > 0)
+			y.Assert(lastCommit == txnTs)
+			y.Assert(len(txn) > 0)
 			// Got the end of txn. Now we can store them.
 			for _, t := range txn {
 				toLSM(t.nk, t.v)
@@ -145,15 +145,15 @@ func replayFunction(out *DB) func(Entry, valuePointer) error {
 			toLSM(nk, v)
 
 			// We shouldn't get this entry in the middle of a transaction.
-			y.AssertTrue(lastCommit == 0)
-			y.AssertTrue(len(txn) == 0)
+			y.Assert(lastCommit == 0)
+			y.Assert(len(txn) == 0)
 
 		} else {
 			txnTs := y.ParseTs(nk)
 			if lastCommit == 0 {
 				lastCommit = txnTs
 			}
-			y.AssertTrue(lastCommit == txnTs)
+			y.Assert(lastCommit == txnTs)
 			te := txnEntry{nk: nk, v: v}
 			txn = append(txn, te)
 		}
@@ -350,7 +350,7 @@ func (db *DB) Close() (err error) {
 			pushedFlushTask := func() bool {
 				db.Lock()
 				defer db.Unlock()
-				y.AssertTrue(db.mt != nil)
+				y.Assert(db.mt != nil)
 				select {
 				case db.flushChan <- flushTask{db.mt, db.vptr}:
 					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
@@ -509,7 +509,7 @@ func (db *DB) updateOffset(ptrs []valuePointer) {
 
 	db.Lock()
 	defer db.Unlock()
-	y.AssertTrue(!ptr.Less(db.vptr))
+	y.Assert(!ptr.Less(db.vptr))
 	db.vptr = ptr
 }
 
@@ -703,7 +703,7 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 
 		// Update s.imm. Need a lock.
 		db.Lock()
-		y.AssertTrue(ft.mt == db.imm[0]) //For now, single threaded.
+		y.Assert(ft.mt == db.imm[0]) //For now, single threaded.
 		db.imm = db.imm[1:]
 		ft.mt.DecrRef() // Return memory.
 		db.Unlock()

@@ -161,7 +161,7 @@ func (n *node) casNextOffset(h int, old, val uint32) bool {
 // Returns true if key is strictly > n.key.
 // If n is nil, this is an "end" marker and we return false.
 //func (s *Skiplist) keyIsAfterNode(key []byte, n *node) bool {
-//	y.AssertTrue(n != s.head)
+//	y.Assert(n != s.head)
 //	return n != nil && y.CompareKeys(key, n.key) > 0
 //}
 
@@ -318,13 +318,13 @@ func (s *Skiplist) Put(key []byte, v y.ValueStruct) {
 	for i := 0; i < height; i++ {
 		for {
 			if prev[i] == nil {
-				y.AssertTrue(i > 1) // This cannot happen in base level.
+				y.Assert(i > 1) // This cannot happen in base level.
 				// We haven't computed prev, next for this level because height exceeds old listHeight.
 				// For these levels, we expect the lists to be sparse, so we can just search from head.
 				prev[i], next[i] = s.findSpliceForLevel(key, s.head, i)
 				// Someone adds the exact same key before we are able to do so. This can only happen on
 				// the base level. But we know we are not on the base level.
-				y.AssertTrue(prev[i] != next[i])
+				y.Assert(prev[i] != next[i])
 			}
 			nextOffset := s.arena.getNodeOffset(next[i])
 			x.tower[i] = nextOffset
@@ -337,7 +337,7 @@ func (s *Skiplist) Put(key []byte, v y.ValueStruct) {
 			// because it is unlikely that lots of nodes are inserted between prev[i] and next[i].
 			prev[i], next[i] = s.findSpliceForLevel(key, prev[i], i)
 			if prev[i] == next[i] {
-				y.AssertTrue(i == 0)
+				y.Assert(i == 0)
 				prev[i].setValue(s.arena, v)
 				return
 			}
@@ -435,13 +435,13 @@ func (s *Iterator) FillValue(vs *y.ValueStruct) {
 
 // Next advances to the next position.
 func (s *Iterator) Next() {
-	y.AssertTrue(s.Valid())
+	y.Assert(s.Valid())
 	s.n = s.list.getNext(s.n, 0)
 }
 
 // Prev advances to the previous position.
 func (s *Iterator) Prev() {
-	y.AssertTrue(s.Valid())
+	y.Assert(s.Valid())
 	s.n, _ = s.list.findNear(s.Key(), true, false) // find <. No equality allowed.
 }
 

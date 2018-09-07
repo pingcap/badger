@@ -104,9 +104,9 @@ func (s *levelHandler) deleteTables(toDel []*table.Table) error {
 
 func assertTablesOrder(tables []*table.Table) {
 	for i := 0; i < len(tables)-1; i++ {
-		y.AssertTrue(y.CompareKeys(tables[i].Smallest(), tables[i].Biggest()) <= 0)
-		y.AssertTrue(y.CompareKeys(tables[i].Smallest(), tables[i+1].Smallest()) < 0)
-		y.AssertTrue(y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) < 0)
+		y.Assert(y.CompareKeys(tables[i].Smallest(), tables[i].Biggest()) <= 0)
+		y.Assert(y.CompareKeys(tables[i].Smallest(), tables[i+1].Smallest()) < 0)
+		y.Assert(y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) < 0)
 	}
 }
 
@@ -149,11 +149,11 @@ func (s *levelHandler) replaceTables(newTables []*table.Table) error {
 	numDeleted := right - left
 	numAdded := len(newTables)
 	tables := make([]*table.Table, len(s.tables)-numDeleted+numAdded)
-	y.AssertTrue(left == copy(tables, s.tables[:left]))
+	y.Assert(left == copy(tables, s.tables[:left]))
 	t := tables[left:]
-	y.AssertTrue(numAdded == copy(t, newTables))
+	y.Assert(numAdded == copy(t, newTables))
 	t = t[numAdded:]
-	y.AssertTrue(len(s.tables[right:]) == copy(t, s.tables[right:]))
+	y.Assert(len(s.tables[right:]) == copy(t, s.tables[right:]))
 	s.tables = tables
 	assertTablesOrder(tables)
 	s.Unlock() // s.Unlock before we DecrRef tables -- that can be slow.
@@ -179,7 +179,7 @@ func newLevelHandler(db *DB, level int) *levelHandler {
 
 // tryAddLevel0Table returns true if ok and no stalling.
 func (s *levelHandler) tryAddLevel0Table(t *table.Table) bool {
-	y.AssertTrue(s.level == 0)
+	y.Assert(s.level == 0)
 	// Need lock as we may be deleting the first table during a level 0 compaction.
 	s.Lock()
 	defer s.Unlock()

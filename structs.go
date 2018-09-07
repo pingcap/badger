@@ -58,7 +58,7 @@ const (
 )
 
 func (h header) Encode(out []byte) {
-	y.AssertTrue(len(out) >= headerBufSize)
+	y.Assert(len(out) >= headerBufSize)
 	binary.BigEndian.PutUint32(out[0:4], h.klen)
 	binary.BigEndian.PutUint32(out[4:8], h.vlen)
 	out[8] = h.meta

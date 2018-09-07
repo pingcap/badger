@@ -33,7 +33,7 @@ func key(prefix string, i int) string {
 }
 
 func buildTestTable(t *testing.T, prefix string, n int) *os.File {
-	y.AssertTrue(n <= 10000)
+	y.Assert(n <= 10000)
 	keyValues := make([][]string, n)
 	for i := 0; i < n; i++ {
 		k := key(prefix, i)
@@ -61,7 +61,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 		return keyValues[i][0] < keyValues[j][0]
 	})
 	for _, kv := range keyValues {
-		y.AssertTrue(len(kv) == 2)
+		y.Assert(len(kv) == 2)
 		err := b.Add(y.KeyWithTs([]byte(kv[0]), 0), y.ValueStruct{Value: []byte(kv[1]), Meta: 'A', UserMeta: 0})
 		if t != nil {
 			require.NoError(t, err)
@@ -690,7 +690,7 @@ func BenchmarkReadAndBuild(b *testing.B) {
 func BenchmarkReadMerged(b *testing.B) {
 	n := 5 << 20
 	m := 5 // Number of tables.
-	y.AssertTrue((n % m) == 0)
+	y.Assert((n % m) == 0)
 	tableSize := n / m
 	var tables []*Table
 	for i := 0; i < m; i++ {

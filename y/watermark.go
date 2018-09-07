@@ -108,7 +108,7 @@ func (w *WaterMark) process() {
 			loops++
 		}
 		if until != minReadTs {
-			AssertTrue(atomic.CompareAndSwapUint64(&w.minReadTs, minReadTs, until))
+			Assert(atomic.CompareAndSwapUint64(&w.minReadTs, minReadTs, until))
 		}
 	}
 
