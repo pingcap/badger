@@ -30,8 +30,9 @@ type blockIterator struct {
 	err     error
 	baseKey []byte
 
-	key []byte
-	val []byte
+	key    []byte
+	val    []byte
+	keyBuf [256]byte
 
 	keyPrefixLen    uint16
 	entryEndOffsets []uint32
@@ -42,7 +43,7 @@ func (itr *blockIterator) setBlock(b block) {
 	itr.idx = 0
 	itr.baseKey = itr.baseKey[:0]
 	itr.keyPrefixLen = 0
-	itr.key = itr.key[:0]
+	itr.key = itr.keyBuf[:0]
 	itr.val = itr.val[:0]
 	itr.data = b.data
 	itr.loadEntryEndOffsets()

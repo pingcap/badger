@@ -382,8 +382,13 @@ type Iterator struct {
 func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	atomic.AddInt32(&txn.numIterators, 1)
 
-	tables, decr := txn.db.getMemTables()
-	defer decr()
+	tables := txn.db.getMemTables()
+	defer func() {
+		for _, tbl := range tables {
+			tbl.DecrRef()
+		}
+	}()
+
 	txn.db.vlog.incrIteratorCount()
 	var iters []y.Iterator
 	if itr := txn.newPendingWritesIterator(opt.Reverse); opt.OverlapPending(itr) {

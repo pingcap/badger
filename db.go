@@ -449,7 +449,7 @@ func syncDir(dir string) error {
 }
 
 // getMemtables returns the current memtables and get references.
-func (db *DB) getMemTables() ([]*skl.Skiplist, func()) {
+func (db *DB) getMemTables() []*skl.Skiplist {
 	tables := make([]*skl.Skiplist, 1, 8)
 	db.RLock()
 	defer db.RUnlock()
@@ -464,11 +464,7 @@ func (db *DB) getMemTables() ([]*skl.Skiplist, func()) {
 		immt.IncrRef()
 		tables = append(tables, immt)
 	}
-	return tables, func() {
-		for _, tbl := range tables {
-			tbl.DecrRef()
-		}
-	}
+	return tables
 }
 
 // get returns the value in memtable or disk for given key.
@@ -480,8 +476,12 @@ func (db *DB) getMemTables() ([]*skl.Skiplist, func()) {
 // that all versions of a key are always present in the same table from level 1, because compaction
 // can push any table down.
 func (db *DB) get(key []byte) (y.ValueStruct, error) {
-	tables, decr := db.getMemTables() // Lock should be released.
-	defer decr()
+	tables := db.getMemTables() // Lock should be released.
+	defer func() {
+		for _, tbl := range tables {
+			tbl.DecrRef()
+		}
+	}()
 
 	y.NumGets.Add(1)
 	for i := 0; i < len(tables); i++ {
@@ -508,9 +508,9 @@ func (db *DB) updateOffset(ptrs []valuePointer) {
 	}
 
 	db.Lock()
-	defer db.Unlock()
 	y.Assert(!ptr.Less(db.vptr))
 	db.vptr = ptr
+	db.Unlock()
 }
 
 var requestPool = sync.Pool{

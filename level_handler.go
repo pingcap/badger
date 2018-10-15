@@ -104,9 +104,19 @@ func (s *levelHandler) deleteTables(toDel []*table.Table) error {
 
 func assertTablesOrder(tables []*table.Table) {
 	for i := 0; i < len(tables)-1; i++ {
-		y.Assert(y.CompareKeys(tables[i].Smallest(), tables[i].Biggest()) <= 0)
-		y.Assert(y.CompareKeys(tables[i].Smallest(), tables[i+1].Smallest()) < 0)
-		y.Assert(y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) < 0)
+		y.AssertTruef(y.CompareKeys(tables[i].Smallest(), tables[i].Biggest()) <= 0,
+			"tables[i].Smallest() %v, tables[i].Biggest() %v",
+			tables[i].Smallest(),
+			tables[i].Biggest())
+
+		y.AssertTruef(y.CompareKeys(tables[i].Smallest(), tables[i+1].Smallest()) < 0,
+			"tables[i].Smallest() :%v, tables[i+1].Smallest():%v",
+			tables[i].Smallest(),
+			tables[i+1].Smallest())
+
+		y.AssertTruef(y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) < 0,
+			"y.CompareKeys(tables[i].Biggest() %v, tables[i+1].Biggest() %v",
+			tables[i].Biggest(), tables[i+1].Biggest())
 	}
 }
 
@@ -213,9 +223,9 @@ func (s *levelHandler) close() error {
 }
 
 // getTableForKey acquires a read-lock to access s.tables. It returns a list of tableHandlers.
-func (s *levelHandler) getTableForKey(key []byte) ([]*table.Table, func() error) {
+func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 	s.RLock()
-	defer s.RUnlock()
+	//	defer s.RUnlock()
 
 	if s.level == 0 {
 		// For level 0, we need to check every table. Remember to make a copy as s.tables may change
@@ -226,14 +236,8 @@ func (s *levelHandler) getTableForKey(key []byte) ([]*table.Table, func() error)
 			out = append(out, s.tables[i])
 			s.tables[i].IncrRef()
 		}
-		return out, func() error {
-			for _, t := range out {
-				if err := t.DecrRef(); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
+		s.RUnlock()
+		return out
 	}
 	// For level >= 1, we can do a binary search as key range does not overlap.
 	idx := sort.Search(len(s.tables), func(i int) bool {
@@ -241,29 +245,39 @@ func (s *levelHandler) getTableForKey(key []byte) ([]*table.Table, func() error)
 	})
 	if idx >= len(s.tables) {
 		// Given key is strictly > than every element we have.
-		return nil, func() error { return nil }
+		s.RUnlock()
+		return nil
 	}
 	tbl := s.tables[idx]
 	tbl.IncrRef()
-	return []*table.Table{tbl}, tbl.DecrRef
+	s.RUnlock()
+	return []*table.Table{tbl}
 }
 
 // get returns value for a given key or the key after that. If not found, return nil.
 func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
-	tables, decr := s.getTableForKey(key)
+	tables := s.getTableForKey(key)
+	defer func() {
+		for _, t := range tables {
+			if err := t.DecrRef(); err != nil {
+				panic(err)
+			}
+		}
+	}()
+
 	keyNoTs := y.ParseKey(key)
 
 	var maxVs y.ValueStruct
 	for _, th := range tables {
 		if th.DoesNotHave(keyNoTs) {
-			y.NumLSMBloomHits.Add(s.strLevel, 1)
+			//y.NumLSMBloomHits.Add(s.strLevel, 1)
 			continue
 		}
 
 		it := th.NewIterator(false)
 		defer it.Close()
 
-		y.NumLSMGets.Add(s.strLevel, 1)
+		//y.NumLSMGets.Add(s.strLevel, 1)
 		it.Seek(key)
 		if !it.Valid() {
 			continue
@@ -277,7 +291,7 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 		}
 	}
 	maxVs.Value = y.SafeCopy(nil, maxVs.Value)
-	return maxVs, decr()
+	return maxVs, nil
 }
 
 // appendIterators appends iterators to an array of iterators, for merging.
