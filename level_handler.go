@@ -225,7 +225,7 @@ func (s *levelHandler) close() error {
 // getTableForKey acquires a read-lock to access s.tables. It returns a list of tableHandlers.
 func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 	s.RLock()
-	//	defer s.RUnlock()
+	defer s.RUnlock()
 
 	if s.level == 0 {
 		// For level 0, we need to check every table. Remember to make a copy as s.tables may change
@@ -236,7 +236,7 @@ func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 			out = append(out, s.tables[i])
 			s.tables[i].IncrRef()
 		}
-		s.RUnlock()
+
 		return out
 	}
 	// For level >= 1, we can do a binary search as key range does not overlap.
@@ -245,12 +245,10 @@ func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 	})
 	if idx >= len(s.tables) {
 		// Given key is strictly > than every element we have.
-		s.RUnlock()
 		return nil
 	}
 	tbl := s.tables[idx]
 	tbl.IncrRef()
-	s.RUnlock()
 	return []*table.Table{tbl}
 }
 
@@ -270,14 +268,12 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 	var maxVs y.ValueStruct
 	for _, th := range tables {
 		if th.DoesNotHave(keyNoTs) {
-			//y.NumLSMBloomHits.Add(s.strLevel, 1)
 			continue
 		}
 
 		it := th.NewIterator(false)
 		defer it.Close()
 
-		//y.NumLSMGets.Add(s.strLevel, 1)
 		it.Seek(key)
 		if !it.Valid() {
 			continue
