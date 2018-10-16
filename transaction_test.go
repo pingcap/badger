@@ -51,8 +51,8 @@ func TestTxnSimple(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []byte("val=8"), val)
 
-		require.Equal(t, ErrManagedTxn, txn.CommitAt(100, nil))
-		require.NoError(t, txn.Commit(nil))
+		require.Equal(t, ErrManagedTxn, txn.CommitAt(100))
+		require.NoError(t, txn.Commit())
 	})
 }
 
@@ -95,7 +95,7 @@ func TestTxnCommitAsync(t *testing.T) {
 			err := txn.Set(key(i), []byte(strconv.Itoa(100)))
 			require.NoError(t, err)
 		}
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		txn.Discard()
 
 		var done uint64
@@ -133,7 +133,7 @@ func TestTxnCommitAsync(t *testing.T) {
 					require.NoError(t, err)
 				}
 				// We are only doing writes, so there won't be any conflicts.
-				require.NoError(t, txn.Commit(func(err error) {}))
+				require.NoError(t, txn.Commit())
 				txn.Discard()
 				wg.Done()
 			}()
@@ -151,7 +151,7 @@ func TestTxnVersions(t *testing.T) {
 			txn := db.NewTransaction(true)
 
 			txn.Set(k, []byte(fmt.Sprintf("valversion=%d", i)))
-			require.NoError(t, txn.Commit(nil))
+			require.NoError(t, txn.Commit())
 			require.Equal(t, uint64(i), db.orc.readTs())
 		}
 
@@ -260,7 +260,7 @@ func TestTxnWriteSkew(t *testing.T) {
 		val := []byte(strconv.Itoa(100))
 		txn.Set(ax, val)
 		txn.Set(ay, val)
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(1), db.orc.readTs())
 
 		getBal := func(txn *Txn, key []byte) (bal int) {
@@ -303,8 +303,8 @@ func TestTxnWriteSkew(t *testing.T) {
 		require.Equal(t, 100, sum)
 
 		// Commit both now.
-		require.NoError(t, txn1.Commit(nil))
-		require.Error(t, txn2.Commit(nil)) // This should fail.
+		require.NoError(t, txn1.Commit())
+		require.Error(t, txn2.Commit()) // This should fail.
 
 		require.Equal(t, uint64(2), db.orc.readTs())
 	})
@@ -325,21 +325,21 @@ func TestTxnIterationEdgeCase(t *testing.T) {
 		// c1
 		txn := db.NewTransaction(true)
 		txn.Set(kc, []byte("c1"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(1), db.orc.readTs())
 
 		// a2, c2
 		txn = db.NewTransaction(true)
 		txn.Set(ka, []byte("a2"))
 		txn.Set(kc, []byte("c2"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(2), db.orc.readTs())
 
 		// b3
 		txn = db.NewTransaction(true)
 		txn.Set(ka, []byte("a3"))
 		txn.Set(kb, []byte("b3"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(3), db.orc.readTs())
 
 		// b4, c4(del) (Uncomitted)
@@ -351,7 +351,7 @@ func TestTxnIterationEdgeCase(t *testing.T) {
 		// b4 (del)
 		txn = db.NewTransaction(true)
 		txn.Delete(kb)
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(4), db.orc.readTs())
 
 		checkIterator := func(itr *Iterator, expected []string) {
@@ -415,27 +415,27 @@ func TestTxnIterationEdgeCase2(t *testing.T) {
 		// c1
 		txn := db.NewTransaction(true)
 		txn.Set(kc, []byte("c1"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(1), db.orc.readTs())
 
 		// a2, c2
 		txn = db.NewTransaction(true)
 		txn.Set(ka, []byte("a2"))
 		txn.Set(kc, []byte("c2"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(2), db.orc.readTs())
 
 		// b3
 		txn = db.NewTransaction(true)
 		txn.Set(ka, []byte("a3"))
 		txn.Set(kb, []byte("b3"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(3), db.orc.readTs())
 
 		// b4 (del)
 		txn = db.NewTransaction(true)
 		txn.Delete(kb)
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(4), db.orc.readTs())
 
 		checkIterator := func(itr *Iterator, expected []string) {
@@ -508,13 +508,13 @@ func TestTxnIterationEdgeCase3(t *testing.T) {
 		// c1
 		txn := db.NewTransaction(true)
 		txn.Set(kc, []byte("c1"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(1), db.orc.readTs())
 
 		// b2
 		txn = db.NewTransaction(true)
 		txn.Set(kb, []byte("b2"))
-		require.NoError(t, txn.Commit(nil))
+		require.NoError(t, txn.Commit())
 		require.Equal(t, uint64(2), db.orc.readTs())
 
 		txn2 := db.NewTransaction(true)
@@ -735,8 +735,8 @@ func TestManagedDB(t *testing.T) {
 	for i := 0; i <= 3; i++ {
 		require.NoError(t, txn.Set(key(i), val(i)))
 	}
-	require.Equal(t, ErrManagedTxn, txn.Commit(nil))
-	require.NoError(t, txn.CommitAt(3, nil))
+	require.Equal(t, ErrManagedTxn, txn.Commit())
+	require.NoError(t, txn.CommitAt(3))
 
 	// Read data at t=2.
 	txn = kv.NewTransactionAt(2, false)
@@ -767,7 +767,7 @@ func TestManagedDB(t *testing.T) {
 		}
 		require.NoError(t, txn.Set(key(i), val(i)))
 	}
-	require.NoError(t, txn.CommitAt(7, nil))
+	require.NoError(t, txn.CommitAt(7))
 
 	// Read data at t=9.
 	txn = kv.NewTransactionAt(9, false)
