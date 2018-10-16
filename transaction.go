@@ -442,8 +442,8 @@ func (txn *Txn) Commit() error {
 		return err
 	}
 
-	defer state.doneCommit(commitTs)
 	req.Wait()
+	state.doneCommit(commitTs)
 
 	return nil
 }
