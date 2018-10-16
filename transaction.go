@@ -486,7 +486,7 @@ func (txn *Txn) Commit(callback func(error)) error {
 //  defer txn.Discard()
 //  // Call various APIs.
 func (db *DB) NewTransaction(update bool) *Txn {
-	if db.opt.ReadOnly && update {
+	if db.opt.ReadOnly {
 		// DB is read-only, force read-only transaction.
 		update = false
 	}
