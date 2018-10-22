@@ -21,9 +21,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,42 +146,6 @@ func TestConcurrentBasic(t *testing.T) {
 	}
 	wg.Wait()
 	require.EqualValues(t, n, length(l))
-}
-
-// TestOneKey will read while writing to one single key.
-func TestOneKey(t *testing.T) {
-	const n = 100
-	key := y.KeyWithTs([]byte("thekey"), 0)
-	l := NewSkiplist(arenaSize)
-	defer l.DecrRef()
-
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			l.Put(key, y.ValueStruct{Value: newValue(i), Meta: 0, UserMeta: 0})
-		}(i)
-	}
-	// We expect that at least some write made it such that some read returns a value.
-	var sawValue int32
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			p := l.Get(key)
-			if p.Value == nil {
-				return
-			}
-			atomic.StoreInt32(&sawValue, 1)
-			v, err := strconv.Atoi(string(p.Value))
-			require.NoError(t, err)
-			require.True(t, 0 <= v && v < n)
-		}()
-	}
-	wg.Wait()
-	require.True(t, sawValue > 0)
-	require.EqualValues(t, 1, length(l))
 }
 
 func TestFindNear(t *testing.T) {
