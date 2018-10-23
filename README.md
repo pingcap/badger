@@ -30,7 +30,6 @@ version.
       - [Managing transactions manually](#managing-transactions-manually)
     + [Using key/value pairs](#using-keyvalue-pairs)
     + [Monotonically increasing integers](#monotonically-increasing-integers)
-    + [Setting Time To Live(TTL) and User Metadata on Keys](#setting-time-to-livettl-and-user-metadata-on-keys)
     + [Iterating over keys](#iterating-over-keys)
       - [Prefix scans](#prefix-scans)
       - [Key-only iteration](#key-only-iteration)
@@ -258,20 +257,6 @@ for {
 ```
 
 
-### Setting Time To Live(TTL) and User Metadata on Keys
-Badger allows setting an optional Time to Live (TTL) value on keys. Once the TTL has
-elapsed, the key will no longer be retrievable and will be eligible for garbage
-collection. A TTL can be set as a `time.Duration` value using the `Txn.SetWithTTL()`
-API method.
-
-An optional user metadata value can be set on each key. A user metadata value
-is represented by a single byte. It can be used to set certain bits along
-with the key to aid in interpreting or decoding the key-value pair. User
-metadata can be set using the `Txn.SetWithMeta()` API method.
-
-`Txn.SetEntry()` can be used to set the key, value, user metatadata and TTL,
-all at once.
-
 ### Iterating over keys
 To iterate over keys, we can use an `Iterator`, which can be obtained using the
 `Txn.NewIterator()` method. Iteration happens in byte-wise lexicographical sorting
@@ -477,7 +462,7 @@ Values in SSD-conscious Storage][wisckey]_.
 | Pure Go (no Cgo)    | Yes                                          | No                            | Yes       |
 | Transactions        | Yes, ACID, concurrent with SSI<sup>3</sup> | Yes (but non-ACID)            | Yes, ACID |
 | Snapshots           | Yes                                           | Yes                           | Yes       |
-| TTL support         | Yes                                           | Yes                           | No       |
+| TTL support         | No                                           | Yes                           | No       |
 
 <sup>1</sup> The [WISCKEY paper][wisckey] (on which Badger is based) saw big
 wins with separating values from keys, significantly reducing the write
