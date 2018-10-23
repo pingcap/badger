@@ -99,15 +99,17 @@ func (itr *blockIterator) setIdx(i int) {
 	if i > 0 {
 		startOffset = int(itr.entryEndOffsets[i-1])
 	}
-	endOffset := int(itr.entryEndOffsets[i])
-	entryData := itr.data[startOffset:endOffset]
-	var h header
-	h.Decode(entryData)
+
 	if len(itr.baseKey) == 0 {
 		var baseHeader header
 		baseHeader.Decode(itr.data)
 		itr.baseKey = itr.data[headerSize : headerSize+baseHeader.diffLen]
 	}
+
+	endOffset := int(itr.entryEndOffsets[i])
+	entryData := itr.data[startOffset:endOffset]
+	var h header
+	h.Decode(entryData)
 	if h.baseLen > itr.keyPrefixLen {
 		itr.key = append(itr.key[:0], itr.baseKey[:h.baseLen]...)
 	}
