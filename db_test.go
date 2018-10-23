@@ -843,63 +843,6 @@ func TestGetSetRace(t *testing.T) {
 	})
 }
 
-func TestDiscardVersionsBelow(t *testing.T) {
-	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-		// Write 4 versions of the same key
-		for i := 0; i < 4; i++ {
-			err := db.Update(func(txn *Txn) error {
-				return txn.Set([]byte("answer"), []byte(fmt.Sprintf("%d", i)))
-			})
-			require.NoError(t, err)
-		}
-
-		opts := DefaultIteratorOptions
-		opts.AllVersions = true
-		opts.PrefetchValues = false
-
-		// Verify that there are 4 versions, and record 3rd version (2nd from top in iteration)
-		db.View(func(txn *Txn) error {
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			var count int
-			for it.Rewind(); it.Valid(); it.Next() {
-				count++
-				item := it.Item()
-				require.Equal(t, []byte("answer"), item.Key())
-				if item.DiscardEarlierVersions() {
-					break
-				}
-			}
-			require.Equal(t, 4, count)
-			return nil
-		})
-
-		// Set new version and discard older ones.
-		err := db.Update(func(txn *Txn) error {
-			return txn.SetWithDiscard([]byte("answer"), []byte("5"), 0)
-		})
-		require.NoError(t, err)
-
-		// Verify that there are only 2 versions left, and versions
-		// below ts have been deleted.
-		db.View(func(txn *Txn) error {
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			var count int
-			for it.Rewind(); it.Valid(); it.Next() {
-				count++
-				item := it.Item()
-				require.Equal(t, []byte("answer"), item.Key())
-				if item.DiscardEarlierVersions() {
-					break
-				}
-			}
-			require.Equal(t, 1, count)
-			return nil
-		})
-	})
-}
-
 func randBytes(n int) []byte {
 	recv := make([]byte, n)
 	in, err := rand.Read(recv)
