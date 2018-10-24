@@ -29,7 +29,6 @@ version.
       - [Read-write transactions](#read-write-transactions)
       - [Managing transactions manually](#managing-transactions-manually)
     + [Using key/value pairs](#using-keyvalue-pairs)
-    + [Monotonically increasing integers](#monotonically-increasing-integers)
     + [Iterating over keys](#iterating-over-keys)
       - [Prefix scans](#prefix-scans)
       - [Key-only iteration](#key-only-iteration)
@@ -235,26 +234,6 @@ then you must use `copy()` to copy it to another byte slice.
 
 Use the `Txn.Delete()` method to delete a key.
 
-### Monotonically increasing integers
-
-To get unique monotonically increasing integers with strong durability, you can
-use the `DB.GetSequence` method. This method returns a `Sequence` object, which
-is thread-safe and can be used concurrently via various goroutines.
-
-Badger would lease a range of integers to hand out from memory, with the
-bandwidth provided to `DB.GetSequence`. The frequency at which disk writes are
-done is determined by this lease bandwidth and the frequency of `Next`
-invocations. Setting a bandwith too low would do more disk writes, setting it
-too high would result in wasted integers if Badger is closed or crashes.
-To avoid wasted integers, call `Release` before closing Badger.
-
-```go
-seq, err := db.GetSequence(key, 1000)
-defer seq.Release()
-for {
-  num, err := seq.Next()
-}
-```
 
 
 ### Iterating over keys

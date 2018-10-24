@@ -5,6 +5,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+Remove SetWithDiscard and NextSequence related implementations. 
+These features are not used any more.
+
 
 ## [1.5.0] - 2018-05-08
 * Introduce `NumVersionsToKeep` option. This option is used to discard many

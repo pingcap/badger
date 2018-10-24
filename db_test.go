@@ -18,7 +18,6 @@ package badger
 
 import (
 	"bytes"
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -1016,99 +1015,6 @@ func TestWriteDeadlock(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-}
-
-func TestSequence(t *testing.T) {
-	key0 := []byte("seq0")
-	key1 := []byte("seq1")
-
-	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-		seq0, err := db.GetSequence(key0, 10)
-		require.NoError(t, err)
-		seq1, err := db.GetSequence(key1, 100)
-		require.NoError(t, err)
-
-		for i := uint64(0); i < uint64(105); i++ {
-			num, err := seq0.Next()
-			require.NoError(t, err)
-			require.Equal(t, i, num)
-
-			num, err = seq1.Next()
-			require.NoError(t, err)
-			require.Equal(t, i, num)
-		}
-		err = db.View(func(txn *Txn) error {
-			item, err := txn.Get(key0)
-			if err != nil {
-				return err
-			}
-			val, err := item.Value()
-			if err != nil {
-				return err
-			}
-			num0 := binary.BigEndian.Uint64(val)
-			require.Equal(t, uint64(110), num0)
-
-			item, err = txn.Get(key1)
-			if err != nil {
-				return err
-			}
-			val, err = item.Value()
-			if err != nil {
-				return err
-			}
-			num1 := binary.BigEndian.Uint64(val)
-			require.Equal(t, uint64(200), num1)
-			return nil
-		})
-		require.NoError(t, err)
-	})
-}
-
-func TestSequence_Release(t *testing.T) {
-	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-		// get sequence, use once and release
-		key := []byte("key")
-		seq, err := db.GetSequence(key, 1000)
-		require.NoError(t, err)
-		num, err := seq.Next()
-		require.NoError(t, err)
-		require.Equal(t, uint64(0), num)
-		require.NoError(t, seq.Release())
-
-		// we used up 0 and 1 should be stored now
-		err = db.View(func(txn *Txn) error {
-			item, err := txn.Get(key)
-			if err != nil {
-				return err
-			}
-			val, err := item.Value()
-			if err != nil {
-				return err
-			}
-			require.Equal(t, num+1, binary.BigEndian.Uint64(val))
-			return nil
-		})
-		require.NoError(t, err)
-
-		// using it again will lease 1+1000
-		num, err = seq.Next()
-		require.NoError(t, err)
-		require.Equal(t, uint64(1), num)
-		err = db.View(func(txn *Txn) error {
-			item, err := txn.Get(key)
-			if err != nil {
-				return err
-			}
-			val, err := item.Value()
-			if err != nil {
-				return err
-			}
-			require.Equal(t, uint64(1001), binary.BigEndian.Uint64(val))
-			return nil
-		})
-		require.NoError(t, err)
-	})
 }
 
 func TestReadOnly(t *testing.T) {
