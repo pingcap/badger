@@ -135,6 +135,30 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 		}
 	}
 
+	t.init()
+	return t, nil
+}
+
+func OpenInMemoryTable(fd *os.File, data []byte) (*Table, error) {
+	filename := fd.Name()
+	id, ok := ParseFileID(filename)
+	if !ok {
+		_ = fd.Close()
+		return nil, errors.Errorf("Invalid filename: %s", filename)
+	}
+	t := &Table{
+		fd:          fd,
+		ref:         1, // Caller is given one reference.
+		id:          id,
+		loadingMode: options.LoadToRAM,
+		mmap:        data,
+		tableSize:   len(data),
+	}
+	t.init()
+	return t, nil
+}
+
+func (t *Table) init() {
 	t.readIndex()
 
 	it := t.NewIterator(false)
@@ -150,7 +174,6 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 	if it2.Valid() {
 		t.biggest = it2.Key()
 	}
-	return t, nil
 }
 
 // Close closes the open table.  (Releases resources back to the OS.)

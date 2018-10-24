@@ -623,6 +623,20 @@ func writeLevel0Table(s *skl.Skiplist, f *os.File) error {
 	return writeToFile(f, b.Finish())
 }
 
+// WriteLevel0Table flushes memtable. It drops deleteValues.
+func writeLevel0TableToMem(s *skl.Skiplist) ([]byte, error) {
+	iter := s.NewIterator()
+	defer iter.Close()
+	b := table.NewTableBuilder(s.MemSize())
+	defer b.Close()
+	for iter.SeekToFirst(); iter.Valid(); iter.Next() {
+		if err := b.Add(iter.Key(), iter.Value()); err != nil {
+			return nil, err
+		}
+	}
+	return b.Finish(), nil
+}
+
 func writeToFile(f *os.File, buf []byte) error {
 	const step = 512 * 1024
 	up := step
@@ -671,26 +685,12 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 		if err != nil {
 			return y.Wrap(err)
 		}
-
-		// Don't block just to sync the directory entry.
-		dirSyncCh := make(chan error)
-		go func() { dirSyncCh <- syncDir(db.opt.Dir) }()
-
-		err = writeLevel0Table(ft.mt, fd)
-		dirSyncErr := <-dirSyncCh
-
+		data, err := writeLevel0TableToMem(ft.mt)
 		if err != nil {
-			log.Errorf("ERROR while writing to level 0: %v", err)
 			return err
 		}
-		if dirSyncErr != nil {
-			log.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
-			return err
-		}
-
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
+		tbl, err := table.OpenInMemoryTable(fd, data)
 		if err != nil {
-			log.Infof("ERROR while opening table: %v", err)
 			return err
 		}
 		// We own a ref on tbl.
