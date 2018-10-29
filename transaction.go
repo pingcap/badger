@@ -202,6 +202,7 @@ func (pi *pendingWritesIterator) FillValue(vs *y.ValueStruct) {
 	vs.Meta = entry.meta
 	vs.UserMeta = entry.UserMeta
 	vs.Version = pi.readTs
+	vs.UserVersion = entry.UserVersion
 }
 
 func (pi *pendingWritesIterator) Valid() bool {

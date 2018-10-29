@@ -196,6 +196,7 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
 	}
 	e.meta = h.meta
 	e.UserMeta = h.userMeta
+	e.UserVersion = h.userVersion
 	return e, nil
 }
 
@@ -333,6 +334,7 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 			ne := new(Entry)
 			ne.meta = 0 // Remove all bits. Different keyspace doesn't need these bits.
 			ne.UserMeta = e.UserMeta
+			ne.UserVersion = e.UserVersion
 
 			// Create a new key in a separate keyspace, prefixed by moveKey. We are not
 			// allowed to rewrite an older version of key in the LSM tree, because then this older
@@ -888,6 +890,7 @@ func valueBytesToEntry(buf []byte) (e Entry) {
 	n += h.klen
 	e.meta = h.meta
 	e.UserMeta = h.userMeta
+	e.UserVersion = h.userVersion
 	e.Value = buf[n : n+h.vlen]
 	return
 }
