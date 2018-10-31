@@ -66,6 +66,8 @@ type Builder struct {
 	entryEndOffsets []uint32
 
 	bloomFilter bbloom.Bloom
+
+	hashIndexBuilder hashIndexBuilder
 }
 
 // NewTableBuilder makes a new TableBuilder.
@@ -101,6 +103,7 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	if len(key) > 0 {
 		keyNoTs := y.ParseKey(key)
 		b.bloomFilter.Add(keyNoTs)
+		b.hashIndexBuilder.addKey(keyNoTs, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
 	}
 
 	// diffKey stores the difference of key with blockBaseKey.
@@ -144,7 +147,7 @@ func (b *Builder) finishBlock() {
 // Add adds a key-value pair to the block.
 // If doNotRestart is true, we will not restart even if b.counter >= restartInterval.
 func (b *Builder) Add(key []byte, value y.ValueStruct) error {
-	if b.counter >= restartInterval {
+	if b.counter > restartInterval {
 		b.finishBlock()
 	}
 	b.addHelper(key, value)
@@ -177,6 +180,9 @@ func (b *Builder) Finish() []byte {
 	bfData := b.bloomFilter.BinaryMarshal()
 	b.buf = append(b.buf, bfData...)
 	b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
+
+	b.buf = b.hashIndexBuilder.finish(b.buf)
+
 	return b.buf
 }
 
@@ -198,6 +204,18 @@ func u32SliceToBytes(u32s []uint32) []byte {
 	return b
 }
 
+func u16SliceToBytes(u16s []uint16) []byte {
+	if len(u16s) == 0 {
+		return nil
+	}
+	var b []byte
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	hdr.Len = len(u16s) * 2
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&u16s[0]))
+	return b
+}
+
 func bytesToU32Slice(b []byte) []uint32 {
 	if len(b) == 0 {
 		return nil
@@ -205,6 +223,18 @@ func bytesToU32Slice(b []byte) []uint32 {
 	var u32s []uint32
 	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u32s))
 	hdr.Len = len(b) / 4
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
+	return u32s
+}
+
+func bytesToU16Slice(b []byte) []uint16 {
+	if len(b) == 0 {
+		return nil
+	}
+	var u32s []uint16
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u32s))
+	hdr.Len = len(b) / 2
 	hdr.Cap = hdr.Len
 	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
 	return u32s

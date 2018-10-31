@@ -17,7 +17,9 @@
 package table
 
 import (
+	"bytes"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -94,6 +96,80 @@ func TestTableIterator(t *testing.T) {
 			}
 			require.Equal(t, count, n)
 		})
+	}
+}
+
+func TestHashIndexTS(t *testing.T) {
+	b := NewTableBuilder(0)
+	defer b.Close()
+
+	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	f, err := y.OpenSyncedFile(filename, true)
+	if t != nil {
+		require.NoError(t, err)
+	} else {
+		y.Check(err)
+	}
+	keys := [][]byte{
+		y.KeyWithTs([]byte("key"), 9),
+		y.KeyWithTs([]byte("key"), 7),
+		y.KeyWithTs([]byte("key"), 5),
+		y.KeyWithTs([]byte("key"), 3),
+		y.KeyWithTs([]byte("key"), 1),
+	}
+	for _, k := range keys {
+		b.Add(k, y.ValueStruct{Value: k, Meta: 'A', UserMeta: 0})
+	}
+	f.Write(b.Finish())
+	f.Close()
+	f, _ = y.OpenSyncedFile(filename, true)
+	table, err := OpenTable(f, options.MemoryMap)
+
+	it, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10))
+	require.True(t, ok)
+	require.True(t, bytes.Compare(it.Key(), keys[0]) == 0)
+
+	it, ok = table.PointGet(y.KeyWithTs([]byte("key"), 6))
+	require.True(t, ok)
+	require.True(t, bytes.Compare(it.Key(), keys[2]) == 0)
+
+	it, ok = table.PointGet(y.KeyWithTs([]byte("key"), 2))
+	require.True(t, ok)
+	require.True(t, bytes.Compare(it.Key(), keys[4]) == 0)
+}
+
+func TestPointGet(t *testing.T) {
+	f := buildTestTable(t, "key", 8000)
+	table, err := OpenTable(f, options.MemoryMap)
+	require.NoError(t, err)
+	defer table.DecrRef()
+
+	for i := 0; i < 8000; i++ {
+		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
+		it, ok := table.PointGet(k)
+		if !ok {
+			// will fallback to seek
+			continue
+		}
+		require.NotNil(t, it, key("key", i)+" not find")
+		require.True(t, it.Valid())
+		require.True(t, y.SameKey(k, it.Key()), "point get not point to correct key")
+		it.Close()
+	}
+
+	for i := 8000; i < 10000; i++ {
+		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
+		it, ok := table.PointGet(k)
+		if !ok {
+			// will fallback to seek
+			continue
+		}
+		if it == nil {
+			// hash table says no entry, fast return
+			continue
+		}
+		require.True(t, it.Valid())
+		require.False(t, y.SameKey(k, it.Key()), "point get not point to correct key")
 	}
 }
 
@@ -651,6 +727,67 @@ func BenchmarkRead(b *testing.B) {
 			}
 		}()
 	}
+}
+
+func BenchmarkPointGet(b *testing.B) {
+	n := 5 << 20
+	builder := NewTableBuilder(0)
+	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	f, err := y.OpenSyncedFile(filename, true)
+	keys := make([][]byte, n)
+	y.Check(err)
+	for i := 0; i < n; i++ {
+		k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
+		v := fmt.Sprintf("%d", i)
+		keys[i] = k
+		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: 0}))
+	}
+
+	f.Write(builder.Finish())
+	tbl, err := OpenTable(f, options.MemoryMap)
+	y.Check(err)
+	defer tbl.DecrRef()
+
+	b.ResetTimer()
+
+	b.Run("Seek", func(b *testing.B) {
+		var vs y.ValueStruct
+		for n := 0; n < b.N; n++ {
+			for i := 0; i < n; i++ {
+				k := keys[i]
+				it := tbl.NewIterator(false)
+				it.Seek(k)
+				if y.SameKey(k, it.Key()) {
+					vs = it.Value()
+				}
+				it.Close()
+			}
+		}
+		_ = vs
+	})
+
+	b.Run("Hash", func(b *testing.B) {
+		var vs y.ValueStruct
+		for n := 0; n < b.N; n++ {
+			for i := 0; i < n; i++ {
+				k := keys[i]
+				it, ok := tbl.PointGet(k)
+				if !ok {
+					it = tbl.NewIterator(false)
+					it.Seek(k)
+				} else {
+					if it == nil {
+						continue
+					}
+				}
+				if y.SameKey(k, it.Key()) {
+					vs = it.Value()
+				}
+				it.Close()
+			}
+		}
+		_ = vs
+	})
 }
 
 func BenchmarkReadAndBuild(b *testing.B) {

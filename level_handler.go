@@ -271,10 +271,18 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 			continue
 		}
 
-		it := th.NewIterator(false)
-		defer it.Close()
+		it, ok := th.PointGet(key)
+		if !ok {
+			it = th.NewIterator(false)
+			defer it.Close()
+			it.Seek(key)
+		} else {
+			if it == nil {
+				continue
+			}
+			defer it.Close()
+		}
 
-		it.Seek(key)
 		if !it.Valid() {
 			continue
 		}

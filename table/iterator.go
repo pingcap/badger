@@ -69,12 +69,12 @@ func (itr *blockIterator) loadEntryEndOffsets() {
 }
 
 // Seek brings us to the first block element that is >= input key.
-func (itr *blockIterator) seek(key []byte) {
-	foundEntryIdx := sort.Search(len(itr.entryEndOffsets), func(idx int) bool {
-		itr.setIdx(idx)
+func (itr *blockIterator) seek(key []byte, start int) {
+	foundEntryIdx := sort.Search(len(itr.entryEndOffsets)-start, func(idx int) bool {
+		itr.setIdx(idx + start)
 		return y.CompareKeys(itr.key, key) >= 0
 	})
-	itr.setIdx(foundEntryIdx)
+	itr.setIdx(foundEntryIdx + start)
 }
 
 // seekToFirst brings us to the first element. Valid should return true.
@@ -204,8 +204,27 @@ func (itr *Iterator) seekHelper(blockIdx int, key []byte) {
 		return
 	}
 	itr.bi.setBlock(block)
-	itr.bi.seek(key)
+	itr.bi.seek(key, 0)
 	itr.err = itr.bi.Error()
+}
+
+func (itr *Iterator) seekWithStart(blockIdx int, start int, key []byte) {
+	itr.bpos = blockIdx
+	block, err := itr.t.block(blockIdx)
+	if err != nil {
+		itr.err = err
+		return
+	}
+	itr.bi.setBlock(block)
+	numNext := 3
+	for i := 0; i < numNext; i++ {
+		itr.bi.setIdx(start)
+		if y.CompareKeys(itr.bi.key, key) >= 0 {
+			return
+		}
+		start++
+	}
+	itr.bi.seek(key, start)
 }
 
 // seekFrom brings us to a key that is >= input key.
