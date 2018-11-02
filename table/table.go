@@ -175,7 +175,7 @@ func (t *Table) PointGet(key []byte) (*Iterator, bool) {
 	}
 
 	it := t.NewIterator(false)
-	it.seekWithStart(int(blkIdx), int(offset), key)
+	it.seekFromOffset(int(blkIdx), int(offset), key)
 	return it, true
 }
 

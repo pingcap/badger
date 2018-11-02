@@ -12,11 +12,15 @@ const (
 	maxRestart     = 65533
 )
 
+type position struct {
+	restart uint16
+	offset  uint8
+}
+
 type hashIndexBuilder struct {
-	pos []struct {
-		hash    uint32
-		restart uint16
-		offset  uint8
+	buf []struct {
+		hash uint32
+		pos  position
 	}
 	estimatedNumBuckets float32
 	invalid             bool
@@ -25,44 +29,45 @@ type hashIndexBuilder struct {
 func (b *hashIndexBuilder) addKey(key []byte, restart uint32, offset uint8) {
 	if restart > maxRestart || b.invalid {
 		b.invalid = true
+		b.buf = nil
 		return
 	}
 	b.estimatedNumBuckets += 1 / hashUtilRatio
 	h := farm.Fingerprint32(key)
-	b.pos = append(b.pos, struct {
-		hash    uint32
-		restart uint16
-		offset  uint8
-	}{h, uint16(restart), offset})
+	b.buf = append(b.buf, struct {
+		hash uint32
+		pos  position
+	}{h, position{uint16(restart), offset}})
 }
 
 func (b *hashIndexBuilder) finish(buf []byte) []byte {
-	if b.invalid || len(b.pos) == 0 {
+	if b.invalid || len(b.buf) == 0 {
 		return append(buf, u32ToBytes(0)...)
 	}
 	numBucket := uint32(b.estimatedNumBuckets)
-	buckets := make([]uint32, numBucket)
+	buckets := make([]position, numBucket)
 	for i := range buckets {
-		buckets[i] = resultNoEntry << 8
+		buckets[i].restart = resultNoEntry
 	}
 
-	for _, pair := range b.pos {
+	for _, pair := range b.buf {
 		idx := pair.hash % numBucket
-		restart := buckets[idx] >> 8
+		restart := buckets[idx].restart
 		if restart == resultNoEntry {
-			buckets[idx] = uint32(pair.restart)<<8 | uint32(pair.offset)
-		} else if restart != uint32(pair.restart) {
-			buckets[idx] = uint32(resultFallback) << 8
+			buckets[idx] = pair.pos
+		} else if restart != pair.pos.restart {
+			buckets[idx].restart = resultFallback
 		}
 	}
 
-	encodeBuf := [2]byte{}
+	cursor := len(buf)
+	buf = append(buf, make([]byte, numBucket*3+4)...)
 	for _, e := range buckets {
-		binary.LittleEndian.PutUint16(encodeBuf[:], uint16(e>>8))
-		buf = append(buf, encodeBuf[:]...)
-		buf = append(buf, byte(e&0xff))
+		binary.LittleEndian.PutUint16(buf[cursor:], e.restart)
+		buf[cursor+2] = e.offset
+		cursor += 3
 	}
-	return append(buf, u32ToBytes(numBucket)...)
+	return append(buf[:cursor], u32ToBytes(numBucket)...)
 }
 
 type hashIndex struct {

@@ -208,7 +208,9 @@ func (itr *Iterator) seekHelper(blockIdx int, key []byte) {
 	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekWithStart(blockIdx int, start int, key []byte) {
+const seekBound = 3
+
+func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx)
 	if err != nil {
@@ -216,15 +218,14 @@ func (itr *Iterator) seekWithStart(blockIdx int, start int, key []byte) {
 		return
 	}
 	itr.bi.setBlock(block)
-	numNext := 3
-	for i := 0; i < numNext; i++ {
-		itr.bi.setIdx(start)
+	for i := 0; i < seekBound; i++ {
+		itr.bi.setIdx(offset)
 		if y.CompareKeys(itr.bi.key, key) >= 0 {
 			return
 		}
-		start++
+		offset++
 	}
-	itr.bi.seek(key, start)
+	itr.bi.seek(key, offset)
 }
 
 // seekFrom brings us to a key that is >= input key.
