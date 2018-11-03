@@ -39,6 +39,8 @@ type levelsController struct {
 	kv     *DB
 
 	cstatus compactStatus
+
+	opt TableBuilderOptions
 }
 
 var (
@@ -71,11 +73,12 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 	return nil
 }
 
-func newLevelsController(kv *DB, mf *Manifest) (*levelsController, error) {
+func newLevelsController(kv *DB, mf *Manifest, opt TableBuilderOptions) (*levelsController, error) {
 	y.Assert(kv.opt.NumLevelZeroTablesStall > kv.opt.NumLevelZeroTables)
 	s := &levelsController{
 		kv:     kv,
 		levels: make([]*levelHandler, kv.opt.MaxLevels),
+		opt:   opt,
 	}
 	s.cstatus.levels = make([]*levelCompactStatus, kv.opt.MaxLevels)
 
@@ -330,7 +333,7 @@ func (s *levelsController) compactBuildTables(
 	var lastKey, skipKey []byte
 	for it.Valid() {
 		timeStart := time.Now()
-		builder := table.NewTableBuilder(s.kv.opt.MaxTableSize)
+		builder := table.NewTableBuilder(s.kv.opt.MaxTableSize, s.opt)
 		var numKeys uint64
 		for ; it.Valid(); it.Next() {
 			// See if we need to skip this key.

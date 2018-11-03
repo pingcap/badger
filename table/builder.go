@@ -18,6 +18,7 @@ package table
 
 import (
 	"encoding/binary"
+	"github.com/coocood/badger/options"
 	"reflect"
 	"unsafe"
 
@@ -67,18 +68,21 @@ type Builder struct {
 
 	bloomFilter bbloom.Bloom
 
+	enableHashIndex  bool
 	hashIndexBuilder hashIndexBuilder
 }
 
 // NewTableBuilder makes a new TableBuilder.
 // The initCap is used to avoid memory reallocation.
-func NewTableBuilder(initCap int64) *Builder {
+func NewTableBuilder(initCap int64, opt options.TableBuilderOptions) *Builder {
 	assumeKeyNum := 256 * 1024
 	return &Builder{
 		buf:         make([]byte, 0, initCap),
 		baseKeysBuf: make([]byte, 0, assumeKeyNum/restartInterval),
 		// assume a large enough num of keys to init bloom filter.
-		bloomFilter: bbloom.New(float64(assumeKeyNum), 0.01),
+		bloomFilter:      bbloom.New(float64(assumeKeyNum), 0.01),
+		enableHashIndex:  opt.EnableHashIndex,
+		hashIndexBuilder: newHashIndexBuilder(opt.HashUtilRatio),
 	}
 }
 
@@ -103,7 +107,9 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	if len(key) > 0 {
 		keyNoTs := y.ParseKey(key)
 		b.bloomFilter.Add(keyNoTs)
-		b.hashIndexBuilder.addKey(keyNoTs, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
+		if b.enableHashIndex {
+			b.hashIndexBuilder.addKey(keyNoTs, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
+		}
 	}
 
 	// diffKey stores the difference of key with blockBaseKey.
@@ -181,7 +187,11 @@ func (b *Builder) Finish() []byte {
 	b.buf = append(b.buf, bfData...)
 	b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
 
-	b.buf = b.hashIndexBuilder.finish(b.buf)
+	if b.enableHashIndex {
+		b.buf = b.hashIndexBuilder.finish(b.buf)
+	} else {
+		b.buf = append(b.buf, u32ToBytes(0)...)
+	}
 
 	return b.buf
 }

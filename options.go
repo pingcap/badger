@@ -102,6 +102,8 @@ type Options struct {
 
 	// Truncate value log to delete corrupt data, if any. Would not truncate if ReadOnly is set.
 	Truncate bool
+
+	TableBuilderOptions options.TableBuilderOptions
 }
 
 // DefaultOptions sets a list of recommended options for good performance.
@@ -126,6 +128,10 @@ var DefaultOptions = Options{
 	ValueLogMaxEntries:      1000000,
 	ValueThreshold:          32,
 	Truncate:                false,
+	TableBuilderOptions: options.TableBuilderOptions{
+		EnableHashIndex: false,
+		HashUtilRatio:   0.75,
+	},
 }
 
 // LSMOnlyOptions follows from DefaultOptions, but sets a higher ValueThreshold so values would

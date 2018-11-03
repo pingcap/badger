@@ -18,6 +18,7 @@ package badger
 
 import (
 	"expvar"
+	"github.com/coocood/badger/options"
 	"math"
 	"os"
 	"path/filepath"
@@ -265,7 +266,7 @@ func Open(opt Options) (db *DB, err error) {
 	db.mt = <-db.memTableCh
 
 	// newLevelsController potentially loads files in directory.
-	if db.lc, err = newLevelsController(db, &manifest); err != nil {
+	if db.lc, err = newLevelsController(db, &manifest, opt.TableBuilderOptions); err != nil {
 		return nil, err
 	}
 
@@ -610,10 +611,10 @@ func arenaSize(opt Options) int64 {
 }
 
 // WriteLevel0Table flushes memtable. It drops deleteValues.
-func writeLevel0Table(s *skl.Skiplist, f *os.File) error {
+func writeLevel0Table(s *skl.Skiplist, f *os.File, opt options.TableBuilderOptions) error {
 	iter := s.NewIterator()
 	defer iter.Close()
-	b := table.NewTableBuilder(s.MemSize())
+	b := table.NewTableBuilder(s.MemSize(), opt)
 	defer b.Close()
 	for iter.SeekToFirst(); iter.Valid(); iter.Next() {
 		if err := b.Add(iter.Key(), iter.Value()); err != nil {
@@ -676,7 +677,7 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 		dirSyncCh := make(chan error)
 		go func() { dirSyncCh <- syncDir(db.opt.Dir) }()
 
-		err = writeLevel0Table(ft.mt, fd)
+		err = writeLevel0Table(ft.mt, fd, db.opt.TableBuilderOptions)
 		dirSyncErr := <-dirSyncCh
 
 		if err != nil {

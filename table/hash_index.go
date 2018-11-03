@@ -6,24 +6,25 @@ import (
 )
 
 const (
-	hashUtilRatio  = 0.75
 	resultNoEntry  = 65535
 	resultFallback = 65534
 	maxRestart     = 65533
 )
 
-type position struct {
-	restart uint16
-	offset  uint8
-}
-
 type hashIndexBuilder struct {
 	buf []struct {
-		hash uint32
-		pos  position
+		hash    uint32
+		restart uint16
+		offset  uint8
 	}
-	estimatedNumBuckets float32
-	invalid             bool
+	hashUtilRatio float32
+	invalid       bool
+}
+
+func newHashIndexBuilder(hashUtilRatio float32) hashIndexBuilder {
+	return hashIndexBuilder{
+		hashUtilRatio: hashUtilRatio,
+	}
 }
 
 func (b *hashIndexBuilder) addKey(key []byte, restart uint32, offset uint8) {
@@ -32,42 +33,41 @@ func (b *hashIndexBuilder) addKey(key []byte, restart uint32, offset uint8) {
 		b.buf = nil
 		return
 	}
-	b.estimatedNumBuckets += 1 / hashUtilRatio
 	h := farm.Fingerprint32(key)
 	b.buf = append(b.buf, struct {
-		hash uint32
-		pos  position
-	}{h, position{uint16(restart), offset}})
+		hash    uint32
+		restart uint16
+		offset  uint8
+	}{h, uint16(restart), offset})
 }
 
 func (b *hashIndexBuilder) finish(buf []byte) []byte {
 	if b.invalid || len(b.buf) == 0 {
 		return append(buf, u32ToBytes(0)...)
 	}
-	numBucket := uint32(b.estimatedNumBuckets)
-	buckets := make([]position, numBucket)
-	for i := range buckets {
-		buckets[i].restart = resultNoEntry
+
+	numBuckets := uint32(float32(len(b.buf)) / b.hashUtilRatio)
+	bufLen := len(buf)
+	buf = append(buf, make([]byte, numBuckets*3+4)...)
+	buckets := buf[bufLen:]
+	for i := 0; i < int(numBuckets); i++ {
+		binary.LittleEndian.PutUint16(buckets[i*3:], resultNoEntry)
 	}
 
-	for _, pair := range b.buf {
-		idx := pair.hash % numBucket
-		restart := buckets[idx].restart
+	for _, h := range b.buf {
+		idx := h.hash % numBuckets
+		bucket := buckets[idx*3 : (idx+1)*3]
+		restart := binary.LittleEndian.Uint16(bucket[:2])
 		if restart == resultNoEntry {
-			buckets[idx] = pair.pos
-		} else if restart != pair.pos.restart {
-			buckets[idx].restart = resultFallback
+			binary.LittleEndian.PutUint16(bucket[:2], h.restart)
+			bucket[2] = h.offset
+		} else if restart != h.restart {
+			binary.LittleEndian.PutUint16(bucket[:2], resultFallback)
 		}
 	}
+	copy(buckets[numBuckets*3:], u32ToBytes(numBuckets))
 
-	cursor := len(buf)
-	buf = append(buf, make([]byte, numBucket*3+4)...)
-	for _, e := range buckets {
-		binary.LittleEndian.PutUint16(buf[cursor:], e.restart)
-		buf[cursor+2] = e.offset
-		cursor += 3
-	}
-	return append(buf[:cursor], u32ToBytes(numBucket)...)
+	return buf
 }
 
 type hashIndex struct {
