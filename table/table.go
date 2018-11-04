@@ -137,14 +137,14 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 
 	t.readIndex()
 
-	it := t.NewIterator(false)
+	it := t.NewIterator(false, nil)
 	defer it.Close()
 	it.Rewind()
 	if it.Valid() {
 		t.smallest = it.Key()
 	}
 
-	it2 := t.NewIterator(true)
+	it2 := t.NewIterator(true, nil)
 	defer it2.Close()
 	it2.Rewind()
 	if it2.Valid() {

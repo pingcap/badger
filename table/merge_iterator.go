@@ -128,6 +128,10 @@ func (mt *MergeIterator) Valid() bool {
 	return mt.smaller.valid
 }
 
+func (mt *MergeIterator) MayExceededUpperBound() bool {
+	return mt.smaller.iter.MayExceededUpperBound()
+}
+
 // Key returns the key associated with the current iterator
 func (mt *MergeIterator) Key() []byte {
 	return mt.smaller.key
@@ -197,6 +201,10 @@ func (e *EmptyIterator) FillValue(vs *y.ValueStruct) {}
 
 func (e *EmptyIterator) Valid() bool {
 	return false
+}
+
+func (e *EmptyIterator) MayExceededUpperBound() bool {
+	return true
 }
 
 func (e *EmptyIterator) Close() error {

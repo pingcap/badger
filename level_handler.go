@@ -271,7 +271,7 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 			continue
 		}
 
-		it := th.NewIterator(false)
+		it := th.NewIterator(false, nil)
 		defer it.Close()
 
 		it.Seek(key)
@@ -311,7 +311,7 @@ func (s *levelHandler) appendIterators(iters []y.Iterator, opts IteratorOptions)
 	if len(overlapTables) == 0 {
 		return iters
 	}
-	return append(iters, table.NewConcatIterator(overlapTables, opts.Reverse))
+	return append(iters, table.NewConcatIterator(overlapTables, opts.Reverse, opts.EndKey))
 }
 
 type levelHandlerRLocked struct{}

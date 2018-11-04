@@ -138,12 +138,18 @@ type Iterator struct {
 	// Internally, Iterator is bidirectional. However, we only expose the
 	// unidirectional functionality for now.
 	reversed bool
+
+	upperBound []byte
 }
 
 // NewIterator returns a new iterator of the Table
-func (t *Table) NewIterator(reversed bool) *Iterator {
+func (t *Table) NewIterator(reversed bool, upperBound []byte) *Iterator {
 	t.IncrRef() // Important.
 	ti := &Iterator{t: t, reversed: reversed}
+	if upperBound != nil && bytes.Compare(upperBound, t.biggest) > 0 {
+		// never execeeded the upper bound
+		ti.upperBound = upperBound
+	}
 	return ti
 }
 
@@ -160,6 +166,14 @@ func (itr *Iterator) reset() {
 // Valid follows the y.Iterator interface
 func (itr *Iterator) Valid() bool {
 	return itr.err == nil
+}
+
+func (itr *Iterator) MayExceededUpperBound() bool {
+	if itr.upperBound != nil {
+		return false
+	}
+
+	return true
 }
 
 func (itr *Iterator) seekToFirst() {
@@ -371,18 +385,21 @@ type ConcatIterator struct {
 	iters    []*Iterator // Corresponds to tables.
 	tables   []*Table    // Disregarding reversed, this is in ascending order.
 	reversed bool
+
+	upperBound []byte
 }
 
 // NewConcatIterator creates a new concatenated iterator
-func NewConcatIterator(tbls []*Table, reversed bool) *ConcatIterator {
+func NewConcatIterator(tbls []*Table, reversed bool, upperBound []byte) *ConcatIterator {
 	for _, t := range tbls {
 		t.IncrRef()
 	}
 	return &ConcatIterator{
-		reversed: reversed,
-		iters:    make([]*Iterator, len(tbls)),
-		tables:   tbls,
-		idx:      -1, // Not really necessary because s.it.Valid()=false, but good to have.
+		reversed:   reversed,
+		iters:      make([]*Iterator, len(tbls)),
+		tables:     tbls,
+		idx:        -1, // Not really necessary because s.it.Valid()=false, but good to have.
+		upperBound: upperBound,
 	}
 }
 
@@ -393,7 +410,7 @@ func (s *ConcatIterator) setIdx(idx int) {
 	} else {
 		if s.iters[s.idx] == nil {
 			// We already increased table refs, so init without IncrRef here
-			ti := &Iterator{t: s.tables[s.idx], reversed: s.reversed}
+			ti := &Iterator{t: s.tables[s.idx], reversed: s.reversed, upperBound: s.upperBound}
 			ti.next()
 			s.iters[s.idx] = ti
 		}
@@ -422,6 +439,10 @@ func (s *ConcatIterator) Valid() bool {
 // Key implements y.Interface
 func (s *ConcatIterator) Key() []byte {
 	return s.cur.Key()
+}
+
+func (s *ConcatIterator) MayExceededUpperBound() bool {
+	return s.cur.MayExceededUpperBound()
 }
 
 // Value implements y.Interface

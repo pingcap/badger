@@ -81,8 +81,13 @@ func (s *SimpleIterator) FillValue(vs *y.ValueStruct) {
 	vs.UserMeta = 55 // arbitrary value for test
 	vs.Meta = 0
 }
+
 func (s *SimpleIterator) Valid() bool {
 	return s.idx >= 0 && s.idx < len(s.keys)
+}
+
+func (s *SimpleIterator) MayExceededUpperBound() bool {
+	return true
 }
 
 func newSimpleIterator(keys []string, vals []string, reversed bool) *SimpleIterator {

@@ -309,11 +309,11 @@ func (s *levelsController) compactBuildTables(
 		iters = appendIteratorsReversed(iters, topTables, false)
 	} else {
 		y.Assert(len(topTables) == 1)
-		iters = []y.Iterator{topTables[0].NewIterator(false)}
+		iters = []y.Iterator{topTables[0].NewIterator(false, nil)}
 	}
 
 	// Next level has level>=1 and we can use ConcatIterator as key ranges do not overlap.
-	iters = append(iters, table.NewConcatIterator(botTables, false))
+	iters = append(iters, table.NewConcatIterator(botTables, false, nil))
 	it := table.NewMergeIterator(iters, false)
 	defer it.Close() // Important to close the iterator to do ref counting.
 
@@ -732,7 +732,7 @@ func (s *levelsController) get(key []byte) (y.ValueStruct, error) {
 func appendIteratorsReversed(out []y.Iterator, th []*table.Table, reversed bool) []y.Iterator {
 	for i := len(th) - 1; i >= 0; i-- {
 		// This will increment the reference of the table handler.
-		out = append(out, table.NewConcatIterator(th[i:i+1], reversed))
+		out = append(out, table.NewConcatIterator(th[i:i+1], reversed, nil))
 	}
 	return out
 }

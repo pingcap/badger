@@ -583,5 +583,7 @@ func (s *UniIterator) FillValue(vs *y.ValueStruct) { s.iter.FillValue(vs) }
 // Valid implements y.Interface
 func (s *UniIterator) Valid() bool { return s.iter.Valid() }
 
+func (s *UniIterator) MayExceededUpperBound() bool { return true }
+
 // Close implements y.Interface (and frees up the iter's resources)
 func (s *UniIterator) Close() error { return s.iter.Close() }

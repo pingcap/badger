@@ -207,6 +207,10 @@ func (pi *pendingWritesIterator) Valid() bool {
 	return pi.nextIdx < len(pi.entries)
 }
 
+func (pi *pendingWritesIterator) MayExceededUpperBound() bool {
+	return true
+}
+
 func (pi *pendingWritesIterator) Close() error {
 	return nil
 }

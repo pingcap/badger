@@ -66,6 +66,8 @@ type Iterator interface {
 	FillValue(vs *ValueStruct)
 	Valid() bool
 
+	MayExceededUpperBound() bool
+
 	// All iterators should be closed so that file garbage collection works.
 	Close() error
 }

@@ -258,7 +258,7 @@ type IteratorOptions struct {
 }
 
 func (opts *IteratorOptions) hasRange() bool {
-	return len(opts.StartKey) > 0 && len(opts.EndKey) > 0
+	return len(opts.StartKey) > 0 && bytes.Compare(opts.StartKey, opts.EndKey) < 0
 }
 
 func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
@@ -306,7 +306,7 @@ func (opts *IteratorOptions) OverlapTable(t *table.Table) bool {
 	if bytes.Compare(opts.StartKey, t.Biggest()) > 0 {
 		return false
 	}
-	iter := t.NewIterator(false)
+	iter := t.NewIterator(false, opts.EndKey)
 	defer iter.Close()
 	iter.Seek(opts.StartKey)
 	if !iter.Valid() {
@@ -369,6 +369,8 @@ type Iterator struct {
 	waste list
 
 	lastKey []byte // Used to skip over multiple versions of the same key.
+
+	upperBound []byte
 }
 
 // NewIterator returns a new iterator. Depending upon the options, either only keys, or both
@@ -432,6 +434,8 @@ func (it *Iterator) Item() *Item {
 
 // Valid returns false when iteration is done.
 func (it *Iterator) Valid() bool { return it.item != nil }
+
+func (it *Iterator) MayExceededUpperBound() bool { return it.iitr.MayExceededUpperBound() }
 
 // ValidForPrefix returns false when iteration is done
 // or when the current key is not prefixed by the specified prefix.
