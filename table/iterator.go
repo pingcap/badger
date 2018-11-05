@@ -507,5 +507,10 @@ func (s *ConcatIterator) Close() error {
 	for _, t := range s.tables {
 		t.DecrRef()
 	}
+	for _, it := range s.iters {
+		if it != nil {
+			it.Close()
+		}
+	}
 	return nil
 }
