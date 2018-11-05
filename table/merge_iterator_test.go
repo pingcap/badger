@@ -72,13 +72,13 @@ func (s *SimpleIterator) Key() []byte { return s.keys[s.idx] }
 func (s *SimpleIterator) Value() y.ValueStruct {
 	return y.ValueStruct{
 		Value:    s.vals[s.idx],
-		UserMeta: 55,
+		UserMeta: []byte{55},
 		Meta:     0,
 	}
 }
 func (s *SimpleIterator) FillValue(vs *y.ValueStruct) {
 	vs.Value = s.vals[s.idx]
-	vs.UserMeta = 55 // arbitrary value for test
+	vs.UserMeta = []byte{55} // arbitrary value for test
 	vs.Meta = 0
 }
 func (s *SimpleIterator) Valid() bool {

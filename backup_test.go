@@ -102,7 +102,7 @@ func TestDumpLoad(t *testing.T) {
 			require.Equal(t, entries[count].key, item.Key())
 			require.Equal(t, entries[count].val, val)
 			require.Equal(t, entries[count].version, item.Version())
-			require.Equal(t, entries[count].userMeta, item.UserMeta())
+			require.Equal(t, []byte{entries[count].userMeta}, item.UserMeta())
 			count++
 		}
 		require.Equal(t, count, 2)

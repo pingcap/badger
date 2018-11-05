@@ -61,7 +61,7 @@ func TestManifestBasic(t *testing.T) {
 		item, err := txn.Get([]byte("testkey"))
 		require.NoError(t, err)
 		require.EqualValues(t, "testval", string(getItemValue(t, item)))
-		require.EqualValues(t, byte(0x05), item.UserMeta())
+		require.EqualValues(t, []byte{0x05}, item.UserMeta())
 		return nil
 	}))
 	require.NoError(t, kv.Close())
@@ -138,9 +138,8 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	for _, kv := range keyValues {
 		y.Assert(len(kv) == 2)
 		err := b.Add(y.KeyWithTs([]byte(kv[0]), 10), y.ValueStruct{
-			Value:    []byte(kv[1]),
-			Meta:     'A',
-			UserMeta: 0,
+			Value: []byte(kv[1]),
+			Meta:  'A',
 		})
 		if t != nil {
 			require.NoError(t, err)

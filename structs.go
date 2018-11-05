@@ -47,10 +47,10 @@ func (p *valuePointer) Decode(b []byte) {
 
 // header is used in value log as a header before Entry.
 type header struct {
-	klen     uint32
-	vlen     uint32
-	meta     byte
-	userMeta byte
+	klen  uint32
+	vlen  uint32
+	meta  byte
+	umlen byte
 }
 
 const (
@@ -62,7 +62,7 @@ func (h header) Encode(out []byte) {
 	binary.BigEndian.PutUint32(out[0:4], h.klen)
 	binary.BigEndian.PutUint32(out[4:8], h.vlen)
 	out[8] = h.meta
-	out[9] = h.userMeta
+	out[9] = h.umlen
 }
 
 // Decodes h from buf.
@@ -70,14 +70,14 @@ func (h *header) Decode(buf []byte) {
 	h.klen = binary.BigEndian.Uint32(buf[0:4])
 	h.vlen = binary.BigEndian.Uint32(buf[4:8])
 	h.meta = buf[8]
-	h.userMeta = buf[9]
+	h.umlen = buf[9]
 }
 
 // Entry provides Key, Value, UserMeta. This struct can be used by the user to set data.
 type Entry struct {
 	Key      []byte
 	Value    []byte
-	UserMeta byte
+	UserMeta []byte
 	meta     byte
 
 	// Fields maintained internally.
@@ -86,18 +86,18 @@ type Entry struct {
 
 func (e *Entry) estimateSize(threshold int) int {
 	if len(e.Value) < threshold {
-		return len(e.Key) + len(e.Value) + 2 // Meta, UserMeta
+		return len(e.Key) + len(e.Value) + len(e.UserMeta) + 2 // Meta, UserMeta
 	}
-	return len(e.Key) + 12 + 2 // 12 for ValuePointer, 2 for metas.
+	return len(e.Key) + len(e.UserMeta) + 12 + 2 // 12 for ValuePointer, 2 for metas.
 }
 
 // Encodes e to buf. Returns number of bytes written.
 func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 	h := header{
-		klen:     uint32(len(e.Key)),
-		vlen:     uint32(len(e.Value)),
-		meta:     e.meta,
-		userMeta: e.UserMeta,
+		klen:  uint32(len(e.Key)),
+		vlen:  uint32(len(e.Value)),
+		meta:  e.meta,
+		umlen: byte(len(e.UserMeta)),
 	}
 
 	var headerEnc [headerBufSize]byte
@@ -107,6 +107,9 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 
 	buf.Write(headerEnc[:])
 	hash.Write(headerEnc[:])
+
+	buf.Write(e.UserMeta)
+	hash.Write(e.UserMeta)
 
 	buf.Write(e.Key)
 	hash.Write(e.Key)
@@ -122,6 +125,6 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 }
 
 func (e Entry) print(prefix string) {
-	fmt.Printf("%s Key: %s Meta: %d UserMeta: %d Offset: %d len(val)=%d",
+	fmt.Printf("%s Key: %s Meta: %d UserMeta: %v Offset: %d len(val)=%d",
 		prefix, e.Key, e.meta, e.UserMeta, e.offset, len(e.Value))
 }

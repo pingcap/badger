@@ -176,7 +176,7 @@ func TestConcurrentWrite(t *testing.T) {
 			require.EqualValues(t, fmt.Sprintf("k%05d_%08d", i, j), string(k))
 			v := getItemValue(t, item)
 			require.EqualValues(t, fmt.Sprintf("v%05d_%08d", i, j), string(v))
-			require.Equal(t, item.UserMeta(), byte(j%127))
+			require.Equal(t, item.UserMeta(), []byte{byte(j % 127)})
 			j++
 			if j == m {
 				i++
@@ -196,7 +196,7 @@ func TestGet(t *testing.T) {
 		item, err := txn.Get([]byte("key1"))
 		require.NoError(t, err)
 		require.EqualValues(t, "val1", getItemValue(t, item))
-		require.Equal(t, byte(0x08), item.UserMeta())
+		require.Equal(t, []byte{0x08}, item.UserMeta())
 		txn.Discard()
 
 		txnSet(t, db, []byte("key1"), []byte("val2"), 0x09)
@@ -205,7 +205,7 @@ func TestGet(t *testing.T) {
 		item, err = txn.Get([]byte("key1"))
 		require.NoError(t, err)
 		require.EqualValues(t, "val2", getItemValue(t, item))
-		require.Equal(t, byte(0x09), item.UserMeta())
+		require.Equal(t, []byte{0x09}, item.UserMeta())
 		txn.Discard()
 
 		txnDelete(t, db, []byte("key1"))
@@ -221,7 +221,7 @@ func TestGet(t *testing.T) {
 		item, err = txn.Get([]byte("key1"))
 		require.NoError(t, err)
 		require.EqualValues(t, "val3", getItemValue(t, item))
-		require.Equal(t, byte(0x01), item.UserMeta())
+		require.Equal(t, []byte{0x01}, item.UserMeta())
 
 		longVal := make([]byte, 1000)
 		txnSet(t, db, []byte("key1"), longVal, 0x00)
@@ -522,7 +522,7 @@ func TestIterate2Basic(t *testing.T) {
 				require.EqualValues(t, bkey(count), string(key))
 				val := getItemValue(t, item)
 				require.EqualValues(t, bval(count), string(val))
-				require.Equal(t, byte(count%127), item.UserMeta())
+				require.Equal(t, []byte{byte(count % 127)}, item.UserMeta())
 				count++
 			}
 			require.EqualValues(t, n, count)

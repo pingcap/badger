@@ -136,8 +136,9 @@ var errTruncate = errors.New("Do truncate")
 type logEntry func(e Entry, vp valuePointer) error
 
 type safeRead struct {
-	k []byte
-	v []byte
+	k  []byte
+	v  []byte
+	um []byte
 
 	recordOffset uint32
 }
@@ -170,6 +171,18 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
 	e.offset = r.recordOffset
 	e.Key = r.k[:kl]
 	e.Value = r.v[:vl]
+	if h.umlen > 0 {
+		if cap(r.um) < int(h.umlen) {
+			r.um = make([]byte, 2*h.umlen)
+		}
+		e.UserMeta = r.um[:h.umlen]
+		if _, err = io.ReadFull(tee, e.UserMeta); err != nil {
+			if err == io.EOF {
+				err = errTruncate
+			}
+			return nil, err
+		}
+	}
 
 	if _, err = io.ReadFull(tee, e.Key); err != nil {
 		if err == io.EOF {
@@ -195,7 +208,6 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
 		return nil, errTruncate
 	}
 	e.meta = h.meta
-	e.UserMeta = h.userMeta
 	return e, nil
 }
 
@@ -332,7 +344,8 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 			// This new entry only contains the key, and a pointer to the value.
 			ne := new(Entry)
 			ne.meta = 0 // Remove all bits. Different keyspace doesn't need these bits.
-			ne.UserMeta = e.UserMeta
+			ne.UserMeta = make([]byte, len(e.UserMeta))
+			copy(ne.UserMeta, e.UserMeta)
 
 			// Create a new key in a separate keyspace, prefixed by moveKey. We are not
 			// allowed to rewrite an older version of key in the LSM tree, because then this older
@@ -863,7 +876,7 @@ func (vlog *valueLog) Read(vp valuePointer, s *y.Slice) ([]byte, error) {
 	}
 	var h header
 	h.Decode(buf)
-	n := uint32(headerBufSize) + h.klen
+	n := uint32(headerBufSize+h.umlen) + h.klen
 	return buf[n : n+h.vlen], nil
 }
 
@@ -884,10 +897,13 @@ func valueBytesToEntry(buf []byte) (e Entry) {
 	h.Decode(buf)
 	n := uint32(headerBufSize)
 
+	e.meta = h.meta
+	if h.umlen > 0 {
+		e.UserMeta = buf[n : n+uint32(h.umlen)]
+		n += uint32(h.umlen)
+	}
 	e.Key = buf[n : n+h.klen]
 	n += h.klen
-	e.meta = h.meta
-	e.UserMeta = h.userMeta
 	e.Value = buf[n : n+h.vlen]
 	return
 }
