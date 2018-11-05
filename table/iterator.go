@@ -150,6 +150,7 @@ func (t *Table) NewIterator(reversed bool, upperBound []byte) *Iterator {
 		// never execeeded the upper bound
 		ti.upperBound = upperBound
 	}
+
 	return ti
 }
 
@@ -410,7 +411,7 @@ func (s *ConcatIterator) setIdx(idx int) {
 	} else {
 		if s.iters[s.idx] == nil {
 			// We already increased table refs, so init without IncrRef here
-			ti := &Iterator{t: s.tables[s.idx], reversed: s.reversed, upperBound: s.upperBound}
+			ti := s.tables[s.idx].NewIterator(s.reversed, s.upperBound)
 			ti.next()
 			s.iters[s.idx] = ti
 		}
