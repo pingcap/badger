@@ -120,7 +120,7 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 // TODO - Move these to somewhere where table package can also use it.
 // keyValues is n by 2 where n is number of pairs.
 func buildTable(t *testing.T, keyValues [][]string) *os.File {
-	b := table.NewTableBuilder(0)
+	b := table.NewTableBuilder(0, options.TableBuilderOptions{})
 	defer b.Close()
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
 
@@ -180,7 +180,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	}
 
 	manifest := createManifest()
-	lc, err := newLevelsController(kv, &manifest)
+	lc, err := newLevelsController(kv, &manifest, options.TableBuilderOptions{})
 	require.NoError(t, err)
 	done = lc.fillTablesL0(&cd)
 	require.Equal(t, true, done)

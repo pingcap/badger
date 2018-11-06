@@ -18,6 +18,7 @@ package badger
 
 import (
 	"fmt"
+	"github.com/coocood/badger/options"
 	"math"
 	"math/rand"
 	"os"
@@ -40,7 +41,7 @@ type levelsController struct {
 
 	cstatus compactStatus
 
-	opt TableBuilderOptions
+	opt options.TableBuilderOptions
 }
 
 var (
@@ -73,12 +74,12 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 	return nil
 }
 
-func newLevelsController(kv *DB, mf *Manifest, opt TableBuilderOptions) (*levelsController, error) {
+func newLevelsController(kv *DB, mf *Manifest, opt options.TableBuilderOptions) (*levelsController, error) {
 	y.Assert(kv.opt.NumLevelZeroTablesStall > kv.opt.NumLevelZeroTables)
 	s := &levelsController{
 		kv:     kv,
 		levels: make([]*levelHandler, kv.opt.MaxLevels),
-		opt:   opt,
+		opt:    opt,
 	}
 	s.cstatus.levels = make([]*levelCompactStatus, kv.opt.MaxLevels)
 

@@ -267,28 +267,35 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 
 	var maxVs y.ValueStruct
 	for _, th := range tables {
+		var (
+			resultKey []byte
+			resultVs  y.ValueStruct
+			ok        bool
+		)
+
 		if th.DoesNotHave(keyNoTs) {
 			continue
 		}
 
-		it, ok := th.PointGet(key)
+		resultKey, resultVs, ok = th.PointGet(key)
 		if !ok {
-			it = th.NewIterator(false)
+			it := th.NewIteratorNoRef(false)
 			it.Seek(key)
-		} else if it == nil {
-			continue
-		}
-		defer it.Close()
-
-		if !it.Valid() {
-			continue
-		}
-		if y.SameKey(key, it.Key()) {
-			if version := y.ParseTs(it.Key()); maxVs.Version < version {
-				maxVs = it.Value()
-				maxVs.Version = version
-				break
+			if !it.Valid() {
+				continue
 			}
+			if !y.SameKey(key, it.Key()) {
+				continue
+			}
+			resultKey, resultVs = it.Key(), it.Value()
+		} else if resultKey == nil {
+			continue
+		}
+
+		if version := y.ParseTs(resultKey); maxVs.Version < version {
+			maxVs = resultVs
+			maxVs.Version = version
+			break
 		}
 	}
 	maxVs.Value = y.SafeCopy(nil, maxVs.Value)

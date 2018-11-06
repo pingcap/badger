@@ -126,17 +126,17 @@ func TestHashIndexTS(t *testing.T) {
 	f, _ = y.OpenSyncedFile(filename, true)
 	table, err := OpenTable(f, options.MemoryMap)
 
-	it, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10))
+	rk, _, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10))
 	require.True(t, ok)
-	require.True(t, bytes.Compare(it.Key(), keys[0]) == 0)
+	require.True(t, bytes.Compare(rk, keys[0]) == 0)
 
-	it, ok = table.PointGet(y.KeyWithTs([]byte("key"), 6))
+	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 6))
 	require.True(t, ok)
-	require.True(t, bytes.Compare(it.Key(), keys[2]) == 0)
+	require.True(t, bytes.Compare(rk, keys[2]) == 0)
 
-	it, ok = table.PointGet(y.KeyWithTs([]byte("key"), 2))
+	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 2))
 	require.True(t, ok)
-	require.True(t, bytes.Compare(it.Key(), keys[4]) == 0)
+	require.True(t, bytes.Compare(rk, keys[4]) == 0)
 }
 
 func TestPointGet(t *testing.T) {
@@ -147,30 +147,27 @@ func TestPointGet(t *testing.T) {
 
 	for i := 0; i < 8000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		it, ok := table.PointGet(k)
+		k, _, ok := table.PointGet(k)
 		if !ok {
 			// will fallback to seek
 			continue
 		}
-		require.NotNil(t, it, key("key", i)+" not find")
-		require.True(t, it.Valid())
-		require.True(t, y.SameKey(k, it.Key()), "point get not point to correct key")
-		it.Close()
+		require.NotNil(t, k, key("key", i)+" not find")
+		require.True(t, y.SameKey(k, k), "point get not point to correct key")
 	}
 
 	for i := 8000; i < 10000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		it, ok := table.PointGet(k)
+		rk, _, ok := table.PointGet(k)
 		if !ok {
 			// will fallback to seek
 			continue
 		}
-		if it == nil {
+		if rk == nil {
 			// hash table says no entry, fast return
 			continue
 		}
-		require.True(t, it.Valid())
-		require.False(t, y.SameKey(k, it.Key()), "point get not point to correct key")
+		require.False(t, y.SameKey(k, rk), "point get not point to correct key")
 	}
 }
 
@@ -793,40 +790,47 @@ func BenchmarkPointGet(b *testing.B) {
 				rand.Seed(0)
 				for i := 0; i < n; i++ {
 					k := keys[rand.Intn(n)]
-					it := tbl.NewIterator(false)
+					it := tbl.NewIteratorNoRef(false)
 					it.Seek(k)
-					if y.SameKey(k, it.Key()) {
-						vs = it.Value()
+					if !it.Valid() {
+						continue
 					}
-					it.Close()
+					if !y.SameKey(k, it.Key()) {
+						continue
+					}
+					vs = it.Value()
 				}
 			}
 			_ = vs
 		})
 
 		b.Run(fmt.Sprintf("Hash_%d", n), func(b *testing.B) {
-			var vs y.ValueStruct
+			var (
+				resultKey []byte
+				resultVs  y.ValueStruct
+				ok        bool
+			)
 			rand := rand.New(rand.NewSource(0))
 			for bn := 0; bn < b.N; bn++ {
 				rand.Seed(0)
 				for i := 0; i < n; i++ {
 					k := keys[rand.Intn(n)]
-					it, ok := tbl.PointGet(k)
+
+					resultKey, resultVs, ok = tbl.PointGet(k)
 					if !ok {
-						it = tbl.NewIterator(false)
+						it := tbl.NewIteratorNoRef(false)
 						it.Seek(k)
-					} else {
-						if it == nil {
+						if !it.Valid() {
 							continue
 						}
+						if !y.SameKey(k, it.Key()) {
+							continue
+						}
+						resultKey, resultVs = it.Key(), it.Value()
 					}
-					if y.SameKey(k, it.Key()) {
-						vs = it.Value()
-					}
-					it.Close()
 				}
 			}
-			_ = vs
+			_, _ = resultKey, resultVs
 		})
 
 		tbl.DecrRef()

@@ -169,22 +169,27 @@ func (t *Table) Close() error {
 // which means caller should fallback to seek search. Otherwise the value will be true.
 // If The hash index does not contain such an element, the returned iterator will be nil.
 // Otherwise, the returned iterator is already pointing to the appropriate position.
+//
 // Note: it is possible a non-existing key has a hash conflict with the key in the index.
 // In this case, the returned iterator is not nil and points to an incorrect position.
 // The caller needs to further check if the key is equal.
-func (t *Table) PointGet(key []byte) (*Iterator, bool) {
+func (t *Table) PointGet(key []byte) ([]byte, y.ValueStruct, bool) {
 	keyNoTS := y.ParseKey(key)
 	blkIdx, offset := t.hIdx.lookup(keyNoTS)
 	if blkIdx == resultFallback {
-		return nil, false
+		return nil, y.ValueStruct{}, false
 	}
 	if blkIdx == resultNoEntry {
-		return nil, true
+		return nil, y.ValueStruct{}, true
 	}
 
-	it := t.NewIterator(false)
+	it := t.NewIteratorNoRef(false)
 	it.seekFromOffset(int(blkIdx), int(offset), key)
-	return it, true
+
+	if !it.Valid() || !y.SameKey(key, it.Key()) {
+		return nil, y.ValueStruct{}, true
+	}
+	return it.Key(), it.Value(), true
 }
 
 func (t *Table) read(off int, sz int) ([]byte, error) {
