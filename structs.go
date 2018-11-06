@@ -47,9 +47,11 @@ func (p *valuePointer) Decode(b []byte) {
 
 // header is used in value log as a header before Entry.
 type header struct {
-	klen  uint32
-	vlen  uint32
-	meta  byte
+	klen uint32
+	vlen uint32
+	meta byte
+
+	// umlen is the length of UserMeta
 	umlen byte
 }
 
