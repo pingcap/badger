@@ -653,6 +653,26 @@ func BenchmarkRead(b *testing.B) {
 	}
 }
 
+func BenchmarkDecode(b *testing.B) {
+	h := header{}
+	buf := h.Encode()
+	var d header
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		d.Decode(buf)
+	}
+}
+
+func BenchmarkEncode(b *testing.B) {
+	h := header{}
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		h.Encode()
+	}
+}
+
 func BenchmarkReadAndBuild(b *testing.B) {
 	n := 5 << 20
 	builder := NewTableBuilder(0)
