@@ -12,13 +12,15 @@ const (
 )
 
 type hashIndexBuilder struct {
-	buf []struct {
-		hash    uint32
-		restart uint16
-		offset  uint8
-	}
+	entries       []indexEntry
 	hashUtilRatio float32
 	invalid       bool
+}
+
+type indexEntry struct {
+	hash    uint32
+	restart uint16
+	offset  uint8
 }
 
 func newHashIndexBuilder(hashUtilRatio float32) hashIndexBuilder {
@@ -28,25 +30,21 @@ func newHashIndexBuilder(hashUtilRatio float32) hashIndexBuilder {
 }
 
 func (b *hashIndexBuilder) addKey(key []byte, restart uint32, offset uint8) {
-	if restart > maxRestart || b.invalid {
+	if restart > maxRestart {
 		b.invalid = true
-		b.buf = nil
+		b.entries = nil
 		return
 	}
 	h := farm.Fingerprint32(key)
-	b.buf = append(b.buf, struct {
-		hash    uint32
-		restart uint16
-		offset  uint8
-	}{h, uint16(restart), offset})
+	b.entries = append(b.entries, indexEntry{h, uint16(restart), offset})
 }
 
 func (b *hashIndexBuilder) finish(buf []byte) []byte {
-	if b.invalid || len(b.buf) == 0 {
+	if b.invalid || len(b.entries) == 0 {
 		return append(buf, u32ToBytes(0)...)
 	}
 
-	numBuckets := uint32(float32(len(b.buf)) / b.hashUtilRatio)
+	numBuckets := uint32(float32(len(b.entries)) / b.hashUtilRatio)
 	bufLen := len(buf)
 	buf = append(buf, make([]byte, numBuckets*3+4)...)
 	buckets := buf[bufLen:]
@@ -54,7 +52,7 @@ func (b *hashIndexBuilder) finish(buf []byte) []byte {
 		binary.LittleEndian.PutUint16(buckets[i*3:], resultNoEntry)
 	}
 
-	for _, h := range b.buf {
+	for _, h := range b.entries {
 		idx := h.hash % numBuckets
 		bucket := buckets[idx*3 : (idx+1)*3]
 		restart := binary.LittleEndian.Uint16(bucket[:2])

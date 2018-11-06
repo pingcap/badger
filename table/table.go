@@ -164,6 +164,14 @@ func (t *Table) Close() error {
 	return t.fd.Close()
 }
 
+// PointGet try to lookup a key by using table's hash index.
+// If it find an hash collision the second return value will be false,
+// which means caller should fallback to seek search. Otherwise the value will be true.
+// If The hash index does not contain such an element, the returned iterator will be nil.
+// Otherwise, the returned iterator is already pointing to the appropriate position.
+// Note: it is possible a non-existing key has a hash conflict with the key in the index.
+// In this case, the returned iterator is not nil and points to an incorrect position.
+// The caller needs to further check if the key is equal.
 func (t *Table) PointGet(key []byte) (*Iterator, bool) {
 	keyNoTS := y.ParseKey(key)
 	blkIdx, offset := t.hIdx.lookup(keyNoTS)

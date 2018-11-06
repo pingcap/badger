@@ -153,7 +153,7 @@ func (b *Builder) finishBlock() {
 // Add adds a key-value pair to the block.
 // If doNotRestart is true, we will not restart even if b.counter >= restartInterval.
 func (b *Builder) Add(key []byte, value y.ValueStruct) error {
-	if b.counter > restartInterval {
+	if b.counter >= restartInterval {
 		b.finishBlock()
 	}
 	b.addHelper(key, value)

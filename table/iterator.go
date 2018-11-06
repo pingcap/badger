@@ -69,6 +69,7 @@ func (itr *blockIterator) loadEntryEndOffsets() {
 }
 
 // Seek brings us to the first block element that is >= input key.
+// The binary search will begin at `start`, you can use it to skip some items.
 func (itr *blockIterator) seek(key []byte, start int) {
 	foundEntryIdx := sort.Search(len(itr.entryEndOffsets)-start, func(idx int) bool {
 		itr.setIdx(idx + start)
