@@ -18,9 +18,13 @@ type hashIndexBuilder struct {
 }
 
 type indexEntry struct {
-	hash    uint32
+	hash uint32
+
+	// restart is the index of block (aka restart) which contains this key.
 	restart uint16
-	offset  uint8
+
+	// offset is the index of this key in block (aka restart).
+	offset uint8
 }
 
 func newHashIndexBuilder(hashUtilRatio float32) hashIndexBuilder {

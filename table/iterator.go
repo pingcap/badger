@@ -209,8 +209,6 @@ func (itr *Iterator) seekHelper(blockIdx int, key []byte) {
 	itr.err = itr.bi.Error()
 }
 
-const seekBound = 3
-
 func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx)
@@ -219,12 +217,9 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 		return
 	}
 	itr.bi.setBlock(block)
-	for i := 0; i < seekBound; i++ {
-		itr.bi.setIdx(offset)
-		if y.CompareKeys(itr.bi.key, key) >= 0 {
-			return
-		}
-		offset++
+	itr.bi.setIdx(offset)
+	if y.CompareKeys(itr.bi.key, key) >= 0 {
+		return
 	}
 	itr.bi.seek(key, offset)
 }
