@@ -8,7 +8,7 @@ import (
 const (
 	resultNoEntry  = 65535
 	resultFallback = 65534
-	maxRestart     = 65533
+	maxBlockCnt    = 65533
 )
 
 type hashIndexBuilder struct {
@@ -34,7 +34,7 @@ func newHashIndexBuilder(hashUtilRatio float32) hashIndexBuilder {
 }
 
 func (b *hashIndexBuilder) addKey(key []byte, blkIdx uint32, offset uint8) {
-	if blkIdx > maxRestart {
+	if blkIdx > maxBlockCnt {
 		b.invalid = true
 		b.entries = nil
 		return
