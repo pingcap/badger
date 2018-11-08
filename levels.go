@@ -396,7 +396,7 @@ func (s *levelsController) compactBuildTables(
 			go func(builder *table.Builder) {
 				defer builder.Close()
 
-				fd, err := y.CreateSyncedFile(table.NewFilename(fileID, s.kv.opt.Dir), true)
+				fd, err := y.CreateSyncedFile(table.NewFilename(fileID, s.kv.opt.Dir), false)
 				if err != nil {
 					resultCh <- newTableResult{nil, errors.Wrapf(err, "While opening new table: %d", fileID)}
 					return

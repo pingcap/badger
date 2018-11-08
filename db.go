@@ -636,7 +636,7 @@ func writeToFile(f *os.File, buf []byte) error {
 			return err
 		}
 	}
-	return nil
+	return f.Sync()
 }
 
 type flushTask struct {
@@ -667,7 +667,7 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 		}
 
 		fileID := db.lc.reserveFileID()
-		fd, err := y.CreateSyncedFile(table.NewFilename(fileID, db.opt.Dir), true)
+		fd, err := y.CreateSyncedFile(table.NewFilename(fileID, db.opt.Dir), false)
 		if err != nil {
 			return y.Wrap(err)
 		}
