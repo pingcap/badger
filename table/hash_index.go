@@ -72,6 +72,11 @@ func (b *hashIndexBuilder) finish(buf []byte) []byte {
 	return buf
 }
 
+func (b *hashIndexBuilder) reset() {
+	b.entries = b.entries[:0]
+	b.invalid = false
+}
+
 type hashIndex struct {
 	buckets    []byte
 	numBuckets int

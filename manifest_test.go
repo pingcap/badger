@@ -120,12 +120,10 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 // TODO - Move these to somewhere where table package can also use it.
 // keyValues is n by 2 where n is number of pairs.
 func buildTable(t *testing.T, keyValues [][]string) *os.File {
-	b := table.NewTableBuilder(0, options.TableBuilderOptions{})
-	defer b.Close()
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
 
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
-	f, err := y.OpenSyncedFile(filename, true)
+	f, err := y.OpenSyncedFile(filename, false)
 	if t != nil {
 		require.NoError(t, err)
 	} else {
@@ -135,6 +133,9 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	sort.Slice(keyValues, func(i, j int) bool {
 		return keyValues[i][0] < keyValues[j][0]
 	})
+
+	b := table.NewTableBuilder(f, nil, options.TableBuilderOptions{})
+	defer b.Close()
 	for _, kv := range keyValues {
 		y.Assert(len(kv) == 2)
 		err := b.Add(y.KeyWithTs([]byte(kv[0]), 10), y.ValueStruct{
@@ -147,7 +148,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 			y.Check(err)
 		}
 	}
-	f.Write(b.Finish())
+	y.Check(b.Finish())
 	f.Close()
 	f, _ = y.OpenSyncedFile(filename, true)
 	return f
@@ -183,7 +184,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	require.NoError(t, err)
 	done = lc.fillTablesL0(&cd)
 	require.Equal(t, true, done)
-	lc.runCompactDef(0, cd)
+	lc.runCompactDef(0, cd, nil)
 
 	f = buildTestTable(t, "l", 2)
 	t2, err := table.OpenTable(f, options.MemoryMap)
@@ -197,7 +198,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 		nextLevel: lh1,
 	}
 	lc.fillTablesL0(&cd)
-	lc.runCompactDef(0, cd)
+	lc.runCompactDef(0, cd, nil)
 }
 
 func TestManifestRewrite(t *testing.T) {

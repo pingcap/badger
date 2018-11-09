@@ -104,6 +104,8 @@ type Options struct {
 	Truncate bool
 
 	TableBuilderOptions options.TableBuilderOptions
+
+	ValueLogWriteOptions options.ValueLogWriterOptions
 }
 
 // DefaultOptions sets a list of recommended options for good performance.
@@ -131,6 +133,13 @@ var DefaultOptions = Options{
 	TableBuilderOptions: options.TableBuilderOptions{
 		EnableHashIndex: false,
 		HashUtilRatio:   0.75,
+		WriteBufferSize: 1 * 1024 * 1024,
+		BytesPerSync:    0,
+		BytesPerSecond:  -1,
+	},
+	ValueLogWriteOptions: options.ValueLogWriterOptions{
+		WriteBufferSize: 2 * 1024 * 1024,
+		BytesPerSync:    0,
 	},
 }
 

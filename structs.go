@@ -61,17 +61,17 @@ const (
 
 func (h header) Encode(out []byte) {
 	y.Assert(len(out) >= headerBufSize)
-	binary.BigEndian.PutUint32(out[0:4], h.klen)
-	binary.BigEndian.PutUint32(out[4:8], h.vlen)
-	out[8] = h.meta
+	out[0] = ^h.meta
+	binary.BigEndian.PutUint32(out[1:5], h.klen)
+	binary.BigEndian.PutUint32(out[5:9], h.vlen)
 	out[9] = h.umlen
 }
 
 // Decodes h from buf.
 func (h *header) Decode(buf []byte) {
-	h.klen = binary.BigEndian.Uint32(buf[0:4])
-	h.vlen = binary.BigEndian.Uint32(buf[4:8])
-	h.meta = buf[8]
+	h.meta = ^buf[0]
+	h.klen = binary.BigEndian.Uint32(buf[1:5])
+	h.vlen = binary.BigEndian.Uint32(buf[5:9])
 	h.umlen = buf[9]
 }
 
@@ -123,7 +123,7 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 	binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
 	buf.Write(crcBuf[:])
 
-	return len(headerEnc) + len(e.Key) + len(e.Value) + len(crcBuf), nil
+	return len(headerEnc) + len(e.UserMeta) + len(e.Key) + len(e.Value) + len(crcBuf), nil
 }
 
 func (e Entry) print(prefix string) {

@@ -17,7 +17,10 @@
 package badger
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -591,7 +594,18 @@ func createVlog(t *testing.T, entries []*Entry) []byte {
 	filename := vlogFilePath(dir, 0)
 	buf, err := ioutil.ReadFile(filename)
 	require.NoError(t, err)
-	return buf
+
+	read, reader := &safeRead{}, bufio.NewReader(bytes.NewReader(buf))
+	var offset int
+	for {
+		e, err := read.Entry(reader)
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		offset += headerBufSize + len(e.Key) + len(e.Value) + 4
+	}
+	return buf[:offset]
 }
 
 func checkKeys(t *testing.T, kv *DB, keys [][]byte) {
