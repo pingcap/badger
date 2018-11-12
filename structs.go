@@ -56,7 +56,8 @@ type header struct {
 }
 
 const (
-	headerBufSize = 10
+	headerBufSize       = 10
+	metaNotEntryEncoded = 0
 )
 
 func (h header) Encode(out []byte) {
@@ -74,6 +75,13 @@ func (h *header) Decode(buf []byte) {
 	h.klen = binary.BigEndian.Uint32(buf[1:5])
 	h.vlen = binary.BigEndian.Uint32(buf[5:9])
 	h.umlen = buf[9]
+}
+
+func isEncodedHeader(data []byte) bool {
+	if len(data) < 1 {
+		return false
+	}
+	return data[0] != metaNotEntryEncoded
 }
 
 // Entry provides Key, Value, UserMeta. This struct can be used by the user to set data.

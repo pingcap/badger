@@ -23,6 +23,7 @@ import (
 	"github.com/coocood/badger/y"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
+	"io"
 	"math"
 	"math/rand"
 	"os"
@@ -730,37 +731,47 @@ func BenchmarkRead(b *testing.B) {
 	}
 }
 
-//func BenchmarkBuildTable(b *testing.B) {
-//	ns := []int{1000, 10000, 100000, 1000000, 5000000, 10000000, 15000000}
-//	for _, n := range ns {
-//		kvs := make([]struct{ k, v []byte }, n)
-//		for i := 0; i < n; i++ {
-//			kvs[i].k = y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
-//			kvs[i].v = []byte(fmt.Sprintf("%d", i))
-//		}
-//		b.ResetTimer()
-//
-//		b.Run(fmt.Sprintf("NoHash_%d", n), func(b *testing.B) {
-//			for bn := 0; bn < b.N; bn++ {
-//				builder := NewTableBuilder(0, options.TableBuilderOptions{EnableHashIndex: false})
-//				for i := 0; i < n; i++ {
-//					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
-//				}
-//				y.Check(builder.Finish())
-//			}
-//		})
-//
-//		b.Run(fmt.Sprintf("Hash_%d", n), func(b *testing.B) {
-//			for bn := 0; bn < b.N; bn++ {
-//				builder := NewTableBuilder(0, defaultBuilderOpt)
-//				for i := 0; i < n; i++ {
-//					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
-//				}
-//				y.Check(builder.Finish())
-//			}
-//		})
-//	}
-//}
+func BenchmarkBuildTable(b *testing.B) {
+	ns := []int{1000, 10000, 100000, 1000000, 5000000, 10000000, 15000000}
+	for _, n := range ns {
+		kvs := make([]struct{ k, v []byte }, n)
+		for i := 0; i < n; i++ {
+			kvs[i].k = y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
+			kvs[i].v = []byte(fmt.Sprintf("%d", i))
+		}
+		b.ResetTimer()
+
+		b.Run(fmt.Sprintf("NoHash_%d", n), func(b *testing.B) {
+			filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+			f, err := y.OpenSyncedFile(filename, false)
+			y.Check(err)
+			for bn := 0; bn < b.N; bn++ {
+				builder := NewTableBuilder(f, nil, options.TableBuilderOptions{EnableHashIndex: false})
+				for i := 0; i < n; i++ {
+					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
+				}
+				y.Check(builder.Finish())
+				_, err := f.Seek(0, io.SeekStart)
+				y.Check(err)
+			}
+		})
+
+		b.Run(fmt.Sprintf("Hash_%d", n), func(b *testing.B) {
+			filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+			f, err := y.OpenSyncedFile(filename, false)
+			y.Check(err)
+			for bn := 0; bn < b.N; bn++ {
+				builder := NewTableBuilder(f, nil, defaultBuilderOpt)
+				for i := 0; i < n; i++ {
+					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
+				}
+				y.Check(builder.Finish())
+				_, err := f.Seek(0, io.SeekStart)
+				y.Check(err)
+			}
+		})
+	}
+}
 
 func BenchmarkPointGet(b *testing.B) {
 	ns := []int{1000, 10000, 100000, 1000000, 5000000, 10000000, 15000000}
@@ -836,39 +847,44 @@ func BenchmarkPointGet(b *testing.B) {
 	}
 }
 
-//func BenchmarkReadAndBuild(b *testing.B) {
-//	n := 5 << 20
-//	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
-//	f, err := y.OpenSyncedFile(filename, true)
-//	builder := NewTableBuilder(f, defaultBuilderOpt)
-//	y.Check(err)
-//	for i := 0; i < n; i++ {
-//		k := fmt.Sprintf("%016x", i)
-//		v := fmt.Sprintf("%d", i)
-//		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: 0}))
-//	}
-//
-//	y.Check(builder.Finish())
-//	tbl, err := OpenTable(f, options.MemoryMap)
-//	y.Check(err)
-//	defer tbl.DecrRef()
-//
-//	//	y.Printf("Size of table: %d\n", tbl.Size())
-//	b.ResetTimer()
-//	// Iterate b.N times over the entire table.
-//	for i := 0; i < b.N; i++ {
-//		func() {
-//			newBuilder := NewTableBuilder(0, options.TableBuilderOptions{})
-//			it := tbl.NewIterator(false)
-//			defer it.Close()
-//			for it.seekToFirst(); it.Valid(); it.next() {
-//				vs := it.Value()
-//				newBuilder.Add(it.Key(), vs)
-//			}
-//			newBuilder.Finish()
-//		}()
-//	}
-//}
+func BenchmarkReadAndBuild(b *testing.B) {
+	n := 5 << 20
+	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	f, err := y.OpenSyncedFile(filename, false)
+	builder := NewTableBuilder(f, nil, defaultBuilderOpt)
+	y.Check(err)
+	for i := 0; i < n; i++ {
+		k := fmt.Sprintf("%016x", i)
+		v := fmt.Sprintf("%d", i)
+		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: 0}))
+	}
+
+	y.Check(builder.Finish())
+	tbl, err := OpenTable(f, options.MemoryMap)
+	y.Check(err)
+	defer tbl.DecrRef()
+
+	//	y.Printf("Size of table: %d\n", tbl.Size())
+	b.ResetTimer()
+	// Iterate b.N times over the entire table.
+	filename = fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	f, err = y.OpenSyncedFile(filename, false)
+	y.Check(err)
+	for i := 0; i < b.N; i++ {
+		func() {
+			newBuilder := NewTableBuilder(f, nil, options.TableBuilderOptions{})
+			it := tbl.NewIterator(false)
+			defer it.Close()
+			for it.seekToFirst(); it.Valid(); it.next() {
+				vs := it.Value()
+				newBuilder.Add(it.Key(), vs)
+			}
+			y.Check(newBuilder.Finish())
+			_, err := f.Seek(0, io.SeekStart)
+			y.Check(err)
+		}()
+	}
+}
 
 func BenchmarkReadMerged(b *testing.B) {
 	n := 5 << 20

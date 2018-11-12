@@ -155,7 +155,7 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
 	}
 
 	// Encounter preallocated region, just act as EOF.
-	if hbuf[0] == 0 {
+	if !isEncodedHeader(hbuf[:]) {
 		return nil, io.EOF
 	}
 
