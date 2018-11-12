@@ -34,10 +34,11 @@ func (v *ValueStruct) EncodedSize() uint16 {
 // Decode uses the length of the slice to infer the length of the Value field.
 func (v *ValueStruct) Decode(b []byte) {
 	v.Meta = b[0]
+	userMetaEnd := 2 + b[1]
 	if b[1] != 0 {
-		v.UserMeta = b[2 : 2+b[1]]
+		v.UserMeta = b[2:userMetaEnd]
 	}
-	v.Value = b[2+b[1]:]
+	v.Value = b[userMetaEnd:]
 	// Reset the Version because *ValueStruct may be reused.
 	v.Version = 0
 }
