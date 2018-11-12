@@ -17,6 +17,9 @@ type BufferedFileWriter struct {
 	limiter *rate.Limiter
 }
 
+// NewBufferedFileWriter makes a new NewBufferedFileWriter.
+// BufferedFileWriter use SyncFileRange internally, you can control the this sync by bytesPerSync.
+// If the limiter is nil, this writer will not limit the write speed.
 func NewBufferedFileWriter(f *os.File, bufSize int, bytesPerSync int, limiter *rate.Limiter) *BufferedFileWriter {
 	return &BufferedFileWriter{
 		f:            f,
@@ -27,10 +30,14 @@ func NewBufferedFileWriter(f *os.File, bufSize int, bytesPerSync int, limiter *r
 	}
 }
 
+// Append data to buffer, flush buffer if needed.
+// If bytesPerSync > 0, this call may flush some dirty page respect to bytesPerSync.
 func (bw *BufferedFileWriter) Append(data []byte) error {
 	return bw.appendData(data, true)
 }
 
+// Flush data in buffer to disk.
+// If fsync is true, it will do a Fdatasync, otherwise it will try to do a SyncFileRange.
 func (bw *BufferedFileWriter) Flush(fsync bool) error {
 	if err := bw.flushBuffer(!fsync); err != nil {
 		return err
@@ -41,6 +48,7 @@ func (bw *BufferedFileWriter) Flush(fsync bool) error {
 	return nil
 }
 
+// FlushWithData append data to buffer and then do a buffer flush just like Flush.
 func (bw *BufferedFileWriter) FlushWithData(data []byte, fsync bool) error {
 	if err := bw.appendData(data, !fsync); err != nil {
 		return err
@@ -54,6 +62,7 @@ func (bw *BufferedFileWriter) FlushWithData(data []byte, fsync bool) error {
 	return nil
 }
 
+// Reset this writer with new file.
 func (bw *BufferedFileWriter) Reset(f *os.File) {
 	bw.f = f
 	bw.buf = bw.buf[:0]
@@ -61,6 +70,7 @@ func (bw *BufferedFileWriter) Reset(f *os.File) {
 	bw.lastSyncOffset = 0
 }
 
+// Reset this writer with new file and rate limiter.
 func (bw *BufferedFileWriter) ResetWithLimiter(f *os.File, limiter *rate.Limiter) {
 	bw.Reset(f)
 	bw.limiter = limiter

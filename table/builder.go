@@ -77,7 +77,7 @@ type Builder struct {
 }
 
 // NewTableBuilder makes a new TableBuilder.
-// The initCap is used to avoid memory reallocation.
+// If the limiter is nil, the write speed during table build will not be limited.
 func NewTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
 	assumeKeyNum := 256 * 1024
 	return &Builder{
@@ -91,11 +91,13 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilder
 	}
 }
 
+// Reset this builder with new file.
 func (b *Builder) Reset(f *os.File) {
 	b.resetBuffers()
 	b.w.Reset(f)
 }
 
+// Reset this builder with new file and rate limiter.
 func (b *Builder) ResetWithLimiter(f *os.File, limiter *rate.Limiter) {
 	b.resetBuffers()
 	b.w.ResetWithLimiter(f, limiter)
@@ -211,7 +213,7 @@ func (b *Builder) ReachedCapacity(capacity int64) bool {
 	return int64(estimateSz) > capacity
 }
 
-// Flush finishes the table by appending the index.
+// Finish finishes the table by appending the index.
 func (b *Builder) Finish() error {
 	b.finishBlock() // This will never start a new block.
 	b.buf = append(b.buf, u32SliceToBytes(b.blockEndOffsets)...)

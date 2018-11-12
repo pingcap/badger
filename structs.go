@@ -61,6 +61,7 @@ const (
 
 func (h header) Encode(out []byte) {
 	y.Assert(len(out) >= headerBufSize)
+	// Because meta can never be 0xff, so 0x00 in vlog file indicates there is not an entry.
 	out[0] = ^h.meta
 	binary.BigEndian.PutUint32(out[1:5], h.klen)
 	binary.BigEndian.PutUint32(out[5:9], h.vlen)
