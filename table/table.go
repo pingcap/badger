@@ -168,7 +168,7 @@ func (t *Table) Close() error {
 // If it find an hash collision the last return value will be false,
 // which means caller should fallback to seek search. Otherwise it value will be true.
 // If the hash index does not contain such an element the returned key will be nil.
-func (t *Table) PointGet(key []byte) ([]byte, y.ValueStruct, bool) {
+func (t *Table) PointGet(it *Iterator, key []byte) ([]byte, y.ValueStruct, bool) {
 	keyNoTS := y.ParseKey(key)
 	blkIdx, offset := t.hIdx.lookup(keyNoTS)
 	if blkIdx == resultFallback {
@@ -178,9 +178,7 @@ func (t *Table) PointGet(key []byte) ([]byte, y.ValueStruct, bool) {
 		return nil, y.ValueStruct{}, true
 	}
 
-	it := t.NewIteratorNoRef(false)
 	it.seekFromOffset(int(blkIdx), int(offset), key)
-
 	if !it.Valid() || !y.SameKey(key, it.Key()) {
 		return nil, y.ValueStruct{}, true
 	}

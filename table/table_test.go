@@ -119,22 +119,23 @@ func TestHashIndexTS(t *testing.T) {
 		y.KeyWithTs([]byte("key"), 1),
 	}
 	for _, k := range keys {
-		b.Add(k, y.ValueStruct{Value: k, Meta: 'A', UserMeta: 0})
+		b.Add(k, y.ValueStruct{Value: k, Meta: 'A', UserMeta: []byte{0}})
 	}
 	f.Write(b.Finish())
 	f.Close()
 	f, _ = y.OpenSyncedFile(filename, true)
 	table, err := OpenTable(f, options.MemoryMap)
+	it := table.NewIteratorNoRef(false)
 
-	rk, _, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10))
+	rk, _, ok := table.PointGet(it, y.KeyWithTs([]byte("key"), 10))
 	require.True(t, ok)
 	require.True(t, bytes.Compare(rk, keys[0]) == 0)
 
-	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 6))
+	rk, _, ok = table.PointGet(it, y.KeyWithTs([]byte("key"), 6))
 	require.True(t, ok)
 	require.True(t, bytes.Compare(rk, keys[2]) == 0)
 
-	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 2))
+	rk, _, ok = table.PointGet(it, y.KeyWithTs([]byte("key"), 2))
 	require.True(t, ok)
 	require.True(t, bytes.Compare(rk, keys[4]) == 0)
 }
@@ -147,7 +148,8 @@ func TestPointGet(t *testing.T) {
 
 	for i := 0; i < 8000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		k, _, ok := table.PointGet(k)
+		it := table.NewIteratorNoRef(false)
+		k, _, ok := table.PointGet(it, k)
 		if !ok {
 			// will fallback to seek
 			continue
@@ -158,7 +160,8 @@ func TestPointGet(t *testing.T) {
 
 	for i := 8000; i < 10000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		rk, _, ok := table.PointGet(k)
+		it := table.NewIteratorNoRef(false)
+		rk, _, ok := table.PointGet(it, k)
 		if !ok {
 			// will fallback to seek
 			continue
@@ -742,7 +745,7 @@ func BenchmarkBuildTable(b *testing.B) {
 			for bn := 0; bn < b.N; bn++ {
 				builder := NewTableBuilder(0, options.TableBuilderOptions{EnableHashIndex: false})
 				for i := 0; i < n; i++ {
-					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
+					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
 				result = builder.Finish()
 			}
@@ -754,7 +757,7 @@ func BenchmarkBuildTable(b *testing.B) {
 			for bn := 0; bn < b.N; bn++ {
 				builder := NewTableBuilder(0, defaultBuilderOpt)
 				for i := 0; i < n; i++ {
-					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
+					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
 				result = builder.Finish()
 			}
@@ -775,7 +778,7 @@ func BenchmarkPointGet(b *testing.B) {
 			k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
 			v := fmt.Sprintf("%d", i)
 			keys[i] = k
-			y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: 0}))
+			y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
 
 		f.Write(builder.Finish())
@@ -798,27 +801,30 @@ func BenchmarkPointGet(b *testing.B) {
 					if !y.SameKey(k, it.Key()) {
 						continue
 					}
-					vs = it.Value()
+					if version := y.ParseTs(it.Key()); vs.Version < version {
+						vs = it.Value()
+					}
 				}
 			}
 			_ = vs
 		})
 
 		b.Run(fmt.Sprintf("Hash_%d", n), func(b *testing.B) {
-			var (
-				resultKey []byte
-				resultVs  y.ValueStruct
-				ok        bool
-			)
+			var vs y.ValueStruct
 			rand := rand.New(rand.NewSource(0))
 			for bn := 0; bn < b.N; bn++ {
 				rand.Seed(0)
 				for i := 0; i < n; i++ {
+					var (
+						resultKey []byte
+						resultVs  y.ValueStruct
+						ok        bool
+					)
 					k := keys[rand.Intn(n)]
 
-					resultKey, resultVs, ok = tbl.PointGet(k)
+					it := tbl.NewIteratorNoRef(false)
+					resultKey, resultVs, ok = tbl.PointGet(it, k)
 					if !ok {
-						it := tbl.NewIteratorNoRef(false)
 						it.Seek(k)
 						if !it.Valid() {
 							continue
@@ -828,9 +834,13 @@ func BenchmarkPointGet(b *testing.B) {
 						}
 						resultKey, resultVs = it.Key(), it.Value()
 					}
+
+					if version := y.ParseTs(resultKey); vs.Version < version {
+						vs = resultVs
+					}
 				}
 			}
-			_, _ = resultKey, resultVs
+			_ = vs
 		})
 
 		tbl.DecrRef()

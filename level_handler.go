@@ -225,7 +225,6 @@ func (s *levelHandler) close() error {
 // getTableForKey acquires a read-lock to access s.tables. It returns a list of tableHandlers.
 func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 	s.RLock()
-	defer s.RUnlock()
 
 	if s.level == 0 {
 		// For level 0, we need to check every table. Remember to make a copy as s.tables may change
@@ -237,6 +236,7 @@ func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 			s.tables[i].IncrRef()
 		}
 
+		s.RUnlock()
 		return out
 	}
 	// For level >= 1, we can do a binary search as key range does not overlap.
@@ -245,24 +245,18 @@ func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 	})
 	if idx >= len(s.tables) {
 		// Given key is strictly > than every element we have.
+		s.RUnlock()
 		return nil
 	}
 	tbl := s.tables[idx]
 	tbl.IncrRef()
+	s.RUnlock()
 	return []*table.Table{tbl}
 }
 
 // get returns value for a given key or the key after that. If not found, return nil.
 func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 	tables := s.getTableForKey(key)
-	defer func() {
-		for _, t := range tables {
-			if err := t.DecrRef(); err != nil {
-				panic(err)
-			}
-		}
-	}()
-
 	keyNoTs := y.ParseKey(key)
 
 	var maxVs y.ValueStruct
@@ -277,9 +271,9 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 			continue
 		}
 
-		resultKey, resultVs, ok = th.PointGet(key)
+		it := th.NewIteratorNoRef(false)
+		resultKey, resultVs, ok = th.PointGet(it, key)
 		if !ok {
-			it := th.NewIteratorNoRef(false)
 			it.Seek(key)
 			if !it.Valid() {
 				continue
@@ -299,6 +293,11 @@ func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 		}
 	}
 	maxVs.Value = y.SafeCopy(nil, maxVs.Value)
+	for _, t := range tables {
+		if err := t.DecrRef(); err != nil {
+			panic(err)
+		}
+	}
 	return maxVs, nil
 }
 

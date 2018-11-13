@@ -24,15 +24,19 @@ import (
 	"github.com/coocood/badger/y"
 )
 
+const itrKeyBootstrapSize = 32
+
 type blockIterator struct {
 	data    []byte
 	idx     int
 	err     error
 	baseKey []byte
 
-	key    []byte
-	val    []byte
-	keyBuf [256]byte
+	keyBuf          []byte
+	keyBootstrap    [itrKeyBootstrapSize]byte
+	keyBootstrapIdx int
+
+	val []byte
 
 	keyPrefixLen    uint16
 	entryEndOffsets []uint32
@@ -43,7 +47,8 @@ func (itr *blockIterator) setBlock(b block) {
 	itr.idx = 0
 	itr.baseKey = itr.baseKey[:0]
 	itr.keyPrefixLen = 0
-	itr.key = itr.keyBuf[:0]
+	itr.keyBuf = itr.keyBuf[:0]
+	itr.keyBootstrapIdx = 0
 	itr.val = itr.val[:0]
 	itr.data = b.data
 	itr.loadEntryEndOffsets()
@@ -73,7 +78,7 @@ func (itr *blockIterator) loadEntryEndOffsets() {
 func (itr *blockIterator) seek(key []byte) {
 	foundEntryIdx := sort.Search(len(itr.entryEndOffsets), func(idx int) bool {
 		itr.setIdx(idx)
-		return y.CompareKeys(itr.key, key) >= 0
+		return y.CompareKeys(itr.key(), key) >= 0
 	})
 	itr.setIdx(foundEntryIdx)
 }
@@ -112,12 +117,12 @@ func (itr *blockIterator) setIdx(i int) {
 	var h header
 	h.Decode(entryData)
 	if h.baseLen > itr.keyPrefixLen {
-		itr.key = append(itr.key[:0], itr.baseKey[:h.baseLen]...)
+		itr.appendToKey(0, itr.baseKey[:h.baseLen])
 	}
 	itr.keyPrefixLen = h.baseLen
 	valueOff := headerSize + int(h.diffLen)
 	diffKey := entryData[headerSize:valueOff]
-	itr.key = append(itr.key[:h.baseLen], diffKey...)
+	itr.appendToKey(int(h.baseLen), diffKey)
 	itr.val = entryData[valueOff:]
 }
 
@@ -127,6 +132,28 @@ func (itr *blockIterator) next() {
 
 func (itr *blockIterator) prev() {
 	itr.setIdx(itr.idx - 1)
+}
+
+func (itr *blockIterator) key() []byte {
+	if itr.keyBuf != nil {
+		return itr.keyBuf
+	}
+	return itr.keyBootstrap[:itr.keyBootstrapIdx]
+}
+
+func (itr *blockIterator) appendToKey(offset int, data []byte) {
+	if itr.keyBuf != nil {
+		itr.keyBuf = append(itr.keyBuf[:offset], data...)
+		return
+	}
+	if itrKeyBootstrapSize >= len(data)+offset {
+		copy(itr.keyBootstrap[offset:], data)
+		itr.keyBootstrapIdx = offset + len(data)
+		return
+	}
+	itr.keyBuf = make([]byte, offset+len(data))
+	copy(itr.keyBuf[:offset], itr.keyBootstrap[:offset])
+	copy(itr.keyBuf[offset:], data)
 }
 
 // Iterator is an iterator for a Table.
@@ -222,7 +249,7 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	}
 	itr.bi.setBlock(block)
 	itr.bi.setIdx(offset)
-	if y.CompareKeys(itr.bi.key, key) >= 0 {
+	if y.CompareKeys(itr.bi.key(), key) >= 0 {
 		return
 	}
 	itr.bi.seek(key)
@@ -342,7 +369,7 @@ func (itr *Iterator) prev() {
 
 // Key follows the y.Iterator interface
 func (itr *Iterator) Key() []byte {
-	return itr.bi.key
+	return itr.bi.key()
 }
 
 // Value follows the y.Iterator interface
