@@ -34,6 +34,7 @@ func (v *ValueStruct) EncodedSize() uint16 {
 // Decode uses the length of the slice to infer the length of the Value field.
 func (v *ValueStruct) Decode(b []byte) {
 	v.Meta = b[0]
+	v.UserMeta = nil
 	userMetaEnd := 2 + b[1]
 	if b[1] != 0 {
 		v.UserMeta = b[2:userMetaEnd]
