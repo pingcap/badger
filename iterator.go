@@ -425,7 +425,9 @@ func (it *Iterator) Item() *Item {
 	tx := it.txn
 	if tx.update {
 		// Track reads if this is an update txn.
-		tx.reads = append(tx.reads, farm.Fingerprint64(it.item.Key()))
+		fp := farm.Fingerprint64(it.item.Key())
+		tx.reads = append(tx.reads, fp)
+		markStripeInBitmap(&tx.lockBitmap, fp)
 	}
 	return it.item
 }

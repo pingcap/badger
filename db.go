@@ -78,7 +78,7 @@ type DB struct {
 }
 
 const (
-	kvWriteChCapacity = 1000
+	kvWriteChCapacity = 2048
 )
 
 func replayFunction(out *DB) func(Entry, valuePointer) error {
@@ -238,8 +238,10 @@ func Open(opt Options) (db *DB, err error) {
 	orc := &oracle{
 		isManaged:  opt.managedTxns,
 		nextCommit: 1,
-		commits:    make(map[uint64]uint64),
 		readMark:   y.WaterMark{},
+	}
+	for i := range orc.commits.stripes {
+		orc.commits.stripes[i].commits = make(map[uint64]uint64)
 	}
 	orc.readMark.Init()
 

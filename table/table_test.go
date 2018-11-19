@@ -748,7 +748,7 @@ func BenchmarkBuildTable(b *testing.B) {
 			for bn := 0; bn < b.N; bn++ {
 				builder := NewTableBuilder(f, nil, options.TableBuilderOptions{EnableHashIndex: false})
 				for i := 0; i < n; i++ {
-					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
+					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
 				y.Check(builder.Finish())
 				_, err := f.Seek(0, io.SeekStart)
@@ -763,7 +763,7 @@ func BenchmarkBuildTable(b *testing.B) {
 			for bn := 0; bn < b.N; bn++ {
 				builder := NewTableBuilder(f, nil, defaultBuilderOpt)
 				for i := 0; i < n; i++ {
-					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: 0}))
+					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
 				y.Check(builder.Finish())
 				_, err := f.Seek(0, io.SeekStart)
@@ -856,7 +856,7 @@ func BenchmarkReadAndBuild(b *testing.B) {
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("%016x", i)
 		v := fmt.Sprintf("%d", i)
-		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: 0}))
+		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 	}
 
 	y.Check(builder.Finish())

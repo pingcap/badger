@@ -18,6 +18,7 @@ package badger
 
 import (
 	"bytes"
+	"golang.org/x/sys/cpu"
 	"math"
 	"sort"
 	"strconv"
@@ -29,21 +30,66 @@ import (
 	"github.com/pkg/errors"
 )
 
+const numCommitMapStripe = 16
+
+type commitMap struct {
+	stripes [numCommitMapStripe]commitMapStripe
+}
+
+type commitMapStripe struct {
+	sync.Mutex
+	commits map[uint64]uint64
+	padding cpu.CacheLinePad
+}
+
+func markStripeInBitmap(bitmap *uint16, fp uint64) {
+	s := uint16(fp % numCommitMapStripe)
+	*bitmap |= 1 << s
+}
+
+func (cm *commitMap) lockStripes(bitmap uint16) {
+	var i uint
+	for i = 0; i < numCommitMapStripe; i++ {
+		if bitmap&(1<<i) != 0 {
+			cm.stripes[i].Lock()
+		}
+	}
+}
+
+func (cm *commitMap) unlockStripes(bitmap uint16) {
+	var i uint
+	for i = 0; i < numCommitMapStripe; i++ {
+		if bitmap&(1<<i) != 0 {
+			cm.stripes[i].Unlock()
+		}
+	}
+}
+
+func (cm *commitMap) get(fp uint64) (uint64, bool) {
+	s := fp % numCommitMapStripe
+	r, ok := cm.stripes[s].commits[fp]
+	return r, ok
+}
+
+func (cm *commitMap) set(fp, val uint64) {
+	s := fp % numCommitMapStripe
+	cm.stripes[s].commits[fp] = val
+}
+
 type oracle struct {
 	// curRead must be at the top for memory alignment. See issue #311.
 	curRead   uint64 // Managed by the mutex.
 	refCount  int64
 	isManaged bool // Does not change value, so no locking required.
 
-	sync.Mutex
-	writeLock  sync.Mutex
+	sync.RWMutex
 	nextCommit uint64
 
 	readMark y.WaterMark
 
 	// commits stores a key fingerprint and latest commit counter for it.
 	// refCount is used to clear out commits map to avoid a memory blowup.
-	commits map[uint64]uint64
+	commits commitMap
 }
 
 func (o *oracle) addRef() {
@@ -60,8 +106,10 @@ func (o *oracle) decrRef() {
 			o.Unlock()
 			return
 		}
-		if len(o.commits) >= 1000 { // If the map is still small, let it slide.
-			o.commits = make(map[uint64]uint64)
+		for i := range o.commits.stripes {
+			if len(o.commits.stripes[i].commits) >= 1000 { // If the map is still small, let it slide.
+				o.commits.stripes[i].commits = make(map[uint64]uint64)
+			}
 		}
 		o.Unlock()
 	}
@@ -86,7 +134,7 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 		return false
 	}
 	for _, ro := range txn.reads {
-		if ts, has := o.commits[ro]; has && ts > txn.readTs {
+		if ts, has := o.commits.get(ro); has && ts > txn.readTs {
 			return true
 		}
 	}
@@ -94,27 +142,26 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 }
 
 func (o *oracle) newCommitTs(txn *Txn) uint64 {
-	o.Lock()
-	defer o.Unlock()
+	o.RLock()
 
 	if o.hasConflict(txn) {
+		o.RUnlock()
 		return 0
 	}
 
 	var ts uint64
 	if !o.isManaged {
 		// This is the general case, when user doesn't specify the read and commit ts.
-		ts = o.nextCommit
-		o.nextCommit++
-
+		ts = atomic.AddUint64(&o.nextCommit, 1) - 1
 	} else {
 		// If commitTs is set, use it instead.
 		ts = txn.commitTs
 	}
 
 	for _, w := range txn.writes {
-		o.commits[w] = ts // Update the commitTs.
+		o.commits.set(w, ts) // Update the commitTs.
 	}
+	o.RUnlock()
 	return ts
 }
 
@@ -150,6 +197,8 @@ type Txn struct {
 	size         int64
 	count        int64
 	numIterators int32
+
+	lockBitmap uint16
 }
 
 type pendingWritesIterator struct {
@@ -293,6 +342,7 @@ func (txn *Txn) modify(e *Entry) error {
 	fp := farm.Fingerprint64(e.Key) // Avoid dealing with byte arrays.
 	txn.writes = append(txn.writes, fp)
 	txn.pendingWrites[string(e.Key)] = e
+	markStripeInBitmap(&txn.lockBitmap, fp)
 	return nil
 }
 
@@ -342,6 +392,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 		// internally.
 		fp := farm.Fingerprint64(key)
 		txn.reads = append(txn.reads, fp)
+		markStripeInBitmap(&txn.lockBitmap, fp)
 	}
 
 	seek := y.KeyWithTs(key, txn.readTs)
@@ -410,21 +461,25 @@ func (txn *Txn) Commit() error {
 		return nil // Nothing to do.
 	}
 
-	state := txn.db.orc
-	state.writeLock.Lock()
-	commitTs := state.newCommitTs(txn)
-	if commitTs == 0 {
-		state.writeLock.Unlock()
-		return ErrConflict
-	}
-
 	entries := make([]*Entry, 0, len(txn.pendingWrites)+1)
 	for _, e := range txn.pendingWrites {
 		// Suffix the keys with commit ts, so the key versions are sorted in
 		// descending order of commit timestamp.
-		e.Key = y.KeyWithTs(e.Key, commitTs)
 		e.meta |= bitTxn
 		entries = append(entries, e)
+	}
+
+	state := txn.db.orc
+	state.commits.lockStripes(txn.lockBitmap)
+
+	commitTs := state.newCommitTs(txn)
+	if commitTs == 0 {
+		state.commits.unlockStripes(txn.lockBitmap)
+		return ErrConflict
+	}
+
+	for _, e := range entries {
+		e.Key = y.KeyWithTs(e.Key, commitTs)
 	}
 	e := &Entry{
 		Key:   y.KeyWithTs(txnKey, commitTs),
@@ -434,7 +489,7 @@ func (txn *Txn) Commit() error {
 	entries = append(entries, e)
 
 	req, err := txn.db.sendToWriteCh(entries)
-	state.writeLock.Unlock()
+	state.commits.unlockStripes(txn.lockBitmap)
 	if err != nil {
 		return err
 	}
