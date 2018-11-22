@@ -729,9 +729,11 @@ type request struct {
 	// Input values
 	Entries []*Entry
 	// Output values and wait group stuff below
-	Ptrs []valuePointer
-	Wg   sync.WaitGroup
-	Err  error
+	Ptrs      []valuePointer
+	Wg        sync.WaitGroup
+	Err       error
+	IsManaged bool
+	Callback  func(error)
 }
 
 func (req *request) Wait() error {

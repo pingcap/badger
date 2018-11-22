@@ -65,9 +65,11 @@ type DB struct {
 	manifest  *manifestFile
 	lc        *levelsController
 	vlog      valueLog
-	vptr      valuePointer // less than or equal to a pointer to the last vlog value put into mt
-	writeCh   chan *request
+	vptr      valuePointer   // less than or equal to a pointer to the last vlog value put into mt
 	flushChan chan flushTask // For flushing memtables.
+
+	writeCh        chan *request
+	managedWriteCh chan []*request
 
 	// mem table buffer to avoid expensive allocating big chunk of memory
 	memTableCh chan *skl.Skiplist
@@ -244,15 +246,16 @@ func Open(opt Options) (db *DB, err error) {
 	orc.readMark.Init()
 
 	db = &DB{
-		imm:           make([]*skl.Skiplist, 0, opt.NumMemtables),
-		flushChan:     make(chan flushTask, opt.NumMemtables),
-		writeCh:       make(chan *request, kvWriteChCapacity),
-		memTableCh:    make(chan *skl.Skiplist, 1),
-		opt:           opt,
-		manifest:      manifestFile,
-		dirLockGuard:  dirLockGuard,
-		valueDirGuard: valueDirLockGuard,
-		orc:           orc,
+		imm:            make([]*skl.Skiplist, 0, opt.NumMemtables),
+		flushChan:      make(chan flushTask, opt.NumMemtables),
+		writeCh:        make(chan *request, kvWriteChCapacity),
+		managedWriteCh: make(chan []*request),
+		memTableCh:     make(chan *skl.Skiplist, 1),
+		opt:            opt,
+		manifest:       manifestFile,
+		dirLockGuard:   dirLockGuard,
+		valueDirGuard:  valueDirLockGuard,
+		orc:            orc,
 	}
 
 	rateLimit := opt.TableBuilderOptions.BytesPerSecond
@@ -319,6 +322,7 @@ func Open(opt Options) (db *DB, err error) {
 	db.orc.nextCommit = db.orc.curRead + 1
 
 	db.writeCh = make(chan *request, kvWriteChCapacity)
+	db.managedWriteCh = make(chan []*request)
 	db.closers.writes = startWriteWorker(db)
 
 	db.closers.valueGC = y.NewCloser(1)
@@ -530,7 +534,7 @@ func (db *DB) shouldWriteValueToLSM(e *Entry) bool {
 	return len(e.Value) < db.opt.ValueThreshold
 }
 
-func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
+func (db *DB) getRequestForEntries(entries []*Entry) (*request, error) {
 	var count, size int64
 	for _, e := range entries {
 		size += int64(e.estimateSize(db.opt.ValueThreshold))
@@ -544,8 +548,19 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 	// Txns should not interleave among other txns or rewrites.
 	req := requestPool.Get().(*request)
 	req.Entries = entries
+	req.IsManaged = false
+	req.Callback = nil
 	req.Wg = sync.WaitGroup{}
 	req.Wg.Add(1)
+
+	return req, nil
+}
+
+func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
+	req, err := db.getRequestForEntries(entries)
+	if err != nil {
+		return nil, err
+	}
 	db.writeCh <- req // Handled in writeWorker.
 	y.NumPuts.Add(int64(len(entries)))
 
