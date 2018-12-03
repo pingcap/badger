@@ -18,13 +18,14 @@ package badger
 
 import (
 	"expvar"
-	"golang.org/x/time/rate"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/ngaut/log"
 
@@ -59,8 +60,8 @@ type DB struct {
 	valueDirGuard *directoryLockGuard
 
 	closers   closers
-	mt        *skl.Skiplist   // Our latest (actively written) in-memory table
-	imm       []*skl.Skiplist // Add here only AFTER pushing to flushChan.
+	mt        *table.MemTable   // Our latest (actively written) in-memory table
+	imm       []*table.MemTable // Add here only AFTER pushing to flushChan.
 	opt       Options
 	manifest  *manifestFile
 	lc        *levelsController
@@ -70,7 +71,7 @@ type DB struct {
 	flushChan chan flushTask // For flushing memtables.
 
 	// mem table buffer to avoid expensive allocating big chunk of memory
-	memTableCh chan *skl.Skiplist
+	memTableCh chan *table.MemTable
 
 	orc *oracle
 
@@ -244,10 +245,10 @@ func Open(opt Options) (db *DB, err error) {
 	orc.readMark.Init()
 
 	db = &DB{
-		imm:           make([]*skl.Skiplist, 0, opt.NumMemtables),
+		imm:           make([]*table.MemTable, 0, opt.NumMemtables),
 		flushChan:     make(chan flushTask, opt.NumMemtables),
 		writeCh:       make(chan *request, kvWriteChCapacity),
-		memTableCh:    make(chan *skl.Skiplist, 1),
+		memTableCh:    make(chan *table.MemTable, 1),
 		opt:           opt,
 		manifest:      manifestFile,
 		dirLockGuard:  dirLockGuard,
@@ -262,7 +263,7 @@ func Open(opt Options) (db *DB, err error) {
 
 	go func() {
 		for {
-			db.memTableCh <- skl.NewSkiplist(arenaSize(db.opt))
+			db.memTableCh <- table.NewMemTable(arenaSize(db.opt))
 		}
 	}()
 
@@ -456,8 +457,8 @@ func syncDir(dir string) error {
 }
 
 // getMemtables returns the current memtables and get references.
-func (db *DB) getMemTables() []*skl.Skiplist {
-	tables := make([]*skl.Skiplist, 1, 8)
+func (db *DB) getMemTables() []*table.MemTable {
+	tables := make([]*table.MemTable, 1, 8)
 	db.RLock()
 	defer db.RUnlock()
 	// Get mutable memtable.
@@ -501,15 +502,17 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	return db.lc.get(key)
 }
 
-func (db *DB) updateOffset(ptrs []valuePointer) {
-	var ptr valuePointer
+func (db *DB) latestOffset(ptrs []valuePointer) valuePointer {
 	for i := len(ptrs) - 1; i >= 0; i-- {
 		p := ptrs[i]
 		if !p.IsZero() {
-			ptr = p
-			break
+			return p
 		}
 	}
+	return valuePointer{}
+}
+
+func (db *DB) updateOffset(ptr valuePointer) {
 	if ptr.IsZero() {
 		return
 	}
@@ -618,12 +621,12 @@ func arenaSize(opt Options) int64 {
 }
 
 // WriteLevel0Table flushes memtable. It drops deleteValues.
-func (db *DB) writeLevel0Table(s *skl.Skiplist, f *os.File) error {
-	iter := s.NewIterator()
+func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
+	iter := s.NewIterator(false)
 	defer iter.Close()
 	b := table.NewTableBuilder(f, db.limiter, db.opt.TableBuilderOptions)
 	defer b.Close()
-	for iter.SeekToFirst(); iter.Valid(); iter.Next() {
+	for iter.Rewind(); iter.Valid(); iter.Next() {
 		if err := b.Add(iter.Key(), iter.Value()); err != nil {
 			return err
 		}
@@ -632,7 +635,7 @@ func (db *DB) writeLevel0Table(s *skl.Skiplist, f *os.File) error {
 }
 
 type flushTask struct {
-	mt   *skl.Skiplist
+	mt   *table.MemTable
 	vptr valuePointer
 }
 

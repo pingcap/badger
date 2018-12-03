@@ -106,6 +106,8 @@ type Options struct {
 	TableBuilderOptions options.TableBuilderOptions
 
 	ValueLogWriteOptions options.ValueLogWriterOptions
+
+	LSMWriterOptions options.LSMWriterOptions
 }
 
 // DefaultOptions sets a list of recommended options for good performance.
@@ -140,6 +142,10 @@ var DefaultOptions = Options{
 	ValueLogWriteOptions: options.ValueLogWriterOptions{
 		WriteBufferSize: 2 * 1024 * 1024,
 		BytesPerSync:    0,
+	},
+	LSMWriterOptions: options.LSMWriterOptions{
+		WriteMethod:   options.NormalWrite,
+		MergeSmallTxn: false,
 	},
 }
 

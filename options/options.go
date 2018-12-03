@@ -41,3 +41,20 @@ type ValueLogWriterOptions struct {
 	WriteBufferSize int
 	BytesPerSync    int
 }
+
+type LSMWriteMethod int
+
+const (
+	// NormalWrite directly write entries to LSM.
+	NormalWrite LSMWriteMethod = iota
+	// DelayedWrite put entries to a linked list, and merge them to SkipList later.
+	DelayedWrite
+)
+
+type LSMWriterOptions struct {
+	WriteMethod LSMWriteMethod
+
+	// MergeSmallTxn merge small txns to a larger txn.
+	// You can have this options a try, if you find read performance is terrible when use DelayedWrite.
+	MergeSmallTxn bool
+}

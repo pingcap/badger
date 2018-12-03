@@ -23,7 +23,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
@@ -277,14 +276,14 @@ func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
 	return true
 }
 
-func (opts *IteratorOptions) OverlapMemTable(t *skl.Skiplist) bool {
+func (opts *IteratorOptions) OverlapMemTable(t *table.MemTable) bool {
 	if t.Empty() {
 		return false
 	}
 	if !opts.hasRange() {
 		return true
 	}
-	iter := t.NewIterator()
+	iter := t.NewIterator(false)
 	defer iter.Close()
 	iter.Seek(opts.StartKey)
 	if !iter.Valid() {
@@ -392,7 +391,7 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	}
 	for i := 0; i < len(tables); i++ {
 		if opt.OverlapMemTable(tables[i]) {
-			iters = append(iters, tables[i].NewUniIterator(opt.Reverse))
+			iters = append(iters, tables[i].NewIterator(opt.Reverse))
 		}
 	}
 	iters = txn.db.lc.appendIterators(iters, opt) // This will increment references.

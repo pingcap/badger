@@ -33,7 +33,6 @@ Key differences:
 package skl
 
 import (
-	"bytes"
 	"math"
 	"math/rand"
 	"sync/atomic"
@@ -49,7 +48,10 @@ const (
 )
 
 // MaxNodeSize is the memory footprint of a node of maximum height.
-const MaxNodeSize = int(unsafe.Sizeof(node{}))
+const (
+	MaxNodeSize      = int(unsafe.Sizeof(node{}))
+	EstimateNodeSize = MaxNodeSize + nodeAlign
+)
 
 type node struct {
 	// Multiple parts of the value are encoded as a single uint64 so that it
@@ -341,13 +343,13 @@ func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
 				recomputeHeight++
 			} else if hint.prev[recomputeHeight] != s.head &&
 				hint.prev[recomputeHeight] != nil &&
-				bytes.Compare(key, hint.prev[recomputeHeight].key(s.arena)) <= 0 {
+				y.CompareKeys(key, hint.prev[recomputeHeight].key(s.arena)) <= 0 {
 				// Key is before splice.
 				bad := hint.prev[recomputeHeight]
 				for bad == hint.prev[recomputeHeight] {
 					recomputeHeight++
 				}
-			} else if hint.next[recomputeHeight] != nil && bytes.Compare(key, hint.next[recomputeHeight].key(s.arena)) > 0 {
+			} else if hint.next[recomputeHeight] != nil && y.CompareKeys(key, hint.next[recomputeHeight].key(s.arena)) > 0 {
 				// Key is after splice.
 				bad := hint.next[recomputeHeight]
 				for bad == hint.next[recomputeHeight] {

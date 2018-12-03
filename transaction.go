@@ -410,6 +410,15 @@ func (txn *Txn) Commit() error {
 		return nil // Nothing to do.
 	}
 
+	entries := make([]*Entry, 0, len(txn.pendingWrites)+1)
+	for _, e := range txn.pendingWrites {
+		e.meta |= bitTxn
+		entries = append(entries, e)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return bytes.Compare(entries[i].Key, entries[j].Key) < 0
+	})
+
 	state := txn.db.orc
 	state.writeLock.Lock()
 	commitTs := state.newCommitTs(txn)
@@ -417,14 +426,10 @@ func (txn *Txn) Commit() error {
 		state.writeLock.Unlock()
 		return ErrConflict
 	}
-
-	entries := make([]*Entry, 0, len(txn.pendingWrites)+1)
-	for _, e := range txn.pendingWrites {
+	for _, e := range entries {
 		// Suffix the keys with commit ts, so the key versions are sorted in
 		// descending order of commit timestamp.
 		e.Key = y.KeyWithTs(e.Key, commitTs)
-		e.meta |= bitTxn
-		entries = append(entries, e)
 	}
 	e := &Entry{
 		Key:   y.KeyWithTs(txnKey, commitTs),
