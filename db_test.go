@@ -224,7 +224,7 @@ func TestGet(t *testing.T) {
 		require.Equal(t, []byte{0x01}, item.UserMeta())
 
 		longVal := make([]byte, 1000)
-		txnSet(t, db, []byte("key1"), longVal, 0x00)
+		txnSet(t, db, []byte("key1"), y.Copy(longVal), 0x00)
 
 		txn = db.NewTransaction(false)
 		item, err = txn.Get([]byte("key1"))
@@ -985,7 +985,7 @@ func TestWriteDeadlock(t *testing.T) {
 		for i := 0; i < 1500; i++ {
 			key := fmt.Sprintf("%d", i)
 			rand.Read(val)
-			require.NoError(t, txn.Set([]byte(key), val))
+			require.NoError(t, txn.Set([]byte(key), y.Copy(val)))
 			print(&count)
 		}
 		return nil

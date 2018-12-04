@@ -233,7 +233,7 @@ func TestValueGC3(t *testing.T) {
 		}
 		rand.Read(v[:])
 		// Keys key000, key001, key002, such that sorted order matches insertion order
-		require.NoError(t, txn.Set([]byte(fmt.Sprintf("key%03d", i)), v))
+		require.NoError(t, txn.Set([]byte(fmt.Sprintf("key%03d", i)), y.Copy(v)))
 		if i%20 == 0 {
 			require.NoError(t, txn.Commit())
 			txn = kv.NewTransaction(true)
@@ -379,9 +379,9 @@ func TestChecksums(t *testing.T) {
 
 	// Use a vlog with K0=V0 and a (corrupted) second transaction(k1,k2)
 	buf := createVlog(t, []*Entry{
-		{Key: k0, Value: v0},
-		{Key: k1, Value: v1},
-		{Key: k2, Value: v2},
+		{Key: k0, Value: y.Copy(v0)},
+		{Key: k1, Value: y.Copy(v1)},
+		{Key: k2, Value: y.Copy(v2)},
 	})
 	buf[len(buf)-1]++ // Corrupt last byte
 	require.NoError(t, ioutil.WriteFile(vlogFilePath(dir, 0), buf, 0777))
@@ -404,7 +404,7 @@ func TestChecksums(t *testing.T) {
 	}))
 
 	// Write K3 at the end of the vlog.
-	txnSet(t, kv, k3, v3, 0)
+	txnSet(t, kv, k3, y.Copy(v3), 0)
 	require.NoError(t, kv.Close())
 
 	// The vlog should contain K0 and K3 (K1 and k2 was lost when Badger started up
@@ -463,9 +463,9 @@ func TestPartialAppendToValueLog(t *testing.T) {
 	// Create truncated vlog to simulate a partial append.
 	// k0 - single transaction, k1 and k2 in another transaction
 	buf := createVlog(t, []*Entry{
-		{Key: k0, Value: v0},
-		{Key: k1, Value: v1},
-		{Key: k2, Value: v2},
+		{Key: k0, Value: y.Copy(v0)},
+		{Key: k1, Value: y.Copy(v1)},
+		{Key: k2, Value: y.Copy(v2)},
 	})
 	buf = buf[:len(buf)-6]
 	require.NoError(t, ioutil.WriteFile(vlogFilePath(dir, 0), buf, 0777))

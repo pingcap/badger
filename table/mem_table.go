@@ -92,12 +92,7 @@ func (mt *MemTable) MergeListToSkl() {
 		return
 	}
 
-	head = (*listNode)(atomic.LoadPointer(&mt.pendingList))
-	if head == nil {
-		return
-	}
-	mt.mergeListToSkl(head)
-
+	head.mergeToSkl(mt.skl)
 	// No new node inserted, just update head of list.
 	if atomic.CompareAndSwapPointer(&mt.pendingList, unsafe.Pointer(head), nil) {
 		return
@@ -114,13 +109,6 @@ func (mt *MemTable) MergeListToSkl() {
 	}
 }
 
-func (mt *MemTable) putToSkl(entries []Entry) {
-	var hint skl.Hint
-	for _, e := range entries {
-		mt.skl.PutWithHint(e.Key, e.Value, &hint)
-	}
-}
-
 func (mt *MemTable) putToList(entries []Entry) {
 	n := newListNode(entries)
 	for {
@@ -130,15 +118,6 @@ func (mt *MemTable) putToList(entries []Entry) {
 			return
 		}
 	}
-}
-
-func (mt *MemTable) mergeListToSkl(n *listNode) {
-	next := (*listNode)(atomic.LoadPointer(&n.next))
-	if next != nil {
-		mt.mergeListToSkl(next)
-	}
-	atomic.StorePointer(&n.next, nil)
-	mt.putToSkl(n.entries)
 }
 
 type listNode struct {
@@ -157,6 +136,22 @@ func newListNode(entries []Entry) *listNode {
 		e.Value.Version = y.ParseTs(e.Key)
 	}
 	return n
+}
+
+func (n *listNode) putToSkl(s *skl.Skiplist, entries []Entry) {
+	var hint skl.Hint
+	for _, e := range entries {
+		s.PutWithHint(e.Key, e.Value, &hint)
+	}
+}
+
+func (n *listNode) mergeToSkl(skl *skl.Skiplist) {
+	next := (*listNode)(atomic.LoadPointer(&n.next))
+	if next != nil {
+		next.mergeToSkl(skl)
+	}
+	atomic.StorePointer(&n.next, nil)
+	n.putToSkl(skl, n.entries)
 }
 
 func (n *listNode) get(key []byte) (y.ValueStruct, bool) {

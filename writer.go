@@ -175,11 +175,16 @@ func (w *writeWorker) writeToLSM(entries []*Entry, ptrs []valuePointer) error {
 				},
 			})
 		} else {
-			var offsetBuf [vptrSize]byte
+			var offsetBuf []byte
+			if len(entry.Value) < vptrSize {
+				offsetBuf = make([]byte, vptrSize)
+			} else {
+				offsetBuf = entry.Value[:vptrSize]
+			}
 			es = append(es, table.Entry{
 				Key: entry.Key,
 				Value: y.ValueStruct{
-					Value:    ptrs[i].Encode(offsetBuf[:]),
+					Value:    ptrs[i].Encode(offsetBuf),
 					Meta:     entry.meta | bitValuePointer,
 					UserMeta: entry.UserMeta,
 					Version:  y.ParseTs(entry.Key),
