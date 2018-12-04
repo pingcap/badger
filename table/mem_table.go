@@ -39,9 +39,6 @@ func (mt *MemTable) Empty() bool {
 func (mt *MemTable) Get(key []byte) y.ValueStruct {
 	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
 	for curr != nil {
-		if curr.isMerged() {
-			break
-		}
 		if v, ok := curr.get(key); ok {
 			return v
 		}
@@ -57,9 +54,6 @@ func (mt *MemTable) NewIterator(reverse bool) y.Iterator {
 	)
 	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
 	for curr != nil {
-		if curr.isMerged() {
-			break
-		}
 		its = append(its, curr.newIterator(reverse))
 		curr = (*listNode)(curr.next)
 	}
@@ -145,12 +139,10 @@ func (mt *MemTable) mergeListToSkl(n *listNode) {
 	}
 	atomic.StorePointer(&n.next, nil)
 	mt.putToSkl(n.entries)
-	atomic.StoreUint32(&n.merged, 1)
 }
 
 type listNode struct {
 	next    unsafe.Pointer // *listNode
-	merged  uint32
 	entries []Entry
 	memSize int64
 }
@@ -165,10 +157,6 @@ func newListNode(entries []Entry) *listNode {
 		e.Value.Version = y.ParseTs(e.Key)
 	}
 	return n
-}
-
-func (n *listNode) isMerged() bool {
-	return atomic.LoadUint32(&n.merged) == 1
 }
 
 func (n *listNode) get(key []byte) (y.ValueStruct, bool) {
@@ -224,8 +212,6 @@ func (it *listNodeIterator) Value() y.ValueStruct { return it.n.entries[it.idx].
 
 func (it *listNodeIterator) FillValue(vs *y.ValueStruct) { *vs = it.Value() }
 
-func (it *listNodeIterator) Valid() bool {
-	return !it.n.isMerged() && it.idx >= 0 && it.idx < len(it.n.entries)
-}
+func (it *listNodeIterator) Valid() bool { return it.idx >= 0 && it.idx < len(it.n.entries) }
 
 func (it *listNodeIterator) Close() error { return nil }
