@@ -3,7 +3,6 @@ package table
 import (
 	"bytes"
 	"sort"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -19,7 +18,6 @@ type Entry struct {
 type MemTable struct {
 	skl         *skl.Skiplist
 	pendingList unsafe.Pointer // *listNode
-	mergeMu     sync.Mutex
 }
 
 func NewMemTable(arenaSize int64) *MemTable {
@@ -83,14 +81,9 @@ func (mt *MemTable) MemSize() int64 {
 	return mt.skl.MemSize() + sz
 }
 
-func (mt *MemTable) Put(key []byte, v y.ValueStruct) {
-	mt.MergeListToSkl()
+// PutToSkl directly insert entry into SkipList.
+func (mt *MemTable) PutToSkl(key []byte, v y.ValueStruct) {
 	mt.skl.Put(key, v)
-}
-
-func (mt *MemTable) PutWithHint(key []byte, v y.ValueStruct, hint *skl.Hint) {
-	mt.MergeListToSkl()
-	mt.skl.PutWithHint(key, v, hint)
 }
 
 // PutToPendingList put entries to pending list, and you can call MergeListToSkl to merge them to SkipList later.
@@ -105,17 +98,14 @@ func (mt *MemTable) MergeListToSkl() {
 		return
 	}
 
-	mt.mergeMu.Lock()
 	head = (*listNode)(atomic.LoadPointer(&mt.pendingList))
 	if head == nil {
-		mt.mergeMu.Unlock()
 		return
 	}
 	mt.mergeListToSkl(head)
 
 	// No new node inserted, just update head of list.
 	if atomic.CompareAndSwapPointer(&mt.pendingList, unsafe.Pointer(head), nil) {
-		mt.mergeMu.Unlock()
 		return
 	}
 	// New node inserted, iterate to find `prev` of old head.
@@ -124,7 +114,6 @@ func (mt *MemTable) MergeListToSkl() {
 		next := atomic.LoadPointer(&curr.next)
 		if unsafe.Pointer(head) == next {
 			atomic.StorePointer(&curr.next, nil)
-			mt.mergeMu.Unlock()
 			return
 		}
 		curr = (*listNode)(next)

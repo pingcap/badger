@@ -96,7 +96,7 @@ func replayFunction(out *DB) func(Entry, valuePointer) error {
 			log.Infof("Replay: Making room for writes")
 			time.Sleep(10 * time.Millisecond)
 		}
-		out.mt.Put(nk, vs)
+		out.mt.PutToSkl(nk, vs)
 	}
 
 	first := true
@@ -502,17 +502,14 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	return db.lc.get(key)
 }
 
-func (db *DB) latestOffset(ptrs []valuePointer) valuePointer {
+func (db *DB) updateOffset(ptrs []valuePointer) {
+	var ptr valuePointer
 	for i := len(ptrs) - 1; i >= 0; i-- {
-		p := ptrs[i]
-		if !p.IsZero() {
-			return p
+		ptr = ptrs[i]
+		if !ptr.IsZero() {
+			break
 		}
 	}
-	return valuePointer{}
-}
-
-func (db *DB) updateOffset(ptr valuePointer) {
 	if ptr.IsZero() {
 		return
 	}
@@ -658,7 +655,7 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 			// Pick the max commit ts, so in case of crash, our read ts would be higher than all the
 			// commits.
 			headTs := y.KeyWithTs(head, db.orc.commitTs())
-			ft.mt.Put(headTs, y.ValueStruct{Value: offset})
+			ft.mt.PutToSkl(headTs, y.ValueStruct{Value: offset})
 		}
 
 		fileID := db.lc.reserveFileID()

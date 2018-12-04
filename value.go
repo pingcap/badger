@@ -815,7 +815,6 @@ func (vlog *valueLog) write(reqs []*request) error {
 		for j := range b.Entries {
 			e := b.Entries[j]
 			var p valuePointer
-
 			p.Fid = curlf.fid
 			// Use the offset including buffer length so far.
 			p.Offset = vlog.writableOffset() + uint32(vlog.pendingLen)
