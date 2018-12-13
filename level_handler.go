@@ -95,7 +95,10 @@ func (s *levelHandler) deleteTables(toDel []*table.Table) error {
 	}
 	s.tables = newTables
 
-	assertTablesOrder(newTables)
+	// We can add new L0 tables during compaction, so we shouldn't assert tables order for L0.
+	if s.level != 0 {
+		assertTablesOrder(newTables)
+	}
 
 	s.Unlock() // Unlock s _before_ we DecrRef our tables, which can be slow.
 

@@ -2,8 +2,9 @@ package fileutil
 
 import (
 	"context"
-	"golang.org/x/time/rate"
 	"os"
+
+	"golang.org/x/time/rate"
 )
 
 type BufferedFileWriter struct {
@@ -78,6 +79,10 @@ func (bw *BufferedFileWriter) ResetWithLimiter(f *os.File, limiter *rate.Limiter
 
 func (bw *BufferedFileWriter) write(data []byte, syncRange bool) error {
 	for cur := 0; cur < len(data); {
+		sz := len(data) - cur
+		if sz > int(bw.bufSize) {
+			sz = int(bw.bufSize)
+		}
 		allowed := bw.requestTokenForWrite(len(data) - cur)
 		if _, err := bw.f.Write(data[cur : cur+allowed]); err != nil {
 			return err
@@ -129,7 +134,7 @@ func (bw *BufferedFileWriter) trySyncFileRange() error {
 		syncOffset -= syncOffset % bytesAlign
 		syncSize := syncOffset - bw.lastSyncOffset
 		if syncOffset > 0 && syncSize >= bw.bytesPerSync {
-			err = SyncFileRange(bw.f, bw.lastSyncOffset, syncSize, true)
+			err = SyncFileRange(bw.f, bw.lastSyncOffset, syncSize, false)
 			bw.lastSyncOffset = syncOffset
 		}
 	}

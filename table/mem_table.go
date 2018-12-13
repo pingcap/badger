@@ -195,7 +195,7 @@ func (it *listNodeIterator) Seek(key []byte) {
 		return y.CompareKeys(it.n.entries[i].Key, key) >= 0
 	})
 	if it.reversed {
-		if !bytes.Equal(it.Key(), key) {
+		if !it.Valid() || !bytes.Equal(it.Key(), key) {
 			it.idx--
 		}
 	}

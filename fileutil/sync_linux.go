@@ -3,8 +3,9 @@
 package fileutil
 
 import (
-	"golang.org/x/sys/unix"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 // Fsync is a wrapper around file.Sync(). Special handling is needed on darwin platform.
@@ -35,7 +36,7 @@ func Fdatasync(f *os.File) error {
 func SyncFileRange(f *os.File, offset int64, nbytes int64, async bool) error {
 	flag := unix.SYNC_FILE_RANGE_WRITE
 	if !async {
-		flag |= unix.SYNC_FILE_RANGE_WAIT_AFTER
+		flag |= unix.SYNC_FILE_RANGE_WAIT_AFTER | unix.SYNC_FILE_RANGE_WAIT_BEFORE
 	}
 	return unix.SyncFileRange(int(f.Fd()), offset, nbytes, flag)
 }
