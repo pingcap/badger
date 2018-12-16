@@ -332,11 +332,15 @@ type levelHandlerRLocked struct{}
 // This function should already have acquired a read lock, and this is so important the caller must
 // pass an empty parameter declaring such.
 func (s *levelHandler) overlappingTables(_ levelHandlerRLocked, kr keyRange) (int, int) {
-	left := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeys(kr.left, s.tables[i].Biggest()) <= 0
+	return getTablesInRange(s.tables, kr.left, kr.right)
+}
+
+func getTablesInRange(tbls []*table.Table, start, end []byte) (int, int) {
+	left := sort.Search(len(tbls), func(i int) bool {
+		return y.CompareKeys(start, tbls[i].Biggest()) <= 0
 	})
-	right := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeys(kr.right, s.tables[i].Smallest()) < 0
+	right := sort.Search(len(tbls), func(i int) bool {
+		return y.CompareKeys(end, tbls[i].Smallest()) < 0
 	})
 	return left, right
 }

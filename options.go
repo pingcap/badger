@@ -83,6 +83,9 @@ type Options struct {
 	// Number of compaction workers to run concurrently.
 	NumCompactors int
 
+	// Max number of sub compaction, set 1 or 0 to disable sub compaction.
+	MaxSubCompaction int
+
 	// Transaction start and commit timestamps are manaVgedTxns by end-user. This
 	// is a private option used by ManagedDB.
 	managedTxns bool
@@ -121,6 +124,7 @@ var DefaultOptions = Options{
 	MaxLevels:               7,
 	MaxTableSize:            64 << 20,
 	NumCompactors:           3,
+	MaxSubCompaction:        3,
 	NumLevelZeroTables:      5,
 	NumLevelZeroTablesStall: 10,
 	NumMemtables:            5,

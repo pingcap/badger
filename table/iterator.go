@@ -228,12 +228,8 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	itr.bi.seek(key)
 }
 
-// seekFrom brings us to a key that is >= input key.
-func (itr *Iterator) seekFrom(key []byte) {
-	itr.err = nil
-	itr.reset()
-
-	idx := sort.Search(len(itr.t.blockEndOffsets), func(idx int) bool {
+func (itr *Iterator) seekBlock(key []byte) int {
+	return sort.Search(len(itr.t.blockEndOffsets), func(idx int) bool {
 		baseKeyStartOff := 0
 		if idx > 0 {
 			baseKeyStartOff = int(itr.t.baseKeysEndOffs[idx-1])
@@ -242,6 +238,14 @@ func (itr *Iterator) seekFrom(key []byte) {
 		baseKey := itr.t.baseKeys[baseKeyStartOff:baseKeyEndOff]
 		return y.CompareKeys(baseKey, key) > 0
 	})
+}
+
+// seekFrom brings us to a key that is >= input key.
+func (itr *Iterator) seekFrom(key []byte) {
+	itr.err = nil
+	itr.reset()
+
+	idx := itr.seekBlock(key)
 	if idx == 0 {
 		// The smallest key in our table is already strictly > key. We can return that.
 		// This is like a SeekToFirst.
