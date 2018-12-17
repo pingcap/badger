@@ -33,10 +33,7 @@ func Fdatasync(f *os.File) error {
 //
 // Important: unlike Fdatasync, this function will never update file's metadata (size etc.), which means there are no
 // guarantees that the data will be available after a crash. Please use Fsync or Fdatasync at the end of file write.
-func SyncFileRange(f *os.File, offset int64, nbytes int64, async bool) error {
-	flag := unix.SYNC_FILE_RANGE_WRITE
-	if !async {
-		flag |= unix.SYNC_FILE_RANGE_WAIT_AFTER | unix.SYNC_FILE_RANGE_WAIT_BEFORE
-	}
+func SyncFileRange(f *os.File, offset int64, nbytes int64) error {
+	flag := unix.SYNC_FILE_RANGE_WRITE | unix.SYNC_FILE_RANGE_WAIT_AFTER | unix.SYNC_FILE_RANGE_WAIT_BEFORE
 	return unix.SyncFileRange(int(f.Fd()), offset, nbytes, flag)
 }

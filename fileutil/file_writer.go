@@ -134,7 +134,7 @@ func (bw *BufferedFileWriter) trySyncFileRange() error {
 		syncOffset -= syncOffset % bytesAlign
 		syncSize := syncOffset - bw.lastSyncOffset
 		if syncOffset > 0 && syncSize >= bw.bytesPerSync {
-			err = SyncFileRange(bw.f, bw.lastSyncOffset, syncSize, false)
+			err = SyncFileRange(bw.f, bw.lastSyncOffset, syncSize)
 			bw.lastSyncOffset = syncOffset
 		}
 	}
