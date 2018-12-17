@@ -83,7 +83,7 @@ func (bw *BufferedFileWriter) write(data []byte, syncRange bool) error {
 		if sz > int(bw.bufSize) {
 			sz = int(bw.bufSize)
 		}
-		allowed := bw.requestTokenForWrite(len(data) - cur)
+		allowed := bw.requestTokenForWrite(sz)
 		if _, err := bw.f.Write(data[cur : cur+allowed]); err != nil {
 			return err
 		}
