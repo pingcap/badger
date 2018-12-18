@@ -488,6 +488,8 @@ func (cd *compactDef) addBoundsOfTables(bounds [][]byte, tbls []*table.Table, le
 		smallest := y.KeyWithTs(y.ParseKey(tbl.Smallest()), math.MaxUint64)
 		bounds = append(bounds, smallest)
 		if level == 0 {
+			// Only consider biggest key for L0 tables, because for other levels
+			// t[i].Biggest() is closed to t[i+1].Smallest(), so we just ignore such small ranges here.
 			biggest := y.KeyWithTs(y.ParseKey(tbl.Biggest()), 0)
 			bounds = append(bounds, biggest)
 		}
@@ -499,29 +501,41 @@ func (cd *compactDef) addBoundsOfTables(bounds [][]byte, tbls []*table.Table, le
 	return bounds
 }
 
-func (cd *compactDef) computeBounds() [][]byte {
+type rangeWithSize struct {
+	start []byte
+	end   []byte
+	sz    int
+}
+
+func (cd *compactDef) inputBounds() []rangeWithSize {
 	topCnt := len(cd.top)
 	if cd.thisLevel.level == 0 {
 		topCnt *= 2
 	}
-	bounds := make([][]byte, 0, topCnt+len(cd.bot)+1)
 
-	bounds = cd.addBoundsOfTables(bounds, cd.top, cd.thisLevel.level)
+	keys := make([][]byte, 0, topCnt+len(cd.bot)+1)
+	keys = cd.addBoundsOfTables(keys, cd.top, cd.thisLevel.level)
 	if len(cd.bot) != 0 {
-		bounds = cd.addBoundsOfTables(bounds, cd.bot, cd.nextLevel.level)
+		keys = cd.addBoundsOfTables(keys, cd.bot, cd.nextLevel.level)
 	}
-
-	sort.Slice(bounds, func(i, j int) bool {
-		return y.CompareKeys(bounds[i], bounds[j]) < 0
+	sort.Slice(keys, func(i, j int) bool {
+		return y.CompareKeys(keys[i], keys[j]) < 0
 	})
 
-	return bounds
-}
+	uniqBounds := make([]rangeWithSize, 0, len(keys))
+	for i := 0; i < len(keys)-1; i++ {
+		start, end := keys[i], keys[i+1]
+		if y.CompareKeys(start, end) == 0 {
+			continue
+		}
+		sz := cd.sizeInRange(cd.top, cd.thisLevel.level, start, end)
+		if len(cd.bot) != 0 {
+			sz += cd.sizeInRange(cd.bot, cd.nextLevel.level, start, end)
+		}
+		uniqBounds = append(uniqBounds, rangeWithSize{start: start, end: end, sz: sz})
+	}
 
-type compactRange struct {
-	start []byte
-	end   []byte
-	sz    int
+	return uniqBounds
 }
 
 func (cd *compactDef) sizeInRange(tbls []*table.Table, level int, start, end []byte) int {
@@ -534,28 +548,6 @@ func (cd *compactDef) sizeInRange(tbls []*table.Table, level int, start, end []b
 		sz += tbl.ApproximateSizeInRange(start, end)
 	}
 	return sz
-}
-
-func (cd *compactDef) computeSubCompactionRanges() ([]compactRange, int) {
-	bounds := cd.computeBounds()
-	ranges := make([]compactRange, 0, len(bounds))
-	var totalSize int
-	for i := 0; i < len(bounds)-1; i++ {
-		start, end := bounds[i], bounds[i+1]
-		if y.CompareKeys(start, end) == 0 {
-			continue
-		}
-
-		sz := cd.sizeInRange(cd.top, cd.thisLevel.level, start, end)
-		if len(cd.bot) != 0 {
-			sz += cd.sizeInRange(cd.bot, cd.nextLevel.level, start, end)
-		}
-
-		ranges = append(ranges, compactRange{start: start, end: end, sz: sz})
-		totalSize += sz
-	}
-
-	return ranges, totalSize
 }
 
 func (s *levelsController) fillTablesL0(cd *compactDef) bool {
@@ -642,19 +634,25 @@ func (s *levelsController) fillTables(cd *compactDef) bool {
 	return false
 }
 
-func (s *levelsController) computeNumSubCompaction(ranges []compactRange, size int) int {
+func (s *levelsController) determineSubCompactPlan(bounds []rangeWithSize) (int, int) {
 	n := s.kv.opt.MaxSubCompaction
-	if len(ranges) < n {
-		n = len(ranges)
+	if len(bounds) < n {
+		n = len(bounds)
+	}
+
+	var size int
+	for _, bound := range bounds {
+		size += bound.sz
 	}
 	maxOutPutFiles := int(float32(size) / (4.0 / 5.0) / float32(s.kv.opt.MaxTableSize))
-	if maxOutPutFiles == 0 {
-		maxOutPutFiles = 1
-	}
 	if maxOutPutFiles < n {
 		n = maxOutPutFiles
 	}
-	return n
+
+	if n == 0 {
+		return 1, size
+	}
+	return n, size / n
 }
 
 func (s *levelsController) runSubCompacts(l int, cd compactDef, limiter *rate.Limiter) ([]*table.Table, error) {
@@ -663,21 +661,20 @@ func (s *levelsController) runSubCompacts(l int, cd compactDef, limiter *rate.Li
 		err  error
 	}
 
-	subRanges, totalSize := cd.computeSubCompactionRanges()
-	numSubCompact := s.computeNumSubCompaction(subRanges, totalSize)
+	inputBounds := cd.inputBounds()
+	numSubCompact, avgSize := s.determineSubCompactPlan(inputBounds)
 	if numSubCompact == 1 {
 		return s.compactBuildTables(l, cd, limiter, nil, nil)
 	}
 
-	avgSize := totalSize / numSubCompact
 	results := make([]jobResult, numSubCompact)
 	var wg sync.WaitGroup
 	var currSize, begin, jobNo int
 
-	for i := range subRanges {
-		currSize += subRanges[i].sz
-		if currSize >= avgSize || i == len(subRanges)-1 {
-			start, end := subRanges[begin].start, subRanges[i].end
+	for i := range inputBounds {
+		currSize += inputBounds[i].sz
+		if currSize >= avgSize || i == len(inputBounds)-1 {
+			start, end := inputBounds[begin].start, inputBounds[i].end
 
 			wg.Add(1)
 			go func(job int) {
@@ -712,6 +709,20 @@ func (s *levelsController) runSubCompacts(l int, cd compactDef, limiter *rate.Li
 	return newTables, nil
 }
 
+func (s *levelsController) shouldStartSubCompaction(cd compactDef) bool {
+	if s.kv.opt.MaxSubCompaction <= 1 {
+		return false
+	}
+	if cd.thisLevel.level == 0 {
+		return len(cd.bot) != 0
+	}
+	if cd.thisLevel.level == 1 {
+		// Only speed up large L1 compaction.
+		return len(cd.bot) >= 10
+	}
+	return false
+}
+
 func (s *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Limiter) error {
 	timeStart := time.Now()
 
@@ -723,10 +734,10 @@ func (s *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Lim
 
 	var newTables []*table.Table
 	var err error
-	if s.kv.opt.MaxSubCompaction <= 1 {
-		newTables, err = s.compactBuildTables(l, cd, limiter, nil, nil)
-	} else {
+	if s.shouldStartSubCompaction(cd) {
 		newTables, err = s.runSubCompacts(l, cd, limiter)
+	} else {
+		newTables, err = s.compactBuildTables(l, cd, limiter, nil, nil)
 	}
 	if err != nil {
 		return err
