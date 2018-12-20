@@ -488,13 +488,7 @@ type rangeWithSize struct {
 }
 
 func (cd *compactDef) getInputBounds() []rangeWithSize {
-	bounds := make([][]byte, 0, 2+len(cd.bot)+1)
-
-	// Key range of higher level may larger than lower level, so add them into bounds to simplify later computation.
-	kr := getKeyRange(cd.top)
-	bounds = append(bounds, kr.left, kr.right)
-
-	// Add bound of lower level.
+	bounds := make([][]byte, 0, len(cd.bot)+1)
 	for _, tbl := range cd.bot {
 		smallest := y.KeyWithTs(y.ParseKey(tbl.Smallest()), math.MaxUint64)
 		bounds = append(bounds, smallest)
@@ -502,22 +496,19 @@ func (cd *compactDef) getInputBounds() []rangeWithSize {
 	biggest := y.KeyWithTs(y.ParseKey(cd.bot[len(cd.bot)-1].Biggest()), 0)
 	bounds = append(bounds, biggest)
 
-	sort.Slice(bounds, func(i, j int) bool {
-		return y.CompareKeys(bounds[i], bounds[j]) < 0
-	})
-
 	ranges := make([]rangeWithSize, 0, len(bounds))
 	for i := 0; i < len(bounds)-1; i++ {
 		start, end := bounds[i], bounds[i+1]
-		if y.CompareKeys(start, end) == 0 {
-			continue
-		}
 		sz := cd.sizeInRange(cd.top, cd.thisLevel.level, start, end)
 		if len(cd.bot) != 0 {
 			sz += cd.sizeInRange(cd.bot, cd.nextLevel.level, start, end)
 		}
 		ranges = append(ranges, rangeWithSize{start: start, end: end, sz: sz})
 	}
+
+	ranges[0].start = nil
+	ranges[len(ranges)-1].end = nil
+
 	return ranges
 }
 
