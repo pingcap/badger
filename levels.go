@@ -500,9 +500,7 @@ func (cd *compactDef) getInputBounds() []rangeWithSize {
 	for i := 0; i < len(bounds)-1; i++ {
 		start, end := bounds[i], bounds[i+1]
 		sz := cd.sizeInRange(cd.top, cd.thisLevel.level, start, end)
-		if len(cd.bot) != 0 {
-			sz += cd.sizeInRange(cd.bot, cd.nextLevel.level, start, end)
-		}
+		sz += cd.sizeInRange(cd.bot, cd.nextLevel.level, start, end)
 		ranges = append(ranges, rangeWithSize{start: start, end: end, sz: sz})
 	}
 
