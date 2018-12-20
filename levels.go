@@ -606,6 +606,7 @@ func (s *levelsController) fillTables(cd *compactDef) bool {
 	return false
 }
 
+// determineSubCompactPlan returns the number of sub compactors and the estimated size of each compaction job.
 func (s *levelsController) determineSubCompactPlan(bounds []rangeWithSize) (int, int) {
 	n := s.kv.opt.MaxSubCompaction
 	if len(bounds) < n {
@@ -616,13 +617,11 @@ func (s *levelsController) determineSubCompactPlan(bounds []rangeWithSize) (int,
 	for _, bound := range bounds {
 		size += bound.sz
 	}
-	maxOutPutFiles := int(float32(size) / (4.0 / 5.0) / float32(s.kv.opt.MaxTableSize))
+
+	const minFileFillPercent = 4.0 / 5.0
+	maxOutPutFiles := int(math.Ceil(float64(size) / minFileFillPercent / float64(s.kv.opt.MaxTableSize)))
 	if maxOutPutFiles < n {
 		n = maxOutPutFiles
-	}
-
-	if n == 0 {
-		return 1, size
 	}
 	return n, size / n
 }
