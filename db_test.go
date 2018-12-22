@@ -1155,6 +1155,54 @@ func TestMinReadTs(t *testing.T) {
 	})
 }
 
+func TestCompactionFilter(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.ValueThreshold = 8 * 1024
+	opts.MaxTableSize = 32 * 1024
+	opts.NumMemtables = 2
+	opts.NumLevelZeroTables = 1
+	opts.NumLevelZeroTablesStall = 2
+	opts.CompactionFilter = func(key, val, userMeta []byte) (skip bool) {
+		// Only keep the keys with user meta.
+		if len(userMeta) == 0 {
+			return true
+		}
+		return false
+	}
+	db, err := Open(opts)
+	require.NoError(t, err)
+	val := make([]byte, 1024*4)
+	// Insert 100 entries to trigger some compaction.
+	for i := 0; i < 100; i++ {
+		db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%d", i))
+			if i%2 == 0 {
+				txn.Set(key, val)
+			} else {
+				txn.SetWithMetaSlice(key, val, []byte{0})
+			}
+			return nil
+		})
+	}
+	// The first 50 entries must have been compacted already.
+	db.View(func(txn *Txn) error {
+		for i := 0; i < 50; i++ {
+			key := []byte(fmt.Sprintf("key%d", i))
+			item, _ := txn.Get(key)
+			if i%2 == 0 {
+				require.Nil(t, item)
+			} else {
+				require.NotNil(t, item)
+				require.Len(t, item.UserMeta(), 1)
+			}
+		}
+		return nil
+	})
+}
+
 func ExampleOpen() {
 	dir, err := ioutil.TempDir("", "badger")
 	if err != nil {

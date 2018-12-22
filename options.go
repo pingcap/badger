@@ -109,6 +109,11 @@ type Options struct {
 	TableBuilderOptions options.TableBuilderOptions
 
 	ValueLogWriteOptions options.ValueLogWriterOptions
+
+	// The compaction process invokes this method for kv that is being compacted. A return value of false
+	// indicates that the kv should be preserved in the output of this compaction run and a return value
+	// of true indicates that this key-value should be removed from the output of the compaction.
+	CompactionFilter func(key, val, userMeta []byte) (skip bool)
 }
 
 // DefaultOptions sets a list of recommended options for good performance.

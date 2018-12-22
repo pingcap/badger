@@ -325,6 +325,8 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 	// would affect the snapshot view guarantee provided by transactions.
 	minReadTs := s.kv.orc.readMark.MinReadTs()
 
+	filter := s.kv.opt.CompactionFilter
+
 	var numVersions int
 	var lastKey, skipKey []byte
 	var newTables []*table.Table
@@ -334,7 +336,7 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 	if start != nil {
 		it.Seek(start)
 	}
-	for ; it.Valid() && (end == nil || y.CompareKeys(it.Key(), end) < 0); {
+	for it.Valid() && (end == nil || y.CompareKeys(it.Key(), end) < 0) {
 		timeStart := time.Now()
 		fileID := s.reserveFileID()
 		fd, err := y.CreateSyncedFile(table.NewFilename(fileID, s.kv.opt.Dir), false)
@@ -398,6 +400,13 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 						discardStats.collect(vs)
 						continue // Skip adding this key.
 					}
+				}
+			}
+			if filter != nil {
+				skip := filter(it.Key(), vs.Value, vs.UserMeta)
+				if skip {
+					discardStats.collect(vs)
+					continue
 				}
 			}
 			numKeys++
