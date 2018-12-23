@@ -1155,6 +1155,18 @@ func TestMinReadTs(t *testing.T) {
 	})
 }
 
+type testFilter struct{}
+
+func (f *testFilter) Filter(key, val, userMeta []byte) Decision {
+	// Only keep the keys with user meta.
+	if len(userMeta) == 2 {
+		return DecisionDrop
+	} else if len(userMeta) == 1 {
+		return DecisionDelete
+	}
+	return DecisionKeep
+}
+
 func TestCompactionFilter(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -1165,38 +1177,46 @@ func TestCompactionFilter(t *testing.T) {
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
-	opts.CompactionFilter = func(key, val, userMeta []byte) (skip bool) {
-		// Only keep the keys with user meta.
-		if len(userMeta) == 0 {
-			return true
-		}
-		return false
+	opts.CompactionFilterFactory = func() CompactionFilter {
+		return &testFilter{}
 	}
 	db, err := Open(opts)
 	require.NoError(t, err)
 	val := make([]byte, 1024*4)
-	// Insert 100 entries to trigger some compaction.
+	// Insert 50 entries that will be kept.
+	for i := 0; i < 50; i++ {
+		err = db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%d", i))
+			// Keep
+			return txn.Set(key, val)
+		})
+		require.NoError(t, err)
+	}
+	// Insert keys for delete decision and drop decision.
 	for i := 0; i < 100; i++ {
 		db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
 			if i%2 == 0 {
-				txn.Set(key, val)
-			} else {
+				// Delete
 				txn.SetWithMetaSlice(key, val, []byte{0})
+			} else {
+				// Drop
+				txn.SetWithMetaSlice(key, val, []byte{0, 0})
 			}
 			return nil
 		})
 	}
-	// The first 50 entries must have been compacted already.
-	db.View(func(txn *Txn) error {
+	err = db.View(func(txn *Txn) error {
 		for i := 0; i < 50; i++ {
 			key := []byte(fmt.Sprintf("key%d", i))
 			item, _ := txn.Get(key)
 			if i%2 == 0 {
+				// For delete decision, the old value can not be read.
 				require.Nil(t, item)
 			} else {
+				// For dropped entry, since no tombstone left, the old value appear again.
 				require.NotNil(t, item)
-				require.Len(t, item.UserMeta(), 1)
+				require.Len(t, item.UserMeta(), 0)
 			}
 		}
 		return nil

@@ -325,7 +325,10 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 	// would affect the snapshot view guarantee provided by transactions.
 	minReadTs := s.kv.orc.readMark.MinReadTs()
 
-	filter := s.kv.opt.CompactionFilter
+	var filter CompactionFilter
+	if s.kv.opt.CompactionFilterFactory != nil {
+		filter = s.kv.opt.CompactionFilterFactory()
+	}
 
 	var numVersions int
 	var lastKey, skipKey []byte
@@ -401,12 +404,18 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 						continue // Skip adding this key.
 					}
 				}
-			}
-			if filter != nil {
-				skip := filter(it.Key(), vs.Value, vs.UserMeta)
-				if skip {
-					discardStats.collect(vs)
-					continue
+				if filter != nil {
+					switch filter.Filter(it.Key(), vs.Value, vs.UserMeta) {
+					case DecisionDelete:
+						// Convert to delete tombstone.
+						discardStats.collect(it.Value())
+						builder.Add(it.Key(), y.ValueStruct{Meta: bitDelete})
+						continue
+					case DecisionDrop:
+						discardStats.collect(vs)
+						continue
+					case DecisionKeep:
+					}
 				}
 			}
 			numKeys++
@@ -425,7 +434,11 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 			firstErr = err
 			break
 		}
-		newTables = append(newTables, tbl)
+		if len(tbl.Smallest()) == 0 {
+			tbl.DecrRef()
+		} else {
+			newTables = append(newTables, tbl)
+		}
 	}
 
 	if firstErr == nil {

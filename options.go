@@ -110,11 +110,27 @@ type Options struct {
 
 	ValueLogWriteOptions options.ValueLogWriterOptions
 
-	// The compaction process invokes this method for kv that is being compacted. A return value of false
-	// indicates that the kv should be preserved in the output of this compaction run and a return value
-	// of true indicates that this key-value should be removed from the output of the compaction.
-	CompactionFilter func(key, val, userMeta []byte) (skip bool)
+	CompactionFilterFactory func() CompactionFilter
 }
+
+// CompactionFilter is an interface that user can implement to remove certain keys.
+type CompactionFilter interface {
+	// Filter is the method the compaction process invokes for kv that is being compacted. The returned decision
+	// indicates that the kv should be preserved, deleted or dropped in the output of this compaction run.
+	Filter(key, val, userMeta []byte) Decision
+}
+
+// Decision is the type for compaction filter decision.
+type Decision int
+
+const (
+	// DecisionKeep indicates the entry should be reserved.
+	DecisionKeep Decision = 0
+	// DecisionDelete converts the entry to a delete tombstone.
+	DecisionDelete Decision = 1
+	// DecisionDrop simply drops the entry, doesn't leave a delete tombstone.
+	DecisionDrop Decision = 2
+)
 
 // DefaultOptions sets a list of recommended options for good performance.
 // Feel free to modify these to suit your needs.
