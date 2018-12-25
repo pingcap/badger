@@ -1157,11 +1157,15 @@ func TestMinReadTs(t *testing.T) {
 
 type testFilter struct{}
 
+var (
+	userMetaDrop   = []byte{0, 0}
+	userMetaDelete = []byte{0}
+)
+
 func (f *testFilter) Filter(key, val, userMeta []byte) Decision {
-	// Only keep the keys with user meta.
-	if len(userMeta) == 2 {
+	if bytes.Equal(userMeta, userMetaDrop) {
 		return DecisionDrop
-	} else if len(userMeta) == 1 {
+	} else if bytes.Equal(userMeta, userMetaDelete) {
 		return DecisionDelete
 	}
 	return DecisionKeep
@@ -1187,7 +1191,7 @@ func TestCompactionFilter(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		err = db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
-			// Keep
+			// Entries with No use meta will result in DecisionKeep in testFilter.
 			return txn.Set(key, val)
 		})
 		require.NoError(t, err)
@@ -1197,11 +1201,11 @@ func TestCompactionFilter(t *testing.T) {
 		db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
 			if i%2 == 0 {
-				// Delete
-				txn.SetWithMetaSlice(key, val, []byte{0})
+				// Entries with one byte use meta will result in DecisionDelete in testFilter.
+				txn.SetWithMetaSlice(key, val, userMetaDelete)
 			} else {
-				// Drop
-				txn.SetWithMetaSlice(key, val, []byte{0, 0})
+				// Entries with two bytes userMeta will result in DecisionDrop in testFilter.
+				txn.SetWithMetaSlice(key, val, userMetaDrop)
 			}
 			return nil
 		})
