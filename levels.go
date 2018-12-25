@@ -330,7 +330,6 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 		filter = s.kv.opt.CompactionFilterFactory()
 	}
 
-	var numVersions int
 	var lastKey, skipKey []byte
 	var newTables []*table.Table
 	var firstErr error
@@ -373,43 +372,33 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 					break
 				}
 				lastKey = y.SafeCopy(lastKey, it.Key())
-				numVersions = 0
 			}
 
 			vs := it.Value()
 			version := y.ParseTs(it.Key())
-			if version <= minReadTs {
-				// Keep track of the number of versions encountered for this key. Only consider the
-				// versions which are below the minReadTs, otherwise, we might end up discarding the
-				// only valid version for a running transaction.
-				numVersions++
-				lastValidVersion := vs.Meta > 0
-				if isDeleted(vs.Meta) ||
-					numVersions > s.kv.opt.NumVersionsToKeep ||
-					lastValidVersion {
-					// If this version of the key is deleted or expired, skip all the rest of the
-					// versions. Ensure that we're only removing versions below readTs.
-					skipKey = y.SafeCopy(skipKey, it.Key())
 
-					if lastValidVersion {
-						// Add this key. We have set skipKey, so the following key versions
-						// would be skipped.
-					} else if hasOverlap {
-						// If this key range has overlap with lower levels, then keep the deletion
-						// marker with the latest version, discarding the rest. We have set skipKey,
-						// so the following key versions would be skipped.
-					} else {
-						// If no overlap, we can skip all the versions, by continuing here.
-						discardStats.collect(vs)
-						continue // Skip adding this key.
-					}
+			// Only consider the versions which are below the minReadTs, otherwise, we might end up discarding the
+			// only valid version for a running transaction.
+			if version <= minReadTs {
+				// it.Key() is the latest readable version of this key, so we simply discard all the rest of the versions.
+				skipKey = y.SafeCopy(skipKey, it.Key())
+
+				// If this key range has overlap with lower levels, then keep the deletion
+				// marker with the latest version, discarding the rest. We have set skipKey,
+				// so the following key versions would be skipped. Otherwise discard the deletion marker.
+				if isDeleted(vs.Meta) && !hasOverlap {
+					discardStats.collect(vs)
+					continue // Skip adding this key.
 				}
+
 				if filter != nil {
 					switch filter.Filter(it.Key(), vs.Value, vs.UserMeta) {
 					case DecisionDelete:
-						// Convert to delete tombstone.
-						discardStats.collect(it.Value())
-						builder.Add(it.Key(), y.ValueStruct{Meta: bitDelete})
+						discardStats.collect(vs)
+						if hasOverlap {
+							// There may have ole versions for this key, so convert to delete tombstone.
+							builder.Add(it.Key(), y.ValueStruct{Meta: bitDelete})
+						}
 						continue
 					case DecisionDrop:
 						discardStats.collect(vs)

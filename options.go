@@ -49,9 +49,6 @@ type Options struct {
 	// How should value log be accessed.
 	ValueLogLoadingMode options.FileLoadingMode
 
-	// How many versions to keep per key.
-	NumVersionsToKeep int
-
 	// 3. Flags that user might want to review
 	// ----------------------------------------
 	// The following affect all levels of LSM tree.
@@ -150,7 +147,6 @@ var DefaultOptions = Options{
 	NumLevelZeroTablesStall: 10,
 	NumMemtables:            5,
 	SyncWrites:              true,
-	NumVersionsToKeep:       1,
 	ValueLogFileSize:        1 << 30,
 	ValueLogMaxEntries:      1000000,
 	ValueThreshold:          32,
