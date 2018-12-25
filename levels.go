@@ -381,14 +381,14 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 				// it.Key() is the latest readable version of this key, so we simply discard all the rest of the versions.
 				skipKey = y.SafeCopy(skipKey, it.Key())
 
-				// If this key range has overlap with lower levels, then keep the deletion
-				// marker with the latest version, discarding the rest. We have set skipKey,
-				// so the following key versions would be skipped. Otherwise discard the deletion marker.
-				if isDeleted(vs.Meta) && !hasOverlap {
-					continue // Skip adding this key.
-				}
-
-				if filter != nil {
+				if isDeleted(vs.Meta) {
+					// If this key range has overlap with lower levels, then keep the deletion
+					// marker with the latest version, discarding the rest. We have set skipKey,
+					// so the following key versions would be skipped. Otherwise discard the deletion marker.
+					if !hasOverlap {
+						continue
+					}
+				} else if filter != nil {
 					switch filter.Filter(it.Key(), vs.Value, vs.UserMeta) {
 					case DecisionDelete:
 						discardStats.collect(vs)
