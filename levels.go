@@ -261,12 +261,10 @@ func (s *levelsController) pickCompactLevels() (prios []compactionPriority) {
 	return prios
 }
 
-func (s *levelsController) hasOverlapTable(level int, tbls []*table.Table) bool {
-	kr := getKeyRange(tbls)
-	for i, lh := range s.levels {
-		if i <= level { // Skip upper levels.
-			continue
-		}
+func (s *levelsController) hasOverlapTable(cd compactDef) bool {
+	kr := getKeyRange(cd.top)
+	for i := cd.nextLevel.level + 1; i < len(s.levels); i++ {
+		lh := s.levels[i]
 		lh.RLock()
 		left, right := lh.overlappingTables(levelHandlerRLocked{}, kr)
 		lh.RUnlock()
@@ -297,7 +295,7 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 	topTables := cd.top
 	botTables := cd.bot
 
-	hasOverlap := s.hasOverlapTable(level, cd.top)
+	hasOverlap := s.hasOverlapTable(cd)
 	log.Infof("Key range overlaps with lower levels: %v", hasOverlap)
 
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
@@ -387,7 +385,6 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 				// marker with the latest version, discarding the rest. We have set skipKey,
 				// so the following key versions would be skipped. Otherwise discard the deletion marker.
 				if isDeleted(vs.Meta) && !hasOverlap {
-					discardStats.collect(vs)
 					continue // Skip adding this key.
 				}
 
