@@ -1191,7 +1191,7 @@ func TestCompactionFilter(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		err = db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
-			// Entries with no userMeta will result in DecisionKeep in testFilter.
+			// Entries without userMeta will result in DecisionKeep in testFilter.
 			return txn.Set(key, val)
 		})
 		require.NoError(t, err)
