@@ -1191,7 +1191,7 @@ func TestCompactionFilter(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		err = db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
-			// Entries with No use meta will result in DecisionKeep in testFilter.
+			// Entries with no userMeta will result in DecisionKeep in testFilter.
 			return txn.Set(key, val)
 		})
 		require.NoError(t, err)
@@ -1201,10 +1201,10 @@ func TestCompactionFilter(t *testing.T) {
 		db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
 			if i%2 == 0 {
-				// Entries with one byte use meta will result in DecisionDelete in testFilter.
+				// Entries with userMetaDelete will result in DecisionDelete in testFilter.
 				txn.SetWithMetaSlice(key, val, userMetaDelete)
 			} else {
-				// Entries with two bytes userMeta will result in DecisionDrop in testFilter.
+				// Entries with userMetaDrop will result in DecisionDrop in testFilter.
 				txn.SetWithMetaSlice(key, val, userMetaDrop)
 			}
 			return nil
