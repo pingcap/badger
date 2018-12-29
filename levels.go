@@ -390,7 +390,7 @@ func (s *levelsController) compactBuildTables(level int, cd compactDef, limiter 
 					}
 				} else if filter != nil {
 					switch filter.Filter(it.Key(), vs.Value, vs.UserMeta) {
-					case DecisionDelete:
+					case DecisionMarkTombstone:
 						discardStats.collect(vs)
 						if hasOverlap {
 							// There may have ole versions for this key, so convert to delete tombstone.

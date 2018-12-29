@@ -123,8 +123,8 @@ type Decision int
 const (
 	// DecisionKeep indicates the entry should be reserved.
 	DecisionKeep Decision = 0
-	// DecisionDelete converts the entry to a delete tombstone.
-	DecisionDelete Decision = 1
+	// DecisionMarkTombstone converts the entry to a delete tombstone.
+	DecisionMarkTombstone Decision = 1
 	// DecisionDrop simply drops the entry, doesn't leave a delete tombstone.
 	DecisionDrop Decision = 2
 )

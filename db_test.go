@@ -1166,7 +1166,7 @@ func (f *testFilter) Filter(key, val, userMeta []byte) Decision {
 	if bytes.Equal(userMeta, userMetaDrop) {
 		return DecisionDrop
 	} else if bytes.Equal(userMeta, userMetaDelete) {
-		return DecisionDelete
+		return DecisionMarkTombstone
 	}
 	return DecisionKeep
 }
@@ -1201,7 +1201,7 @@ func TestCompactionFilter(t *testing.T) {
 		db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
 			if i%2 == 0 {
-				// Entries with userMetaDelete will result in DecisionDelete in testFilter.
+				// Entries with userMetaDelete will result in DecisionMarkTombstone in testFilter.
 				txn.SetWithMetaSlice(key, val, userMetaDelete)
 			} else {
 				// Entries with userMetaDrop will result in DecisionDrop in testFilter.
