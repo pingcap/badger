@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 
+	"github.com/coocood/badger/y"
 	"golang.org/x/time/rate"
 )
 
@@ -87,6 +88,7 @@ func (bw *BufferedFileWriter) write(data []byte, syncRange bool) error {
 		if _, err := bw.f.Write(data[cur : cur+allowed]); err != nil {
 			return err
 		}
+		y.TotalFileWriteSize.Add(int64(allowed))
 		bw.fileSize += int64(allowed)
 		if syncRange {
 			if err := bw.trySyncFileRange(); err != nil {

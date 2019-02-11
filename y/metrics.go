@@ -48,6 +48,8 @@ var (
 	NumBlockedPuts *expvar.Int
 	// NumMemtableGets is number of memtable gets
 	NumMemtableGets *expvar.Int
+	//TotalFileWriteSize *expvar.Int
+	TotalFileWriteSize *expvar.Int
 )
 
 // These variables are global and have cumulative values for all kv stores.
@@ -61,6 +63,7 @@ func init() {
 	NumGets = expvar.NewInt("badger_gets_total")
 	NumPuts = expvar.NewInt("badger_puts_total")
 	NumBlockedPuts = expvar.NewInt("badger_blocked_puts_total")
+	TotalFileWriteSize = expvar.NewInt("badger_write_file_total_bytes")
 	NumMemtableGets = expvar.NewInt("badger_memtable_gets_total")
 	LSMSize = expvar.NewMap("badger_lsm_size_bytes")
 	VlogSize = expvar.NewMap("badger_vlog_size_bytes")
