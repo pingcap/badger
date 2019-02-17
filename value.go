@@ -787,7 +787,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 			return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
 		}
 		y.NumWrites.Add(1)
-		y.NumBytesWritten.Add(int64(vlog.pendingLen))
+		y.NumVLogBytesWritten.Add(int64(vlog.pendingLen))
 		atomic.AddUint32(&vlog.writableLogOffset, uint32(vlog.pendingLen))
 		vlog.pendingLen = 0
 

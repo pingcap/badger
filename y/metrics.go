@@ -35,7 +35,7 @@ var (
 	// NumBytesRead has cumulative number of bytes read
 	NumBytesRead *expvar.Int
 	// NumBytesWritten has cumulative number of bytes written
-	NumBytesWritten *expvar.Int
+	NumVLogBytesWritten *expvar.Int
 	// NumLSMGets is number of LMS gets
 	NumLSMGets *expvar.Map
 	// NumLSMBloomHits is number of LMS bloom hits
@@ -57,7 +57,7 @@ func init() {
 	NumReads = expvar.NewInt("badger_disk_reads_total")
 	NumWrites = expvar.NewInt("badger_disk_writes_total")
 	NumBytesRead = expvar.NewInt("badger_read_bytes")
-	NumBytesWritten = expvar.NewInt("badger_written_bytes")
+	NumVLogBytesWritten = expvar.NewInt("badger_value_log_written_bytes")
 	NumLSMGets = expvar.NewMap("badger_lsm_level_gets_total")
 	NumLSMBloomHits = expvar.NewMap("badger_lsm_bloom_hits_total")
 	NumGets = expvar.NewInt("badger_gets_total")

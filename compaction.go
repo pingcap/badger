@@ -81,8 +81,8 @@ func getKeyRange(tables []*table.Table) keyRange {
 }
 
 type levelCompactStatus struct {
-	ranges  []keyRange
-	delSize int64
+	ranges    []keyRange
+	deltaSize int64
 }
 
 func (lcs *levelCompactStatus) debug() string {
@@ -129,10 +129,10 @@ func (cs *compactStatus) overlapsWith(level int, this keyRange) bool {
 	return thisLevel.overlapsWith(this)
 }
 
-func (cs *compactStatus) delSize(l int) int64 {
+func (cs *compactStatus) deltaSize(l int) int64 {
 	cs.RLock()
 	defer cs.RUnlock()
-	return cs.levels[l].delSize
+	return cs.levels[l].deltaSize
 }
 
 type thisAndNextLevelRLocked struct{}
@@ -159,13 +159,13 @@ func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd compactDef)
 	// running parallel compactions for the same level.
 	// NOTE: We can directly call thisLevel.totalSize, because we already have acquire a read lock
 	// over this and the next level.
-	if cd.thisLevel.totalSize-thisLevel.delSize < cd.thisLevel.maxTotalSize {
+	if cd.thisLevel.totalSize-thisLevel.deltaSize < cd.thisLevel.maxTotalSize {
 		return false
 	}
 
 	thisLevel.ranges = append(thisLevel.ranges, cd.thisRange)
 	nextLevel.ranges = append(nextLevel.ranges, cd.nextRange)
-	thisLevel.delSize += cd.thisSize
+	thisLevel.deltaSize += cd.thisSize
 
 	return true
 }
@@ -180,7 +180,7 @@ func (cs *compactStatus) delete(cd compactDef) {
 	thisLevel := cs.levels[level]
 	nextLevel := cs.levels[level+1]
 
-	thisLevel.delSize -= cd.thisSize
+	thisLevel.deltaSize -= cd.thisSize
 	found := thisLevel.remove(cd.thisRange)
 	found = nextLevel.remove(cd.nextRange) && found
 
