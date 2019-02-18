@@ -34,7 +34,7 @@ var (
 	NumWrites *expvar.Int
 	// NumBytesRead has cumulative number of bytes read
 	NumBytesRead *expvar.Int
-	// NumBytesWritten has cumulative number of bytes written
+	// NumVLogBytesWritten has cumulative number of bytes written
 	NumVLogBytesWritten *expvar.Int
 	// NumLSMGets is number of LMS gets
 	NumLSMGets *expvar.Map

@@ -235,7 +235,7 @@ func (lc *levelsController) pickCompactLevels() (prios []compactionPriority) {
 	// addLevel0Table uses.
 
 	// cstatus is checked to see if level 0's tables are already being compacted
-	if lc.isL0Compactable() {
+	if !lc.cstatus.overlapsWith(0, infRange) && lc.isL0Compactable() {
 		pri := compactionPriority{
 			level: 0,
 			score: float64(lc.levels[0].numTables()) / float64(lc.kv.opt.NumLevelZeroTables),
