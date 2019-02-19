@@ -638,8 +638,8 @@ type flushTask struct {
 
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
 // Otherwise, we would have no goroutine which can flush memtables.
-func (db *DB) flushMemtable(lc *y.Closer) error {
-	defer lc.Done()
+func (db *DB) flushMemtable(c *y.Closer) error {
+	defer c.Done()
 
 	for ft := range db.flushChan {
 		if ft.mt == nil {
