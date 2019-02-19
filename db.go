@@ -752,8 +752,8 @@ func (db *DB) calculateSize() {
 
 }
 
-func (db *DB) updateSize(lc *y.Closer) {
-	defer lc.Done()
+func (db *DB) updateSize(c *y.Closer) {
+	defer c.Done()
 
 	metricsTicker := time.NewTicker(time.Minute)
 	defer metricsTicker.Stop()
@@ -762,7 +762,7 @@ func (db *DB) updateSize(lc *y.Closer) {
 		select {
 		case <-metricsTicker.C:
 			db.calculateSize()
-		case <-lc.HasBeenClosed():
+		case <-c.HasBeenClosed():
 			return
 		}
 	}
@@ -804,14 +804,14 @@ func (db *DB) RunValueLogGC(discardRatio float64) error {
 	// Find head on disk
 	headKey := y.KeyWithTs(head, math.MaxUint64)
 	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
-	val, err := db.lc.get(headKey)
+	vs, err := db.lc.get(headKey)
 	if err != nil {
 		return errors.Wrap(err, "Retrieving head from on-disk LSM")
 	}
 
 	var head valuePointer
-	if len(val.Value) > 0 {
-		head.Decode(val.Value)
+	if len(vs.Value) > 0 {
+		head.Decode(vs.Value)
 	}
 
 	// Pick a log file and run GC
