@@ -28,7 +28,7 @@ import (
 	"github.com/dgryski/go-farm"
 )
 
-type prefetchStatus uint8
+type prefetchStatus = uint32
 
 const (
 	prefetched prefetchStatus = 1
@@ -89,7 +89,7 @@ func (item *Item) Version() uint64 {
 // instead, or copy it yourself. Value might change once discard or commit is called.
 // Use ValueCopy if you want to do a Set after Get.
 func (item *Item) Value() ([]byte, error) {
-	if item.status == noPrefetch {
+	if item.getStatus() == noPrefetch {
 		if (item.meta & bitValuePointer) == 0 {
 			return item.vptr, nil
 		}
@@ -98,10 +98,14 @@ func (item *Item) Value() ([]byte, error) {
 		return item.db.vlog.Read(vp, item.slice)
 	}
 	item.wg.Wait()
-	if item.status == prefetched {
+	if item.getStatus() == prefetched {
 		return item.val, item.err
 	}
 	return item.yieldItemValue(nil)
+}
+
+func (item *Item) getStatus() uint32 {
+	return atomic.LoadUint32(&item.status)
 }
 
 // ValueCopy returns a copy of the value of the item from the value log, writing it to dst slice.
@@ -112,7 +116,7 @@ func (item *Item) Value() ([]byte, error) {
 // See Github issue: https://github.com/coocood/badger/issues/315
 func (item *Item) ValueCopy(dst []byte) ([]byte, error) {
 	item.wg.Wait()
-	if item.status == prefetched {
+	if item.getStatus() == prefetched {
 		return y.SafeCopy(dst, item.val), item.err
 	}
 	buf, err := item.yieldItemValue(dst)
@@ -172,7 +176,7 @@ func (item *Item) yieldItemValue(dst []byte) ([]byte, error) {
 func (item *Item) prefetchValue() {
 	val, err := item.yieldItemValue(nil)
 	item.err = err
-	item.status = prefetched
+	atomic.StoreUint32(&item.status, prefetched)
 	if val == nil {
 		return
 	}

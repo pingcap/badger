@@ -42,7 +42,7 @@ func (mt *MemTable) Get(key []byte) y.ValueStruct {
 		if v, ok := curr.get(key); ok {
 			return v
 		}
-		curr = (*listNode)(curr.next)
+		curr = (*listNode)(atomic.LoadPointer(&curr.next))
 	}
 	return mt.skl.Get(key)
 }
@@ -55,7 +55,7 @@ func (mt *MemTable) NewIterator(reverse bool) y.Iterator {
 	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
 	for curr != nil {
 		its = append(its, curr.newIterator(reverse))
-		curr = (*listNode)(curr.next)
+		curr = (*listNode)(atomic.LoadPointer(&curr.next))
 	}
 
 	if len(its) == 0 {
@@ -70,7 +70,7 @@ func (mt *MemTable) MemSize() int64 {
 	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
 	for curr != nil {
 		sz += curr.memSize
-		curr = (*listNode)(curr.next)
+		curr = (*listNode)(atomic.LoadPointer(&curr.next))
 	}
 	return mt.skl.MemSize() + sz
 }

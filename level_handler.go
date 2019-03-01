@@ -134,7 +134,6 @@ func (s *levelHandler) replaceTables(newTables []*table.Table) error {
 	}
 
 	assertTablesOrder(newTables)
-	assertTablesOrder(s.tables)
 
 	s.Lock() // We s.Unlock() below.
 
@@ -167,8 +166,8 @@ func (s *levelHandler) replaceTables(newTables []*table.Table) error {
 	y.Assert(numAdded == copy(t, newTables))
 	t = t[numAdded:]
 	y.Assert(len(s.tables[right:]) == copy(t, s.tables[right:]))
-	s.tables = tables
 	assertTablesOrder(tables)
+	s.tables = tables
 	s.Unlock() // s.Unlock before we DecrRef tables -- that can be slow.
 	return decrRefs(toDecr)
 }
