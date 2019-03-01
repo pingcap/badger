@@ -292,10 +292,7 @@ func Open(opt Options) (db *DB, err error) {
 
 	headKey := y.KeyWithTs(head, math.MaxUint64)
 	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
-	vs, err := db.get(headKey)
-	if err != nil {
-		return nil, errors.Wrap(err, "Retrieving head")
-	}
+	vs := db.get(headKey)
 	db.orc.curRead = vs.Version
 	var vptr valuePointer
 	if len(vs.Value) > 0 {
@@ -483,7 +480,7 @@ func (db *DB) getMemTables() []*table.MemTable {
 // tables and find the max version among them.  To maintain this invariant, we also need to ensure
 // that all versions of a key are always present in the same table from level 1, because compaction
 // can push any table down.
-func (db *DB) get(key []byte) (y.ValueStruct, error) {
+func (db *DB) get(key []byte) y.ValueStruct {
 	tables := db.getMemTables() // Lock should be released.
 	defer func() {
 		for _, tbl := range tables {
@@ -496,13 +493,13 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 		vs := table.Get(key)
 		y.NumMemtableGets.Add(1)
 		if vs.Valid() {
-			return vs, nil
+			return vs
 		}
 	}
 	return db.lc.get(key)
 }
 
-func (db *DB) multiGet(pairs []keyValuePair) error {
+func (db *DB) multiGet(pairs []keyValuePair) {
 	tables := db.getMemTables() // Lock should be released.
 	defer func() {
 		for _, tbl := range tables {
@@ -527,9 +524,9 @@ func (db *DB) multiGet(pairs []keyValuePair) error {
 		}
 	}
 	if foundCount == len(pairs) {
-		return nil
+		return
 	}
-	return db.lc.multiGet(pairs)
+	db.lc.multiGet(pairs)
 }
 
 func (db *DB) updateOffset(ptrs []valuePointer) {
@@ -834,10 +831,7 @@ func (db *DB) RunValueLogGC(discardRatio float64) error {
 	// Find head on disk
 	headKey := y.KeyWithTs(head, math.MaxUint64)
 	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
-	vs, err := db.lc.get(headKey)
-	if err != nil {
-		return errors.Wrap(err, "Retrieving head from on-disk LSM")
-	}
+	vs := db.lc.get(headKey)
 
 	var head valuePointer
 	if len(vs.Value) > 0 {

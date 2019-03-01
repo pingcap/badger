@@ -345,10 +345,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	}
 
 	seek := y.KeyWithTs(key, txn.readTs)
-	vs, err := txn.db.get(seek)
-	if err != nil {
-		return nil, errors.Wrapf(err, "DB::Get key: %q", key)
-	}
+	vs := txn.db.get(seek)
 	if !vs.Valid() {
 		return nil, ErrKeyNotFound
 	}
@@ -388,10 +385,7 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 		}
 		keyValuePairs[i].key = y.KeyWithTs(key, txn.readTs)
 	}
-	err = txn.db.multiGet(keyValuePairs)
-	if err != nil {
-		return nil, err
-	}
+	txn.db.multiGet(keyValuePairs)
 	items = make([]*Item, len(keys))
 	for i, pair := range keyValuePairs {
 		if pair.found {

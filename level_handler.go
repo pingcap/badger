@@ -224,23 +224,50 @@ func (s *levelHandler) close() error {
 	return errors.Wrap(err, "levelHandler.close")
 }
 
-// getTableForKey acquires a read-lock to access s.tables. It returns a list of tableHandlers.
-func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
+// refTablesForKey acquires a read-lock to access s.tables. It returns a list of tableHandlers.
+func (s *levelHandler) refTablesForKey(key []byte) []*table.Table {
 	s.RLock()
 	defer s.RUnlock()
 
 	if s.level == 0 {
-		// For level 0, we need to check every table. Remember to make a copy as s.tables may change
-		// once we exit this function, and we don't want to lock s.tables while seeking in tables.
-		// CAUTION: Reverse the tables.
-		out := make([]*table.Table, 0, len(s.tables))
-		for i := len(s.tables) - 1; i >= 0; i-- {
-			out = append(out, s.tables[i])
-			s.tables[i].IncrRef()
-		}
-
-		return out
+		return s.refLevel0Tables()
 	}
+	tbl := s.refLevelNTable(key)
+	if tbl == nil {
+		return nil
+	}
+	return []*table.Table{tbl}
+}
+
+// refTablesForKeys return tables for pairs.
+// level0 returns all tables.
+// level1+ returns tables for every key.
+func (s *levelHandler) refTablesForKeys(pairs []keyValuePair) []*table.Table {
+	s.RLock()
+	defer s.RUnlock()
+	if s.level == 0 {
+		return s.refLevel0Tables()
+	}
+	out := make([]*table.Table, len(pairs))
+	for i, pair := range pairs {
+		out[i] = s.refLevelNTable(pair.key)
+	}
+	return out
+}
+
+func (s *levelHandler) refLevel0Tables() []*table.Table {
+	// For level 0, we need to check every table. Remember to make a copy as s.tables may change
+	// once we exit this function, and we don't want to lock s.tables while seeking in tables.
+	// CAUTION: Reverse the tables.
+	out := make([]*table.Table, 0, len(s.tables))
+	for i := len(s.tables) - 1; i >= 0; i-- {
+		out = append(out, s.tables[i])
+		s.tables[i].IncrRef()
+	}
+	return out
+}
+
+func (s *levelHandler) refLevelNTable(key []byte) *table.Table {
 	// For level >= 1, we can do a binary search as key range does not overlap.
 	idx := sort.Search(len(s.tables), func(i int) bool {
 		return y.CompareKeys(s.tables[i].Biggest(), key) >= 0
@@ -251,57 +278,83 @@ func (s *levelHandler) getTableForKey(key []byte) []*table.Table {
 	}
 	tbl := s.tables[idx]
 	tbl.IncrRef()
-	return []*table.Table{tbl}
+	return tbl
 }
 
 // get returns value for a given key or the key after that. If not found, return nil.
-func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
-	tables := s.getTableForKey(key)
-	defer func() {
-		for _, t := range tables {
-			if err := t.DecrRef(); err != nil {
-				panic(err)
-			}
-		}
-	}()
+func (s *levelHandler) get(key []byte) y.ValueStruct {
+	tables := s.refTablesForKey(key)
+	defer s.decrTableRefs(tables)
+	return s.getInTables(key, tables)
+}
 
-	keyNoTs := y.ParseKey(key)
-
-	var maxVs y.ValueStruct
+func (s *levelHandler) getInTables(key []byte, tables []*table.Table) y.ValueStruct {
 	for _, th := range tables {
-		var (
-			resultKey []byte
-			resultVs  y.ValueStruct
-			ok        bool
-		)
-
-		if th.DoesNotHave(keyNoTs) {
-			continue
-		}
-
-		resultKey, resultVs, ok = th.PointGet(key)
-		if !ok {
-			it := th.NewIteratorNoRef(false)
-			it.Seek(key)
-			if !it.Valid() {
-				continue
-			}
-			if !y.SameKey(key, it.Key()) {
-				continue
-			}
-			resultKey, resultVs = it.Key(), it.Value()
-		} else if resultKey == nil {
-			continue
-		}
-
-		if version := y.ParseTs(resultKey); maxVs.Version < version {
-			maxVs = resultVs
-			maxVs.Version = version
-			break
+		result := s.getInTable(key, th)
+		if result.Valid() {
+			return result
 		}
 	}
-	maxVs.Value = y.SafeCopy(nil, maxVs.Value)
-	return maxVs, nil
+	return y.ValueStruct{}
+}
+
+func (s *levelHandler) getInTable(key []byte, th *table.Table) (result y.ValueStruct) {
+	if th.DoesNotHave(y.ParseKey(key)) {
+		return
+	}
+	resultKey, resultVs, ok := th.PointGet(key)
+	if !ok {
+		it := th.NewIteratorNoRef(false)
+		it.Seek(key)
+		if !it.Valid() {
+			return
+		}
+		if !y.SameKey(key, it.Key()) {
+			return
+		}
+		resultKey, resultVs = it.Key(), it.Value()
+	} else if resultKey == nil {
+		return
+	}
+	result = resultVs
+	result.Version = y.ParseTs(resultKey)
+	return
+}
+
+func (s *levelHandler) decrTableRefs(tables []*table.Table) {
+	for _, t := range tables {
+		if t == nil {
+			continue
+		}
+		if err := t.DecrRef(); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func (s *levelHandler) multiGet(pairs []keyValuePair) {
+	tables := s.refTablesForKeys(pairs)
+	defer s.decrTableRefs(tables)
+	for i := range pairs {
+		pair := &pairs[i]
+		if pair.found {
+			continue
+		}
+		var val y.ValueStruct
+		if s.level == 0 {
+			val = s.getInTables(pair.key, tables)
+		} else {
+			table := tables[i]
+			if table == nil {
+				continue
+			}
+			val = s.getInTable(pair.key, table)
+		}
+		if val.Valid() {
+			pair.val = val
+			pair.found = true
+		}
+	}
 }
 
 // appendIterators appends iterators to an array of iterators, for merging.

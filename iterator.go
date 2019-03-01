@@ -161,10 +161,7 @@ func (item *Item) yieldItemValue(dst []byte) ([]byte, error) {
 	// instead.
 	key := y.KeyWithTs(item.Key(), item.Version())
 	moveKey := append(badgerMove, key...)
-	vs, err := item.db.get(moveKey)
-	if err != nil {
-		return nil, err
-	}
+	vs := item.db.get(moveKey)
 	if vs.Version != item.Version() {
 		return nil, nil
 	}
