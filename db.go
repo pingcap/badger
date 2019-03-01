@@ -492,8 +492,8 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	}()
 
 	y.NumGets.Add(1)
-	for i := 0; i < len(tables); i++ {
-		vs := tables[i].Get(key)
+	for _, table := range tables {
+		vs := table.Get(key)
 		y.NumMemtableGets.Add(1)
 		if vs.Valid() {
 			return vs, nil
@@ -511,8 +511,7 @@ func (db *DB) multiGet(pairs []keyValuePair) error {
 	}()
 	y.NumGets.Add(int64(len(pairs)))
 	var foundCount int
-	for i := 0; i < len(tables); i++ {
-		table := tables[i]
+	for _, table := range tables {
 		for j := range pairs {
 			pair := &pairs[j]
 			if pair.found {
