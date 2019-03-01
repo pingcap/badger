@@ -838,3 +838,29 @@ func TestArmV7Issue311Fix(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTxnMultiGet(t *testing.T) {
+	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
+		txn := db.NewTransaction(true)
+		keys := make([][]byte, 10)
+		vals := make([][]byte, 10)
+		for i := 0; i < 10; i++ {
+			k := []byte(fmt.Sprintf("key=%d", i))
+			keys[i] = k
+			v := []byte(fmt.Sprintf("val=%d", i))
+			vals[i] = v
+			txn.Set(k, v)
+		}
+		require.NoError(t, txn.Commit())
+
+		txn = db.NewTransaction(false)
+		items, err := txn.MultiGet(keys)
+		require.NoError(t, err)
+		for i, item := range items {
+			val, err := item.Value()
+			require.NoError(t, err)
+			require.Equal(t, vals[i], val)
+		}
+		txn.Discard()
+	})
+}

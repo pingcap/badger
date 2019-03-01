@@ -860,12 +860,31 @@ func (s *levelsController) get(key []byte) (y.ValueStruct, error) {
 		if err != nil {
 			return y.ValueStruct{}, errors.Wrapf(err, "get key: %q", key)
 		}
-		if vs.Value == nil && vs.Meta == 0 {
-			continue
+		if vs.Valid() {
+			return vs, nil
 		}
-		return vs, nil
 	}
 	return y.ValueStruct{}, nil
+}
+
+func (s *levelsController) multiGet(pairs []keyValuePair) error {
+	for _, h := range s.levels {
+		for i := range pairs {
+			pair := &pairs[i]
+			if pair.found {
+				continue
+			}
+			val, err := h.get(pair.key) // Calls h.RLock() and h.RUnlock().
+			if err != nil {
+				return errors.Wrapf(err, "get key: %q", pair.key)
+			}
+			if val.Valid() {
+				pair.val = val
+				pair.found = true
+			}
+		}
+	}
+	return nil
 }
 
 func appendIteratorsReversed(out []y.Iterator, th []*table.Table, reversed bool) []y.Iterator {

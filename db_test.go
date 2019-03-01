@@ -387,6 +387,23 @@ func TestGetMore(t *testing.T) {
 			txn.Discard()
 		}
 
+		// MultiGet
+		var multiGetKeys [][]byte
+		var expectedValues []string
+		for i := 0; i < n; i += 100 {
+			multiGetKeys = append(multiGetKeys, data(i))
+			expectedValues = append(expectedValues, fmt.Sprintf("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz%9d", i))
+		}
+		txn1 := db.NewTransaction(false)
+		items, err := txn1.MultiGet(multiGetKeys)
+		require.NoError(t, err)
+		for i, item := range items {
+			val, err1 := item.Value()
+			require.NoError(t, err1)
+			require.Equal(t, expectedValues[i], string(val))
+		}
+		txn1.Discard()
+
 		// "Delete" key.
 		for i := 0; i < n; i += m {
 			if (i % 10000) == 0 {

@@ -52,6 +52,11 @@ func (v *ValueStruct) Encode(b []byte) {
 	copy(b[2+len(v.UserMeta):], v.Value)
 }
 
+// Valid checks if the ValueStruct is valid.
+func (v *ValueStruct) Valid() bool {
+	return v.Meta != 0 || v.Value != nil
+}
+
 // EncodeTo should be kept in sync with the Encode function above. The reason
 // this function exists is to avoid creating byte arrays per key-value pair in
 // table/builder.go.

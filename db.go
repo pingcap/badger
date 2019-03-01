@@ -495,11 +495,42 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	for i := 0; i < len(tables); i++ {
 		vs := tables[i].Get(key)
 		y.NumMemtableGets.Add(1)
-		if vs.Meta != 0 || vs.Value != nil {
+		if vs.Valid() {
 			return vs, nil
 		}
 	}
 	return db.lc.get(key)
+}
+
+func (db *DB) multiGet(pairs []keyValuePair) error {
+	tables := db.getMemTables() // Lock should be released.
+	defer func() {
+		for _, tbl := range tables {
+			tbl.DecrRef()
+		}
+	}()
+	y.NumGets.Add(int64(len(pairs)))
+	var foundCount int
+	for i := 0; i < len(tables); i++ {
+		table := tables[i]
+		for j := range pairs {
+			pair := &pairs[j]
+			if pair.found {
+				continue
+			}
+			val := table.Get(pair.key)
+			y.NumMemtableGets.Add(1)
+			if val.Valid() {
+				pair.val = val
+				pair.found = true
+				foundCount++
+			}
+		}
+	}
+	if foundCount == len(pairs) {
+		return nil
+	}
+	return db.lc.multiGet(pairs)
 }
 
 func (db *DB) updateOffset(ptrs []valuePointer) {
