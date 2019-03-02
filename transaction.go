@@ -365,8 +365,8 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 
 type keyValuePair struct {
 	key   []byte
-	found bool
 	val   y.ValueStruct
+	found bool
 }
 
 // MultiGet gets items for keys, if not found, the corresponding item will be nil.

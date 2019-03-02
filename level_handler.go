@@ -174,11 +174,21 @@ func (s *levelHandler) replaceTables(newTables []*table.Table) error {
 
 func decrRefs(tables []*table.Table) error {
 	for _, table := range tables {
+		if table == nil {
+			continue
+		}
 		if err := table.DecrRef(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func forceDecrRefs(tables []*table.Table) {
+	err := decrRefs(tables)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func newLevelHandler(db *DB, level int) *levelHandler {
@@ -284,13 +294,13 @@ func (s *levelHandler) refLevelNTable(key []byte) *table.Table {
 // get returns value for a given key or the key after that. If not found, return nil.
 func (s *levelHandler) get(key []byte) y.ValueStruct {
 	tables := s.refTablesForKey(key)
-	defer s.decrTableRefs(tables)
+	defer forceDecrRefs(tables)
 	return s.getInTables(key, tables)
 }
 
 func (s *levelHandler) getInTables(key []byte, tables []*table.Table) y.ValueStruct {
-	for _, th := range tables {
-		result := s.getInTable(key, th)
+	for _, table := range tables {
+		result := s.getInTable(key, table)
 		if result.Valid() {
 			return result
 		}
@@ -298,13 +308,13 @@ func (s *levelHandler) getInTables(key []byte, tables []*table.Table) y.ValueStr
 	return y.ValueStruct{}
 }
 
-func (s *levelHandler) getInTable(key []byte, th *table.Table) (result y.ValueStruct) {
-	if th.DoesNotHave(y.ParseKey(key)) {
+func (s *levelHandler) getInTable(key []byte, table *table.Table) (result y.ValueStruct) {
+	if table.DoesNotHave(y.ParseKey(key)) {
 		return
 	}
-	resultKey, resultVs, ok := th.PointGet(key)
+	resultKey, resultVs, ok := table.PointGet(key)
 	if !ok {
-		it := th.NewIteratorNoRef(false)
+		it := table.NewIteratorNoRef(false)
 		it.Seek(key)
 		if !it.Valid() {
 			return
@@ -321,35 +331,43 @@ func (s *levelHandler) getInTable(key []byte, th *table.Table) (result y.ValueSt
 	return
 }
 
-func (s *levelHandler) decrTableRefs(tables []*table.Table) {
-	for _, t := range tables {
-		if t == nil {
-			continue
-		}
-		if err := t.DecrRef(); err != nil {
-			panic(err)
+func (s *levelHandler) multiGet(pairs []keyValuePair) {
+	tables := s.refTablesForKeys(pairs)
+	defer forceDecrRefs(tables)
+	if s.level == 0 {
+		s.multiGetLevel0(pairs, tables)
+	} else {
+		s.multiGetLevelN(pairs, tables)
+	}
+}
+
+func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table) {
+	for _, table := range tables {
+		for i := range pairs {
+			pair := &pairs[i]
+			if pair.found {
+				continue
+			}
+			val := s.getInTable(pair.key, table)
+			if val.Valid() {
+				pair.val = val
+				pair.found = true
+			}
 		}
 	}
 }
 
-func (s *levelHandler) multiGet(pairs []keyValuePair) {
-	tables := s.refTablesForKeys(pairs)
-	defer s.decrTableRefs(tables)
+func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table) {
 	for i := range pairs {
 		pair := &pairs[i]
 		if pair.found {
 			continue
 		}
-		var val y.ValueStruct
-		if s.level == 0 {
-			val = s.getInTables(pair.key, tables)
-		} else {
-			table := tables[i]
-			if table == nil {
-				continue
-			}
-			val = s.getInTable(pair.key, table)
+		table := tables[i]
+		if table == nil {
+			continue
 		}
+		val := s.getInTable(pair.key, table)
 		if val.Valid() {
 			pair.val = val
 			pair.found = true

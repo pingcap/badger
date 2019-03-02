@@ -391,6 +391,7 @@ func TestGetMore(t *testing.T) {
 		var expectedValues []string
 		for i := 0; i < n; i += 100 {
 			multiGetKeys = append(multiGetKeys, data(i))
+			// Set a long value to make sure we have enough sst tables.
 			expectedValues = append(expectedValues, fmt.Sprintf("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz%9d", i))
 		}
 		txn1 := db.NewTransaction(false)
