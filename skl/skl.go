@@ -34,12 +34,11 @@ package skl
 
 import (
 	"math"
-	"math/rand"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/coocood/badger/y"
+	"github.com/coocood/rtutil"
 )
 
 const (
@@ -83,7 +82,6 @@ type Skiplist struct {
 	head   *node
 	ref    int32
 	arena  *Arena
-	rng    rand.Source
 }
 
 // IncrRef increases the refcount
@@ -134,7 +132,6 @@ func NewSkiplist(arenaSize int64) *Skiplist {
 		head:   head,
 		arena:  arena,
 		ref:    1,
-		rng:    rand.NewSource(time.Now().UnixNano()),
 	}
 }
 
@@ -170,7 +167,7 @@ func (n *node) casNextOffset(h int, old, val uint32) bool {
 
 func (s *Skiplist) randomHeight() int {
 	h := 1
-	for h < maxHeight && uint32(s.rng.Int63()) <= heightIncrease {
+	for h < maxHeight && rtutil.FastRand() <= heightIncrease {
 		h++
 	}
 	return h
