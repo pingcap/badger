@@ -234,7 +234,7 @@ func (s *levelHandler) close() error {
 	return errors.Wrap(err, "levelHandler.close")
 }
 
-// refTablesForKey acquires a read-lock to access s.tables. It returns a list of tableHandlers.
+// refTablesForKey acquires a read-lock to access s.tables. It returns a list of tables.
 func (s *levelHandler) refTablesForKey(key []byte) []*table.Table {
 	s.RLock()
 	defer s.RUnlock()
@@ -249,7 +249,7 @@ func (s *levelHandler) refTablesForKey(key []byte) []*table.Table {
 	return []*table.Table{tbl}
 }
 
-// refTablesForKeys return tables for pairs.
+// refTablesForKeys returns tables for pairs.
 // level0 returns all tables.
 // level1+ returns tables for every key.
 func (s *levelHandler) refTablesForKeys(pairs []keyValuePair) []*table.Table {
