@@ -124,7 +124,6 @@ func (w *writeWorker) writeLSM(reqs []*request) {
 	}
 
 	w.done(reqs, nil)
-	log.Debugf("%d entries written", count)
 	return
 }
 

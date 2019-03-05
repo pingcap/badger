@@ -365,7 +365,6 @@ func TestGetMore(t *testing.T) {
 			}
 			got := string(getItemValue(t, item))
 			if expectedValue != got {
-
 				vs := db.get(y.KeyWithTs(k, math.MaxUint64))
 				fmt.Printf("wanted=%q Item: %s\n", k, item)
 				fmt.Printf("on re-run, got version: %+v\n", vs)
@@ -1188,6 +1187,10 @@ func (f *testFilter) Filter(key, val, userMeta []byte) Decision {
 	return DecisionKeep
 }
 
+func (f *testFilter) Guards() [][]byte {
+	return nil
+}
+
 func TestCompactionFilter(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -1213,6 +1216,7 @@ func TestCompactionFilter(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
+
 	// Insert keys for delete decision and drop decision.
 	for i := 0; i < 100; i++ {
 		db.Update(func(txn *Txn) error {
@@ -1227,6 +1231,7 @@ func TestCompactionFilter(t *testing.T) {
 			return nil
 		})
 	}
+
 	err = db.View(func(txn *Txn) error {
 		for i := 0; i < 50; i++ {
 			key := []byte(fmt.Sprintf("key%d", i))
