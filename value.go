@@ -39,7 +39,7 @@ import (
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 // Values have their first byte being byteData or byteDelete. This helps us distinguish between

@@ -29,7 +29,7 @@ import (
 
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/y"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 // Manifest represents the contents of the MANIFEST file in a Badger store.

@@ -24,7 +24,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 	"golang.org/x/sys/unix"
 )
 

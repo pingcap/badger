@@ -25,7 +25,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 func openDir(path string) (*os.File, error) {

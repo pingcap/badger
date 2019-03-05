@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 var debugMode = true

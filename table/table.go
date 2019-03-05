@@ -29,7 +29,7 @@ import (
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 const fileSuffix = ".sst"

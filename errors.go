@@ -19,7 +19,7 @@ package badger
 import (
 	"encoding/hex"
 
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 var (

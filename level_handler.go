@@ -24,7 +24,7 @@ import (
 
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 type levelHandler struct {

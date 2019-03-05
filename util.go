@@ -24,7 +24,7 @@ import (
 
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 // summary is produced when DB is closed. Currently it is used only for testing.

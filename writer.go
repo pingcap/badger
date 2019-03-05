@@ -23,7 +23,7 @@ import (
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 	"github.com/ngaut/log"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 type writeWorker struct {

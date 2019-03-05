@@ -26,7 +26,7 @@ import (
 
 	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 )
 
 type oracle struct {
