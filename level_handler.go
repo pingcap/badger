@@ -17,6 +17,7 @@
 package badger
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 	"sync"
@@ -346,6 +347,9 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 		for i := range pairs {
 			pair := &pairs[i]
 			if pair.found {
+				continue
+			}
+			if bytes.Compare(pair.key, table.Smallest()) < 0 || bytes.Compare(pair.key, table.Biggest()) > 0 {
 				continue
 			}
 			val := s.getInTable(pair.key, table)
