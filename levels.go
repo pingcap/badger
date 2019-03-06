@@ -308,7 +308,7 @@ func searchGuard(key []byte, guards [][]byte) []byte {
 
 func shouldFinishFile(key, guard []byte, builder *table.Builder, maxSize int64) bool {
 	if len(guard) > 0 {
-		if bytes.Compare(key, guard) > 0 {
+		if bytes.Compare(key, guard) > 0 && builder.ReachedCapacity(2*1024*1024) {
 			return true
 		}
 	}

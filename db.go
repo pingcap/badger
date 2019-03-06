@@ -687,7 +687,7 @@ func (db *DB) writeLevel0Table(s *table.MemTable) error {
 			}
 
 			if currGuard != nil {
-				if bytes.Compare(it.Key(), currGuard) > 0 {
+				if bytes.Compare(it.Key(), currGuard) > 0 && b.ReachedCapacity(2*1024*1024) {
 					log.Warnf("memtable, current guard: %s(%d), key: %s", string(currGuard), len(currGuard), string(it.Key()))
 					break
 				}
