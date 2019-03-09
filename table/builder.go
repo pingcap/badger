@@ -18,12 +18,13 @@ package table
 
 import (
 	"encoding/binary"
-	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/options"
-	"golang.org/x/time/rate"
 	"os"
 	"reflect"
 	"unsafe"
+
+	"github.com/coocood/badger/fileutil"
+	"github.com/coocood/badger/options"
+	"golang.org/x/time/rate"
 
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
@@ -86,8 +87,8 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilder
 		baseKeysBuf: make([]byte, 0, assumeKeyNum/restartInterval),
 		// assume a large enough num of keys to init bloom filter.
 		bloomFilter:      bbloom.New(float64(assumeKeyNum), 0.01),
-		enableHashIndex:  opt.EnableHashIndex,
-		hashIndexBuilder: newHashIndexBuilder(opt.HashUtilRatio),
+		enableHashIndex:  true, //opt.EnableHashIndex,
+		hashIndexBuilder: newHashIndexBuilder(0.1 /*opt.HashUtilRatio*/),
 	}
 }
 
