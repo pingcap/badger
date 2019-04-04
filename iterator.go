@@ -78,6 +78,11 @@ func (item *Item) Version() uint64 {
 	return item.version
 }
 
+// IsEmpty checks if the value is empty.
+func (item *Item) IsEmpty() bool {
+	return len(item.vptr) == 0
+}
+
 // Value retrieves the value of the item from the value log.
 //
 // This method must be called within a transaction. Calling it outside a
