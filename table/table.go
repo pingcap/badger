@@ -28,7 +28,6 @@ import (
 
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
-	"github.com/coocood/bbloom"
 	"github.com/pingcap/errors"
 )
 
@@ -53,8 +52,6 @@ type Table struct {
 	// The following are initialized once and const.
 	smallest, biggest []byte // Smallest and largest keys.
 	id                uint64 // file id, part of filename
-
-	bf bbloom.Bloom
 
 	hIdx hashIndex
 }
@@ -221,28 +218,20 @@ func (t *Table) readIndex() {
 		t.hIdx.readIndex(buckets, numBuckets)
 	}
 
-	// Read bloom filter.
 	readPos -= 4
 	buf = t.readNoFail(readPos, 4)
-	bloomLen := int(bytesToU32(buf))
-	readPos -= bloomLen
-	data := t.readNoFail(readPos, bloomLen)
-	t.bf.BinaryUnmarshal(data)
+	blockCnt := int(bytesToU32(buf))
 
-	readPos -= 4
-	buf = t.readNoFail(readPos, 4)
-	numBlocks := int(bytesToU32(buf))
-
-	readPos -= 4 * numBlocks
-	buf = t.readNoFail(readPos, 4*numBlocks)
+	readPos -= 4 * blockCnt
+	buf = t.readNoFail(readPos, 4*blockCnt)
 	t.baseKeysEndOffs = bytesToU32Slice(buf)
 
-	baseKeyBufLen := int(t.baseKeysEndOffs[numBlocks-1])
+	baseKeyBufLen := int(t.baseKeysEndOffs[blockCnt-1])
 	readPos -= baseKeyBufLen
 	t.baseKeys = t.readNoFail(readPos, baseKeyBufLen)
 
-	readPos -= 4 * numBlocks
-	buf = t.readNoFail(readPos, 4*numBlocks)
+	readPos -= 4 * blockCnt
+	buf = t.readNoFail(readPos, 4*blockCnt)
 	t.blockEndOffsets = bytesToU32Slice(buf)
 }
 
@@ -297,10 +286,6 @@ func (t *Table) Filename() string { return t.fd.Name() }
 
 // ID is the table's ID number (used to make the file name).
 func (t *Table) ID() uint64 { return t.id }
-
-// DoesNotHave returns true if (but not "only if") the table does not have the key.  It does a
-// bloom filter lookup.
-func (t *Table) DoesNotHave(key []byte) bool { return !t.bf.Has(key) }
 
 // ParseFileID reads the file id out of a filename.
 func ParseFileID(name string) (uint64, bool) {

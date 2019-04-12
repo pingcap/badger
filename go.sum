@@ -1,5 +1,3 @@
-github.com/coocood/bbloom v0.0.0-20180518162752-7774d68761e5 h1:A9dUQP3gNU5GjLMe8by8QM3mn+sHLRAlwquACitTHb0=
-github.com/coocood/bbloom v0.0.0-20180518162752-7774d68761e5/go.mod h1:aXF5GNK2jkah+VKjINjpMxB29d5XlAKk4Yo1oX0q9wk=
 github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2 h1:NnLfQ77q0G4k2Of2c1ceQ0ec6MkLQyDp+IGdVM0D8XM=
 github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2/go.mod h1:7qG7YFnOALvsx6tKTNmQot8d7cGFXM9TidzvRFLWYwM=
 github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8=

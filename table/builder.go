@@ -18,15 +18,15 @@ package table
 
 import (
 	"encoding/binary"
-	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/options"
-	"golang.org/x/time/rate"
 	"os"
 	"reflect"
 	"unsafe"
 
+	"github.com/coocood/badger/fileutil"
+	"github.com/coocood/badger/options"
+	"golang.org/x/time/rate"
+
 	"github.com/coocood/badger/y"
-	"github.com/coocood/bbloom"
 )
 
 const restartInterval = 256 // Might want to change this to be based on total size instead of numKeys.
@@ -70,8 +70,6 @@ type Builder struct {
 	// The offsets are relative to the start of the block.
 	entryEndOffsets []uint32
 
-	bloomFilter bbloom.Bloom
-
 	enableHashIndex  bool
 	hashIndexBuilder hashIndexBuilder
 }
@@ -81,11 +79,9 @@ type Builder struct {
 func NewTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
 	assumeKeyNum := 256 * 1024
 	return &Builder{
-		w:           fileutil.NewBufferedFileWriter(f, opt.WriteBufferSize, opt.BytesPerSync, limiter),
-		buf:         make([]byte, 0, 4*1024),
-		baseKeysBuf: make([]byte, 0, assumeKeyNum/restartInterval),
-		// assume a large enough num of keys to init bloom filter.
-		bloomFilter:      bbloom.New(float64(assumeKeyNum), 0.01),
+		w:                fileutil.NewBufferedFileWriter(f, opt.WriteBufferSize, opt.BytesPerSync, limiter),
+		buf:              make([]byte, 0, 4*1024),
+		baseKeysBuf:      make([]byte, 0, assumeKeyNum/restartInterval),
 		enableHashIndex:  opt.EnableHashIndex,
 		hashIndexBuilder: newHashIndexBuilder(opt.HashUtilRatio),
 	}
@@ -113,7 +109,6 @@ func (b *Builder) resetBuffers() {
 	b.blockBaseOffset = 0
 	b.blockEndOffsets = b.blockEndOffsets[:0]
 	b.entryEndOffsets = b.entryEndOffsets[:0]
-	b.bloomFilter.Clear()
 	b.hashIndexBuilder.reset()
 }
 
@@ -134,13 +129,10 @@ func (b Builder) keyDiff(newKey []byte) []byte {
 }
 
 func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
-	// Add key to bloom filter.
-	if len(key) > 0 {
+	y.Assert(len(key) > 0)
+	if b.enableHashIndex {
 		keyNoTs := y.ParseKey(key)
-		b.bloomFilter.Add(keyNoTs)
-		if b.enableHashIndex {
-			b.hashIndexBuilder.addKey(keyNoTs, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
-		}
+		b.hashIndexBuilder.addKey(keyNoTs, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
 	}
 
 	// diffKey stores the difference of key with blockBaseKey.
@@ -213,18 +205,34 @@ func (b *Builder) ReachedCapacity(capacity int64) bool {
 	return int64(estimateSz) > capacity
 }
 
+// format of SST
+// |block 1|
+// [block 1 end offset]
+// |length of block 1 end offset|
+
+// ...
+// ...
+// |block N|
+// [block N end offset]
+// |length of block N end offset|
+//
+// |block 1 end offset| ... |block N end offset|
+// all block's base key
+// |block 1 base key end offset| ... |block N base key end offset|
+// block count
+// {hash index section}
+// |bucket 1| ... |bucket N|
+//      ---> hash entry(which block(2 bytes), which key inside the block(1 byte)
+// how many bucket
+
 // Finish finishes the table by appending the index.
 func (b *Builder) Finish() error {
 	b.finishBlock() // This will never start a new block.
 	b.buf = append(b.buf, u32SliceToBytes(b.blockEndOffsets)...)
 	b.buf = append(b.buf, b.baseKeysBuf...)
 	b.buf = append(b.buf, u32SliceToBytes(b.baseKeysEndOffs)...)
+	// block count
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.baseKeysEndOffs)))...)
-
-	// Write bloom filter.
-	bfData := b.bloomFilter.BinaryMarshal()
-	b.buf = append(b.buf, bfData...)
-	b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
 
 	if b.enableHashIndex {
 		b.buf = b.hashIndexBuilder.finish(b.buf)

@@ -38,8 +38,6 @@ var (
 	NumVLogBytesWritten *expvar.Int
 	// NumLSMGets is number of LMS gets
 	NumLSMGets *expvar.Map
-	// NumLSMBloomHits is number of LMS bloom hits
-	NumLSMBloomHits *expvar.Map
 	// NumGets is number of gets
 	NumGets *expvar.Int
 	// NumPuts is number of puts
@@ -59,7 +57,6 @@ func init() {
 	NumBytesRead = expvar.NewInt("badger_read_bytes")
 	NumVLogBytesWritten = expvar.NewInt("badger_value_log_written_bytes")
 	NumLSMGets = expvar.NewMap("badger_lsm_level_gets_total")
-	NumLSMBloomHits = expvar.NewMap("badger_lsm_bloom_hits_total")
 	NumGets = expvar.NewInt("badger_gets_total")
 	NumPuts = expvar.NewInt("badger_puts_total")
 	NumBlockedPuts = expvar.NewInt("badger_blocked_puts_total")

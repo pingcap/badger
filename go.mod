@@ -3,7 +3,6 @@ module github.com/coocood/badger
 go 1.12
 
 require (
-	github.com/coocood/bbloom v0.0.0-20180518162752-7774d68761e5
 	github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2
 	github.com/dgryski/go-farm v0.0.0-20190104051053-3adb47b1fb0f
 	github.com/dustin/go-humanize v1.0.0
