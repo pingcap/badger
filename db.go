@@ -314,7 +314,9 @@ func Open(opt Options) (db *DB, err error) {
 
 	replayCloser.SignalAndWait() // Wait for replay to be applied first.
 	// Now that we have the curRead, we can update the nextCommit.
+	db.orc.Lock()
 	db.orc.nextCommit = db.orc.curRead + 1
+	db.orc.Unlock()
 
 	db.writeCh = make(chan *request, kvWriteChCapacity)
 	db.closers.writes = startWriteWorker(db)
