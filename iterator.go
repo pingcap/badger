@@ -19,6 +19,7 @@ package badger
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -256,14 +257,16 @@ type IteratorOptions struct {
 
 	// StartKey and EndKey are used to prune non-overlapping table iterators.
 	// They are not boundary limits.
-	StartKey []byte
-	EndKey   []byte
+	StartKey       []byte
+	startKeyWithTS []byte
+	EndKey         []byte
+	endKeyWithTS   []byte
 
 	internalAccess bool // Used to allow internal access to badger keys.
 }
 
 func (opts *IteratorOptions) hasRange() bool {
-	return len(opts.StartKey) > 0 && len(opts.EndKey) > 0
+	return len(opts.startKeyWithTS) > 0 && len(opts.endKeyWithTS) > 0
 }
 
 func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
@@ -273,10 +276,10 @@ func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
 	if !opts.hasRange() {
 		return true
 	}
-	if bytes.Compare(opts.EndKey, it.entries[0].Key) <= 0 {
+	if bytes.Compare(opts.endKeyWithTS, it.entries[0].Key) <= 0 {
 		return false
 	}
-	if bytes.Compare(opts.StartKey, it.entries[len(it.entries)-1].Key) > 0 {
+	if bytes.Compare(opts.startKeyWithTS, it.entries[len(it.entries)-1].Key) > 0 {
 		return false
 	}
 	return true
@@ -291,11 +294,11 @@ func (opts *IteratorOptions) OverlapMemTable(t *table.MemTable) bool {
 	}
 	iter := t.NewIterator(false)
 	defer iter.Close()
-	iter.Seek(opts.StartKey)
+	iter.Seek(opts.startKeyWithTS)
 	if !iter.Valid() {
 		return false
 	}
-	if bytes.Compare(iter.Key(), opts.EndKey) >= 0 {
+	if bytes.Compare(iter.Key(), opts.endKeyWithTS) >= 0 {
 		return false
 	}
 	return true
@@ -305,19 +308,19 @@ func (opts *IteratorOptions) OverlapTable(t *table.Table) bool {
 	if !opts.hasRange() {
 		return true
 	}
-	if bytes.Compare(opts.EndKey, t.Smallest()) <= 0 {
+	if bytes.Compare(opts.endKeyWithTS, t.Smallest()) <= 0 {
 		return false
 	}
-	if bytes.Compare(opts.StartKey, t.Biggest()) > 0 {
+	if bytes.Compare(opts.startKeyWithTS, t.Biggest()) > 0 {
 		return false
 	}
 	iter := t.NewIterator(false)
 	defer iter.Close()
-	iter.Seek(opts.StartKey)
+	iter.Seek(opts.startKeyWithTS)
 	if !iter.Valid() {
 		return false
 	}
-	if bytes.Compare(iter.Key(), opts.EndKey) >= 0 {
+	if bytes.Compare(iter.Key(), opts.endKeyWithTS) >= 0 {
 		return false
 	}
 	return true
@@ -332,7 +335,7 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 	}
 	startIdx := sort.Search(len(tables), func(i int) bool {
 		t := tables[i]
-		return bytes.Compare(opts.StartKey, t.Biggest()) <= 0
+		return bytes.Compare(opts.startKeyWithTS, t.Biggest()) <= 0
 	})
 	if startIdx == len(tables) {
 		return nil
@@ -340,7 +343,7 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 	tables = tables[startIdx:]
 	endIdx := sort.Search(len(tables), func(i int) bool {
 		t := tables[i]
-		return bytes.Compare(t.Smallest(), opts.EndKey) >= 0
+		return bytes.Compare(t.Smallest(), opts.endKeyWithTS) >= 0
 	})
 	tables = tables[:endIdx]
 	overlapTables := make([]*table.Table, 0, 8)
@@ -389,6 +392,12 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 			tbl.DecrRef()
 		}
 	}()
+	if len(opt.StartKey) > 0 {
+		opt.startKeyWithTS = y.KeyWithTs(opt.StartKey, math.MaxUint64)
+	}
+	if len(opt.EndKey) > 0 {
+		opt.endKeyWithTS = y.KeyWithTs(opt.EndKey, math.MaxUint64)
+	}
 
 	txn.db.vlog.incrIteratorCount()
 	var iters []y.Iterator
