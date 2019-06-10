@@ -18,12 +18,13 @@ package table
 
 import (
 	"encoding/binary"
-	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/options"
-	"golang.org/x/time/rate"
 	"os"
 	"reflect"
 	"unsafe"
+
+	"github.com/coocood/badger/fileutil"
+	"github.com/coocood/badger/options"
+	"golang.org/x/time/rate"
 
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
@@ -39,13 +40,17 @@ type header struct {
 // Encode encodes the header.
 func (h header) Encode() []byte {
 	var b [4]byte
-	*(*header)(unsafe.Pointer(&b[0])) = h
+	b[1] = byte(h.baseLen >> 8)
+	b[0] = byte(h.baseLen & 0xff)
+	b[3] = byte(h.diffLen >> 8)
+	b[2] = byte(h.diffLen & 0xff)
 	return b[:]
 }
 
 // Decode decodes the header.
 func (h *header) Decode(buf []byte) {
-	*h = *(*header)(unsafe.Pointer(&buf[0]))
+	h.baseLen = uint16(buf[1])<<8 | uint16(buf[0])
+	h.diffLen = uint16(buf[3])<<8 | uint16(buf[2])
 }
 
 const headerSize = 4
