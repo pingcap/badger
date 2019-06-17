@@ -388,7 +388,7 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 	txn.db.multiGet(keyValuePairs)
 	items = make([]*Item, len(keys))
 	for i, pair := range keyValuePairs {
-		if pair.found {
+		if pair.found && !isDeleted(pair.val.Meta) {
 			items[i] = &Item{
 				key:      keys[i],
 				version:  pair.val.Version,

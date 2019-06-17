@@ -849,7 +849,7 @@ func TestTxnMultiGet(t *testing.T) {
 			keys[i] = k
 			v := []byte(fmt.Sprintf("val=%d", i))
 			vals[i] = v
-			txn.Set(k, v)
+			require.NoError(t, txn.Set(k, v))
 		}
 		require.NoError(t, txn.Commit())
 
@@ -860,6 +860,26 @@ func TestTxnMultiGet(t *testing.T) {
 			val, err := item.Value()
 			require.NoError(t, err)
 			require.Equal(t, vals[i], val)
+		}
+		txn.Discard()
+
+		txn = db.NewTransaction(true)
+		for _, k := range keys[:5] {
+			require.NoError(t, txn.Delete(k))
+		}
+		require.NoError(t, txn.Commit())
+
+		txn = db.NewTransaction(false)
+		items, err = txn.MultiGet(keys)
+		require.NoError(t, err)
+		for i, item := range items {
+			if i < 5 {
+				require.Nil(t, item)
+			} else {
+				val, err := item.Value()
+				require.NoError(t, err)
+				require.Equal(t, vals[i], val)
+			}
 		}
 		txn.Discard()
 	})
