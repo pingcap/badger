@@ -508,8 +508,8 @@ func (db *DB) multiGet(pairs []keyValuePair) {
 			tbl.DecrRef()
 		}
 	}()
-	y.NumGets.Add(int64(len(pairs)))
-	var foundCount int
+	var foundCount, mtGets int
+
 	for _, table := range tables {
 		for j := range pairs {
 			pair := &pairs[j]
@@ -517,14 +517,17 @@ func (db *DB) multiGet(pairs []keyValuePair) {
 				continue
 			}
 			val := table.Get(pair.key)
-			y.NumMemtableGets.Add(1)
 			if val.Valid() {
 				pair.val = val
 				pair.found = true
 				foundCount++
 			}
+			mtGets++
 		}
 	}
+	y.NumMemtableGets.Add(int64(mtGets))
+	y.NumGets.Add(int64(len(pairs)))
+
 	if foundCount == len(pairs) {
 		return
 	}
