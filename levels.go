@@ -354,34 +354,35 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 
 		var numKeys uint64
 		for ; it.Valid() && (end == nil || y.CompareKeys(it.Key(), end) < 0); it.Next() {
+			vs := it.Value()
+			key := it.Key()
 			// See if we need to skip this key.
 			if len(skipKey) > 0 {
-				if y.SameKey(it.Key(), skipKey) {
-					discardStats.collect(it.Value())
+				if y.SameKey(key, skipKey) {
+					discardStats.collect(vs)
 					continue
 				} else {
 					skipKey = skipKey[:0]
 				}
 			}
 
-			if !y.SameKey(it.Key(), lastKey) {
+			if !y.SameKey(key, lastKey) {
 				if builder.ReachedCapacity(lc.kv.opt.MaxTableSize) {
 					// Only break if we are on a different key, and have reached capacity. We want
 					// to ensure that all versions of the key are stored in the same sstable, and
 					// not divided across multiple tables at the same level.
 					break
 				}
-				lastKey = y.SafeCopy(lastKey, it.Key())
+				lastKey = y.SafeCopy(lastKey, key)
 			}
 
-			vs := it.Value()
-			version := y.ParseTs(it.Key())
+			version := y.ParseTs(key)
 
 			// Only consider the versions which are below the minReadTs, otherwise, we might end up discarding the
 			// only valid version for a running transaction.
 			if version <= minReadTs {
-				// it.Key() is the latest readable version of this key, so we simply discard all the rest of the versions.
-				skipKey = y.SafeCopy(skipKey, it.Key())
+				// key is the latest readable version of this key, so we simply discard all the rest of the versions.
+				skipKey = y.SafeCopy(skipKey, key)
 
 				if isDeleted(vs.Meta) {
 					// If this key range has overlap with lower levels, then keep the deletion
@@ -391,12 +392,12 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 						continue
 					}
 				} else if filter != nil {
-					switch filter.Filter(it.Key(), vs.Value, vs.UserMeta) {
+					switch filter.Filter(key, vs.Value, vs.UserMeta) {
 					case DecisionMarkTombstone:
 						discardStats.collect(vs)
 						if hasOverlap {
 							// There may have ole versions for this key, so convert to delete tombstone.
-							builder.Add(it.Key(), y.ValueStruct{Meta: bitDelete})
+							builder.Add(key, y.ValueStruct{Meta: bitDelete})
 						}
 						continue
 					case DecisionDrop:
@@ -407,7 +408,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 				}
 			}
 			numKeys++
-			builder.Add(it.Key(), it.Value())
+			builder.Add(key, vs)
 		}
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
