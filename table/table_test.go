@@ -19,16 +19,17 @@ package table
 import (
 	"bytes"
 	"fmt"
-	"github.com/coocood/badger/options"
-	"github.com/coocood/badger/y"
-	"github.com/stretchr/testify/require"
-	"golang.org/x/time/rate"
 	"io"
 	"math"
 	"math/rand"
 	"os"
 	"sort"
 	"testing"
+
+	"github.com/coocood/badger/options"
+	"github.com/coocood/badger/y"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 )
 
 func key(prefix string, i int) string {
@@ -56,7 +57,6 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 // keyValues is n by 2 where n is number of pairs.
 func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
-
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.OpenSyncedFile(filename, true)
 	if t != nil {

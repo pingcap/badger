@@ -24,7 +24,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/pingcap/errors"
+	"github.com/pkg/errors"
 )
 
 // ErrEOF indicates an end of file when trying to read from a memory mapped file

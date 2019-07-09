@@ -17,6 +17,7 @@
 package badger
 
 import (
+	"bytes"
 	"expvar"
 	"math"
 	"os"
@@ -650,18 +651,62 @@ func arenaSize(opt Options) int64 {
 	return opt.MaxTableSize + opt.maxBatchSize + opt.maxBatchCount*int64(skl.MaxNodeSize)
 }
 
-// WriteLevel0Table flushes memtable. It drops deleteValues.
-func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
-	iter := s.NewIterator(false)
-	defer iter.Close()
-	b := table.NewTableBuilder(f, db.limiter, db.opt.TableBuilderOptions)
-	defer b.Close()
-	for iter.Rewind(); iter.Valid(); iter.Next() {
-		if err := b.Add(iter.Key(), iter.Value()); err != nil {
-			return err
-		}
+func (db *DB) add2Level0(b *table.Builder, fd *os.File) {
+	if err := b.Finish(); err != nil {
+		log.Fatal(err)
 	}
-	return b.Finish()
+	b.Close()
+
+	tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
+	if err != nil {
+		log.Fatalf("ERROR while opening table: %v", err)
+	}
+	// We own a ref on tbl.
+	err = db.lc.addLevel0Table(tbl) // This will incrRef (if we don't error, sure)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tbl.DecrRef() // Releases our ref.
+}
+
+// WriteLevel0Table flushes memtable. It drops deleteValues.
+func (db *DB) writeLevel0Table(s *table.MemTable) error {
+	var guards [][]byte
+	if db.lc.kv.opt.CompactionFilterFactory != nil {
+		guards = db.lc.kv.opt.CompactionFilterFactory().Guards()
+	}
+
+	it := s.NewIterator(false)
+	defer it.Close()
+
+	for it.Rewind(); it.Valid(); {
+		var currGuard []byte
+		fd, err := y.CreateSyncedFile(table.NewFilename(db.lc.reserveFileID(), db.opt.Dir), false)
+		if err != nil {
+			return (err)
+		}
+		b := table.NewTableBuilder(fd, db.limiter, db.opt.TableBuilderOptions)
+
+		for ; it.Valid(); it.Next() {
+			if currGuard == nil && len(guards) > 0 {
+				currGuard = searchGuard(it.Key(), guards)
+			}
+
+			if currGuard != nil {
+				if bytes.Compare(it.Key(), currGuard) > 0 {
+					log.Warnf("memtable, current guard: %s(%d), key: %s", string(currGuard), len(currGuard), string(it.Key()))
+					break
+				}
+			}
+
+			if err := b.Add(it.Key(), it.Value()); err != nil {
+				log.Fatal(err)
+			}
+		}
+		db.add2Level0(b, fd)
+	}
+
+	return nil
 }
 
 type flushTask struct {
@@ -691,37 +736,18 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 			ft.mt.PutToSkl(headTs, y.ValueStruct{Value: offset})
 		}
 
-		fileID := db.lc.reserveFileID()
-		fd, err := y.CreateSyncedFile(table.NewFilename(fileID, db.opt.Dir), false)
-		if err != nil {
-			return y.Wrap(err)
-		}
-
 		// Don't block just to sync the directory entry.
-		dirSyncCh := make(chan error)
+		dirSyncCh := make(chan error, 1)
 		go func() { dirSyncCh <- syncDir(db.opt.Dir) }()
+		err := db.writeLevel0Table(ft.mt)
+		if err != nil {
+			log.Error(err)
+			return err
+		}
 
-		err = db.writeLevel0Table(ft.mt, fd)
 		dirSyncErr := <-dirSyncCh
-
-		if err != nil {
-			log.Errorf("ERROR while writing to level 0: %v", err)
-			return err
-		}
 		if dirSyncErr != nil {
-			log.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
-			return err
-		}
-
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
-		if err != nil {
-			log.Infof("ERROR while opening table: %v", err)
-			return err
-		}
-		// We own a ref on tbl.
-		err = db.lc.addLevel0Table(tbl) // This will incrRef (if we don't error, sure)
-		tbl.DecrRef()                   // Releases our ref.
-		if err != nil {
+			log.Error(err)
 			return err
 		}
 
@@ -770,7 +796,7 @@ func (db *DB) calculateSize() {
 			return nil
 		})
 		if err != nil {
-			log.Infof("Got error while calculating total size of directory: %s", dir)
+			log.Infof("Got error while calculating total size of directory: %s, err:%v", dir, err)
 		}
 		return lsmSize, vlogSize
 	}

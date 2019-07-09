@@ -59,6 +59,10 @@ type Table struct {
 	hIdx hashIndex
 }
 
+func (t *Table) String() string {
+	return fmt.Sprintf("id:%d, (smallest: %v biggest: %v) ", t.id, t.smallest, t.biggest)
+}
+
 // IncrRef increments the refcount (having to do with whether the file should be deleted)
 func (t *Table) IncrRef() {
 	atomic.AddInt32(&t.ref, 1)

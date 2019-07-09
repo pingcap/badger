@@ -115,6 +115,8 @@ type CompactionFilter interface {
 	// Filter is the method the compaction process invokes for kv that is being compacted. The returned decision
 	// indicates that the kv should be preserved, deleted or dropped in the output of this compaction run.
 	Filter(key, val, userMeta []byte) Decision
+
+	Guards() [][]byte
 }
 
 // Decision is the type for compaction filter decision.

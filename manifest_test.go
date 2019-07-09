@@ -41,11 +41,8 @@ func TestManifestBasic(t *testing.T) {
 	{
 		kv, err := Open(opt)
 		require.NoError(t, err)
-		n := 5000
+		n := 500
 		for i := 0; i < n; i++ {
-			if (i % 10000) == 0 {
-				fmt.Printf("Putting i=%d\n", i)
-			}
 			k := []byte(fmt.Sprintf("%16x", rand.Int63()))
 			txnSet(t, kv, k, k, 0x00)
 		}

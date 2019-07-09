@@ -317,12 +317,10 @@ func TestForceCompactL0(t *testing.T) {
 // WARNING: This test might take a while but it should pass!
 func TestGetMore(t *testing.T) {
 	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-
 		data := func(i int) []byte {
 			return []byte(fmt.Sprintf("%b", i))
 		}
-		//	n := 500000
-		n := 10000
+		n := 5000
 		m := 45 // Increasing would cause ErrTxnTooBig
 		for i := 0; i < n; i += m {
 			txn := db.NewTransaction(true)
@@ -365,7 +363,6 @@ func TestGetMore(t *testing.T) {
 			}
 			got := string(getItemValue(t, item))
 			if expectedValue != got {
-
 				vs := db.get(y.KeyWithTs(k, math.MaxUint64))
 				fmt.Printf("wanted=%q Item: %s\n", k, item)
 				fmt.Printf("on re-run, got version: %+v\n", vs)
@@ -406,9 +403,6 @@ func TestGetMore(t *testing.T) {
 
 		// "Delete" key.
 		for i := 0; i < n; i += m {
-			if (i % 10000) == 0 {
-				fmt.Printf("Deleting i=%d\n", i)
-			}
 			txn := db.NewTransaction(true)
 			for j := i; j < i+m && j < n; j++ {
 				require.NoError(t, txn.Delete(data(j)))
@@ -417,10 +411,6 @@ func TestGetMore(t *testing.T) {
 		}
 		db.validate()
 		for i := 0; i < n; i++ {
-			if (i % 10000) == 0 {
-				// Display some progress. Right now, it's not very fast with no caching.
-				fmt.Printf("Testing i=%d\n", i)
-			}
 			k := data(i)
 			txn := db.NewTransaction(false)
 			_, err := txn.Get([]byte(k))
@@ -434,13 +424,9 @@ func TestGetMore(t *testing.T) {
 // WARNING: This test might take a while but it should pass!
 func TestExistsMore(t *testing.T) {
 	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-		//	n := 500000
-		n := 10000
+		n := 5000
 		m := 45
 		for i := 0; i < n; i += m {
-			if (i % 1000) == 0 {
-				t.Logf("Putting i=%d\n", i)
-			}
 			txn := db.NewTransaction(true)
 			for j := i; j < i+m && j < n; j++ {
 				require.NoError(t, txn.Set([]byte(fmt.Sprintf("%09d", j)),
@@ -451,9 +437,6 @@ func TestExistsMore(t *testing.T) {
 		db.validate()
 
 		for i := 0; i < n; i++ {
-			if (i % 1000) == 0 {
-				fmt.Printf("Testing i=%d\n", i)
-			}
 			k := fmt.Sprintf("%09d", i)
 			require.NoError(t, db.View(func(txn *Txn) error {
 				_, err := txn.Get([]byte(k))
@@ -469,9 +452,6 @@ func TestExistsMore(t *testing.T) {
 
 		// "Delete" key.
 		for i := 0; i < n; i += m {
-			if (i % 1000) == 0 {
-				fmt.Printf("Deleting i=%d\n", i)
-			}
 			txn := db.NewTransaction(true)
 			for j := i; j < i+m && j < n; j++ {
 				require.NoError(t, txn.Delete([]byte(fmt.Sprintf("%09d", j))))
@@ -480,25 +460,18 @@ func TestExistsMore(t *testing.T) {
 		}
 		db.validate()
 		for i := 0; i < n; i++ {
-			if (i % 10000) == 0 {
-				// Display some progress. Right now, it's not very fast with no caching.
-				fmt.Printf("Testing i=%d\n", i)
-			}
 			k := fmt.Sprintf("%09d", i)
-
 			require.NoError(t, db.View(func(txn *Txn) error {
 				_, err := txn.Get([]byte(k))
 				require.Error(t, err)
 				return nil
 			}))
 		}
-		fmt.Println("Done and closing")
 	})
 }
 
 func TestIterate2Basic(t *testing.T) {
 	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-
 		bkey := func(i int) []byte {
 			return []byte(fmt.Sprintf("%09d", i))
 		}
@@ -506,12 +479,8 @@ func TestIterate2Basic(t *testing.T) {
 			return []byte(fmt.Sprintf("%025d", i))
 		}
 
-		// n := 500000
-		n := 10000
+		n := 5000
 		for i := 0; i < n; i++ {
-			if (i % 1000) == 0 {
-				t.Logf("Put i=%d\n", i)
-			}
 			txnSet(t, db, bkey(i), bval(i), byte(i%127))
 		}
 
@@ -528,11 +497,10 @@ func TestIterate2Basic(t *testing.T) {
 			for it.Rewind(); it.Valid(); it.Next() {
 				item := it.Item()
 				key := item.Key()
-				if rewind && count == 5000 {
+				if rewind && count == n/2 {
 					// Rewind would skip /head/ key, and it.Next() would skip 0.
 					count = 1
 					it.Rewind()
-					t.Log("Rewinding from 5000 to zero.")
 					rewind = false
 					continue
 				}
@@ -547,7 +515,7 @@ func TestIterate2Basic(t *testing.T) {
 
 		{
 			t.Log("Starting second basic iteration")
-			idx := 5030
+			idx := n / 2
 			for it.Seek(bkey(idx)); it.Valid(); it.Next() {
 				item := it.Item()
 				require.EqualValues(t, bkey(idx), string(item.Key()))
@@ -561,16 +529,12 @@ func TestIterate2Basic(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
-	fmt.Printf("Writing to dir %s\n", dir)
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	n := 10000
 	{
 		kv, _ := Open(getTestOptions(dir))
 		for i := 0; i < n; i++ {
-			if (i % 10000) == 0 {
-				fmt.Printf("Putting i=%d\n", i)
-			}
 			k := []byte(fmt.Sprintf("%09d", i))
 			txnSet(t, kv, k, k, 0x00)
 		}
@@ -581,9 +545,6 @@ func TestLoad(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(10001), kv.orc.readTs())
 	for i := 0; i < n; i++ {
-		if (i % 10000) == 0 {
-			fmt.Printf("Testing i=%d\n", i)
-		}
 		k := fmt.Sprintf("%09d", i)
 		require.NoError(t, kv.View(func(txn *Txn) error {
 			item, err := txn.Get([]byte(k))
@@ -728,7 +689,6 @@ func TestBigKeyValuePairs(t *testing.T) {
 
 func TestIteratorPrefetchSize(t *testing.T) {
 	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-
 		bkey := func(i int) []byte {
 			return []byte(fmt.Sprintf("%09d", i))
 		}
@@ -738,9 +698,6 @@ func TestIteratorPrefetchSize(t *testing.T) {
 
 		n := 100
 		for i := 0; i < n; i++ {
-			// if (i % 10) == 0 {
-			// 	t.Logf("Put i=%d\n", i)
-			// }
 			txnSet(t, db, bkey(i), bval(i), byte(i%127))
 		}
 
@@ -782,9 +739,6 @@ func TestSetIfAbsentAsync(t *testing.T) {
 
 	n := 1000
 	for i := 0; i < n; i++ {
-		// if (i % 10) == 0 {
-		// 	t.Logf("Put i=%d\n", i)
-		// }
 		txn := kv.NewTransaction(true)
 		_, err = txn.Get(bkey(i))
 		require.Equal(t, ErrKeyNotFound, err)
@@ -895,7 +849,7 @@ func TestLargeKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 500; i++ {
 		tx := db.NewTransaction(true)
 		for _, kv := range benchmarkData {
 			k := make([]byte, len(kv.key))
@@ -1043,7 +997,7 @@ func TestReadOnly(t *testing.T) {
 	// Create the DB
 	db, err := Open(opts)
 	require.NoError(t, err)
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 5000; i++ {
 		txnSet(t, db, []byte(fmt.Sprintf("key%d", i)), []byte(fmt.Sprintf("value%d", i)), 0x00)
 	}
 
@@ -1127,7 +1081,7 @@ func TestLSMOnly(t *testing.T) {
 	}
 	defer db.Close()
 
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < 500; i++ {
 		value := make([]byte, 64000)
 		_, err = rand.Read(value)
 		require.NoError(t, err)
@@ -1188,6 +1142,10 @@ func (f *testFilter) Filter(key, val, userMeta []byte) Decision {
 	return DecisionKeep
 }
 
+func (f *testFilter) Guards() [][]byte {
+	return nil
+}
+
 func TestCompactionFilter(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -1205,7 +1163,7 @@ func TestCompactionFilter(t *testing.T) {
 	require.NoError(t, err)
 	val := make([]byte, 1024*4)
 	// Insert 50 entries that will be kept.
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 30; i++ {
 		err = db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
 			// Entries without userMeta will result in DecisionKeep in testFilter.
@@ -1213,6 +1171,7 @@ func TestCompactionFilter(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
+
 	// Insert keys for delete decision and drop decision.
 	for i := 0; i < 100; i++ {
 		db.Update(func(txn *Txn) error {
@@ -1227,8 +1186,9 @@ func TestCompactionFilter(t *testing.T) {
 			return nil
 		})
 	}
+
 	err = db.View(func(txn *Txn) error {
-		for i := 0; i < 50; i++ {
+		for i := 0; i < 30; i++ {
 			key := []byte(fmt.Sprintf("key%d", i))
 			item, _ := txn.Get(key)
 			if i%2 == 0 {

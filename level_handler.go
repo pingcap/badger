@@ -39,7 +39,6 @@ type levelHandler struct {
 
 	// The following are initialized once and const.
 	level        int
-	strLevel     string
 	maxTotalSize int64
 	db           *DB
 }
@@ -48,6 +47,12 @@ func (s *levelHandler) getTotalSize() int64 {
 	s.RLock()
 	defer s.RUnlock()
 	return s.totalSize
+}
+
+func (s *levelHandler) String() string {
+	s.RLock()
+	defer s.RUnlock()
+	return fmt.Sprintf("level: %d, tables: %s, totalSize: %d", s.level, s.tables, s.totalSize)
 }
 
 // initTables replaces s.tables with given tables. This is done during loading.
@@ -121,6 +126,10 @@ func assertTablesOrder(tables []*table.Table) {
 		y.AssertTruef(y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) < 0,
 			"y.CompareKeys(tables[i].Biggest() %v, tables[i+1].Biggest() %v",
 			tables[i].Biggest(), tables[i+1].Biggest())
+
+		y.AssertTruef(y.CompareKeys(tables[i].Biggest(), tables[i+1].Smallest()) < 0,
+			"y.CompareKeys(tables[i].Biggest() %v, tables[i+1].Smallest() %v",
+			tables[i].Biggest(), tables[i+1].Smallest())
 	}
 }
 
@@ -194,9 +203,8 @@ func forceDecrRefs(tables []*table.Table) {
 
 func newLevelHandler(db *DB, level int) *levelHandler {
 	return &levelHandler{
-		level:    level,
-		strLevel: fmt.Sprintf("l%d", level),
-		db:       db,
+		level: level,
+		db:    db,
 	}
 }
 
