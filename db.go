@@ -240,9 +240,8 @@ func Open(opt Options) (db *DB, err error) {
 		isManaged:  opt.managedTxns,
 		nextCommit: 1,
 		commits:    make(map[uint64]uint64),
-		readMark:   y.WaterMark{},
+		readMark:   y.NewFastWaterMark(),
 	}
-	orc.readMark.Init()
 
 	db = &DB{
 		imm:           make([]*table.MemTable, 0, opt.NumMemtables),

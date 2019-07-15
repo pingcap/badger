@@ -19,6 +19,7 @@ package y
 import (
 	"container/heap"
 	"sync/atomic"
+	"unsafe"
 )
 
 type uint64Heap []uint64
@@ -117,4 +118,70 @@ func (w *WaterMark) process() {
 			processOne(mark.readTs, mark.done)
 		}
 	}
+}
+
+type FastWaterMark struct {
+	head      unsafe.Pointer
+	minReadTS uint64
+}
+
+type WaterMarkNode struct {
+	ReadTS  uint64
+	isAlive uint64
+	next    unsafe.Pointer
+}
+
+func NewFastWaterMark() *FastWaterMark {
+	return &FastWaterMark{
+		head: unsafe.Pointer(&WaterMarkNode{}),
+	}
+}
+
+// Begin marks readTS to prevent the SST files being deleted while reading.
+// The real readTS to use is the returned WaterMarkNode.ReadTS to make sure readTS is increasing monotonically.
+// MinReadTS will be less than or equal to readTS until Done is called.
+func (wm *FastWaterMark) Begin(readTSHint uint64) *WaterMarkNode {
+	n := &WaterMarkNode{
+		isAlive: 1,
+	}
+	for {
+		headPtr := atomic.LoadPointer(&wm.head)
+		head := (*WaterMarkNode)(headPtr)
+		if head.ReadTS >= readTSHint {
+			// Make sure the ReadTS is increasing monotonically.
+			n.ReadTS = head.ReadTS
+		} else {
+			n.ReadTS = readTSHint
+		}
+		n.next = headPtr
+		if atomic.CompareAndSwapPointer(&wm.head, headPtr, unsafe.Pointer(n)) {
+			return n
+		}
+	}
+}
+
+// Done unmark the WaterMarkNode.ReadTS, it may increase the MinReadTS if the all the older WaterMarkNode is dead.
+func (wm *FastWaterMark) Done(n *WaterMarkNode) {
+	next := (*WaterMarkNode)(atomic.LoadPointer(&n.next))
+	var nextChanged bool
+	for {
+		if next == nil {
+			atomic.StoreUint64(&wm.minReadTS, n.ReadTS)
+			break
+		}
+		if atomic.LoadUint64(&next.isAlive) > 0 {
+			break
+		}
+		next = (*WaterMarkNode)(atomic.LoadPointer(&next.next))
+		nextChanged = true
+	}
+	if nextChanged {
+		atomic.StorePointer(&n.next, unsafe.Pointer(next))
+	}
+	atomic.StoreUint64(&n.isAlive, 0)
+}
+
+// MinReadTS returns the minimum readTS in used, so older version files can be safely deleted.
+func (wm *FastWaterMark) MinReadTS() uint64 {
+	return atomic.LoadUint64(&wm.minReadTS)
 }

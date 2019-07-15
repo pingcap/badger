@@ -323,7 +323,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 	// Pick up the currently pending transactions' min readTs, so we can discard versions below this
 	// readTs. We should never discard any versions starting from above this timestamp, because that
 	// would affect the snapshot view guarantee provided by transactions.
-	minReadTs := lc.kv.orc.readMark.MinReadTs()
+	minReadTs := lc.kv.orc.readMark.MinReadTS()
 
 	var filter CompactionFilter
 	if lc.kv.opt.CompactionFilterFactory != nil {

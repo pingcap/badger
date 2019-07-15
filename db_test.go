@@ -1146,7 +1146,7 @@ func TestMinReadTs(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 		require.Equal(t, uint64(10), db.orc.readTs())
-		min := db.orc.readMark.MinReadTs()
+		min := db.orc.readMark.MinReadTS()
 		require.Equal(t, uint64(9), min)
 
 		readTxn := db.NewTransaction(false)
@@ -1157,10 +1157,14 @@ func TestMinReadTs(t *testing.T) {
 		}
 		require.Equal(t, uint64(20), db.orc.readTs())
 		time.Sleep(time.Millisecond)
-		require.Equal(t, min, db.orc.readMark.MinReadTs())
+		require.Equal(t, min, db.orc.readMark.MinReadTS())
 		readTxn.Discard()
 		time.Sleep(time.Millisecond)
-		require.Equal(t, uint64(19), db.orc.readMark.MinReadTs())
+		require.Equal(t, uint64(10), db.orc.readMark.MinReadTS())
+		// The minReadTS can only be increase by newer txn done.
+		readTxn = db.NewTransaction(false)
+		readTxn.Discard()
+		require.Equal(t, uint64(20), db.orc.readMark.MinReadTS())
 
 		for i := 0; i < 10; i++ {
 			db.View(func(txn *Txn) error {
@@ -1168,7 +1172,7 @@ func TestMinReadTs(t *testing.T) {
 			})
 		}
 		time.Sleep(time.Millisecond)
-		require.Equal(t, uint64(20), db.orc.readMark.MinReadTs())
+		require.Equal(t, uint64(20), db.orc.readMark.MinReadTS())
 	})
 }
 

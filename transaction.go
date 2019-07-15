@@ -39,7 +39,7 @@ type oracle struct {
 	writeLock  sync.Mutex
 	nextCommit uint64
 
-	readMark y.WaterMark
+	readMark *y.FastWaterMark
 
 	// commits stores a key fingerprint and latest commit counter for it.
 	// refCount is used to clear out commits map to avoid a memory blowup.
@@ -135,6 +135,7 @@ func (o *oracle) doneCommit(cts uint64) {
 
 // Txn represents a Badger transaction.
 type Txn struct {
+	wmNode   *y.WaterMarkNode
 	readTs   uint64
 	commitTs uint64
 
@@ -416,7 +417,7 @@ func (txn *Txn) Discard() {
 		panic("Unclosed iterator at time of Txn.Discard.")
 	}
 	txn.discarded = true
-	txn.db.orc.readMark.Done(txn.readTs)
+	txn.db.orc.readMark.Done(txn.wmNode)
 
 	if txn.update {
 		txn.db.orc.decrRef()
@@ -512,15 +513,15 @@ func (db *DB) NewTransaction(update bool) *Txn {
 		// DB is read-only, force read-only transaction.
 		update = false
 	}
-
+	readTS := db.orc.readTs()
 	txn := &Txn{
 		update: update,
 		db:     db,
-		readTs: db.orc.readTs(),
 		count:  1,                       // One extra entry for BitFin.
 		size:   int64(len(txnKey) + 10), // Some buffer for the extra entry.
 	}
-	db.orc.readMark.Begin(txn.readTs)
+	txn.wmNode = db.orc.readMark.Begin(readTS)
+	txn.readTs = txn.wmNode.ReadTS
 	if update {
 		txn.pendingWrites = make(map[string]*Entry)
 		txn.db.orc.addRef()
