@@ -1248,6 +1248,62 @@ func TestCompactionFilter(t *testing.T) {
 	})
 }
 
+func TestIterateVLog(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.MaxTableSize = 1 << 20
+	opts.ValueLogFileSize = 1 << 20
+	opts.ValueThreshold = 1000
+	db, err := Open(opts)
+	require.NoError(t, err)
+	for i := 0; i < 3000; i++ {
+		err = db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%d", i))
+			val := make([]byte, 1024)
+			return txn.Set(key, val)
+		})
+		require.NoError(t, err)
+	}
+
+	var iterKeys [][]byte
+	var iterVals [][]byte
+	err = db.IterateVLog(0, func(e Entry) {
+		key := y.SafeCopy(nil, y.ParseKey(e.Key))
+		iterKeys = append(iterKeys, key)
+		iterVals = append(iterVals, y.SafeCopy(nil, e.Value))
+	})
+	require.Nil(t, err)
+	require.Equal(t, 3000, len(iterKeys))
+	expectedVal := make([]byte, 1024)
+	for i, key := range iterKeys {
+		require.Equal(t, fmt.Sprintf("key%d", i), string(key))
+		require.Equal(t, expectedVal, iterVals[i])
+	}
+	offset := db.GetVLogOffset()
+	for i := 3000; i < 5000; i++ {
+		err = db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%d", i))
+			return txn.Set(key, make([]byte, 999))
+		})
+		require.NoError(t, err)
+	}
+	iterKeys = iterKeys[:0]
+	iterVals = iterVals[:0]
+	err = db.IterateVLog(offset, func(e Entry) {
+		key := y.SafeCopy(nil, y.ParseKey(e.Key))
+		iterKeys = append(iterKeys, key)
+		iterVals = append(iterVals, y.SafeCopy(nil, e.Value))
+	})
+	require.Len(t, iterKeys, 2000)
+	expectedVal = make([]byte, 999)
+	for i, key := range iterKeys {
+		require.Equal(t, fmt.Sprintf("key%d", i+3000), string(key))
+		require.Equal(t, expectedVal, iterVals[i])
+	}
+}
+
 func ExampleOpen() {
 	dir, err := ioutil.TempDir("", "badger")
 	if err != nil {

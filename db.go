@@ -18,6 +18,7 @@ package badger
 
 import (
 	"expvar"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -861,4 +862,40 @@ func (db *DB) Size() (lsm int64, vlog int64) {
 
 func (db *DB) Tables() []TableInfo {
 	return db.lc.getTableInfo()
+}
+
+func (db *DB) GetVLogOffset() uint64 {
+	return db.vlog.getMaxPtr()
+}
+
+// IterateVLog iterates VLog for external replay, this function should be called only when there is no
+// concurrent write operation on the DB.
+func (db *DB) IterateVLog(offset uint64, fn func(e Entry)) error {
+	startFid := uint32(offset >> 32)
+	vOffset := uint32(offset)
+	for fid := startFid; fid <= db.vlog.maxFid(); fid++ {
+		lf, err := db.vlog.getFile(fid)
+		if err != nil {
+			return err
+		}
+		if fid != startFid {
+			vOffset = 0
+		}
+		endOffset, err := db.vlog.iterate(lf, vOffset, func(e Entry, vp valuePointer) error {
+			if e.meta&bitTxn > 0 {
+				fn(e)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if fid == db.vlog.maxFid() {
+			_, err = lf.fd.Seek(int64(endOffset), io.SeekStart)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

@@ -293,7 +293,7 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 }
 
 func (vlog *valueLog) rewrite(f *logFile) error {
-	maxFid := atomic.LoadUint32(&vlog.maxFid)
+	maxFid := vlog.maxFid()
 	y.AssertTruef(uint32(f.fid) < maxFid, "fid to move: %d. Current max fid: %d", f.fid, maxFid)
 	log.Infof("Rewriting fid: %d", f.fid)
 
@@ -527,9 +527,9 @@ type valueLog struct {
 	// A refcount of iterators -- when this hits zero, we can delete the filesToBeDeleted.
 	numActiveIterators int32
 
-	kv                *DB
-	maxFid            uint32
-	writableLogOffset uint32
+	kv     *DB
+	maxPtr uint64
+
 	numEntriesWritten uint32
 	opt               Options
 
@@ -577,7 +577,7 @@ func (vlog *valueLog) openOrCreateFiles(readOnly bool) error {
 			maxFid = uint32(fid)
 		}
 	}
-	vlog.maxFid = uint32(maxFid)
+	vlog.maxPtr = uint64(maxFid) << 32
 
 	// Open all previous log files as read only. Open the last log file
 	// as read write (unless the DB is read only).
@@ -611,9 +611,10 @@ func (vlog *valueLog) openOrCreateFiles(readOnly bool) error {
 }
 
 func (vlog *valueLog) createVlogFile(fid uint32) (*logFile, error) {
+	atomic.StoreUint64(&vlog.maxPtr, uint64(fid)<<32)
+
 	path := vlog.fpath(fid)
 	lf := &logFile{fid: fid, path: path, loadingMode: vlog.opt.ValueLogLoadingMode}
-	vlog.writableLogOffset = 0
 	vlog.numEntriesWritten = 0
 
 	var err error
@@ -709,16 +710,16 @@ func (vlog *valueLog) Replay(ptr valuePointer, fn logEntry) error {
 		if err != nil {
 			return errors.Wrapf(err, "Unable to replay value log: %q", f.path)
 		}
-		if id == vlog.maxFid {
+		if id == vlog.maxFid() {
 			lastOffset = endAt
 		}
 	}
 
 	// Seek to the end to start writing.
 	var err error
-	last := vlog.filesMap[vlog.maxFid]
+	last := vlog.filesMap[vlog.maxFid()]
 	_, err = last.fd.Seek(int64(lastOffset), io.SeekStart)
-	atomic.AddUint32(&vlog.writableLogOffset, uint32(lastOffset))
+	atomic.AddUint64(&vlog.maxPtr, uint64(lastOffset))
 	return errors.Wrapf(err, "Unable to seek to end of value log: %q", last.path)
 }
 
@@ -750,7 +751,7 @@ func (vlog *valueLog) sync() error {
 		vlog.filesLock.RUnlock()
 		return nil
 	}
-	curlf := vlog.filesMap[vlog.maxFid]
+	curlf := vlog.filesMap[vlog.maxFid()]
 	curlf.lock.RLock()
 	vlog.filesLock.RUnlock()
 
@@ -765,14 +766,22 @@ func (vlog *valueLog) sync() error {
 	return err
 }
 
+func (vlog *valueLog) getMaxPtr() uint64 {
+	return atomic.LoadUint64(&vlog.maxPtr)
+}
+
+func (vlog *valueLog) maxFid() uint32 {
+	return uint32(atomic.LoadUint64(&vlog.maxPtr) >> 32)
+}
+
 func (vlog *valueLog) writableOffset() uint32 {
-	return atomic.LoadUint32(&vlog.writableLogOffset)
+	return uint32(atomic.LoadUint64(&vlog.maxPtr))
 }
 
 // write is thread-unsafe by design and should not be called concurrently.
 func (vlog *valueLog) write(reqs []*request) error {
 	vlog.filesLock.RLock()
-	curlf := vlog.filesMap[vlog.maxFid]
+	curlf := vlog.filesMap[vlog.maxFid()]
 	vlog.filesLock.RUnlock()
 
 	toDisk := func() error {
@@ -785,19 +794,16 @@ func (vlog *valueLog) write(reqs []*request) error {
 		}
 		y.NumWrites.Add(1)
 		y.NumVLogBytesWritten.Add(int64(vlog.pendingLen))
-		atomic.AddUint32(&vlog.writableLogOffset, uint32(vlog.pendingLen))
+		atomic.AddUint64(&vlog.maxPtr, uint64(vlog.pendingLen))
 		vlog.pendingLen = 0
 
 		if vlog.writableOffset() > uint32(vlog.opt.ValueLogFileSize) ||
 			vlog.numEntriesWritten > vlog.opt.ValueLogMaxEntries {
 			var err error
-			if err = curlf.doneWriting(vlog.writableLogOffset); err != nil {
+			if err = curlf.doneWriting(vlog.writableOffset()); err != nil {
 				return err
 			}
-
-			newid := atomic.AddUint32(&vlog.maxFid, 1)
-			y.AssertTruef(newid <= math.MaxUint32, "newid will overflow uint32: %v", newid)
-			newlf, err := vlog.createVlogFile(newid)
+			newlf, err := vlog.createVlogFile(vlog.maxFid() + 1)
 			if err != nil {
 				return err
 			}
@@ -859,7 +865,7 @@ func (vlog *valueLog) getFile(fid uint32) (*logFile, error) {
 // TODO: Make this read private.
 func (vlog *valueLog) Read(vp valuePointer, s *y.Slice) ([]byte, error) {
 	// Check for valid offset if we are reading to writable log.
-	if vp.Fid == vlog.maxFid && vp.Offset >= vlog.writableOffset() {
+	if vp.Fid == vlog.maxFid() && vp.Offset >= vlog.writableOffset() {
 		return nil, errors.Errorf(
 			"Invalid value pointer offset: %d greater than current offset: %d",
 			vp.Offset, vlog.writableOffset())
