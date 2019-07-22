@@ -247,7 +247,7 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 		}
 
 		var vp valuePointer
-		vp.Len = uint32(headerBufSize + len(e.Key) + len(e.Value) + 4) // len(crcBuf)
+		vp.Len = uint32(headerBufSize + len(e.Key) + len(e.Value) + len(e.UserMeta) + 4) // len(crcBuf)
 		read.recordOffset += vp.Len
 
 		vp.Offset = e.offset
