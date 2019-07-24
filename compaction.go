@@ -51,11 +51,11 @@ func (r keyRange) overlapsWith(dst keyRange) bool {
 	}
 
 	// If my left is greater than dst right, we have no overlap.
-	if y.CompareKeys(r.left, dst.right) > 0 {
+	if y.CompareKeysWithVer(r.left, dst.right) > 0 {
 		return false
 	}
 	// If my right is less than dst left, we have no overlap.
-	if y.CompareKeys(r.right, dst.left) < 0 {
+	if y.CompareKeysWithVer(r.right, dst.left) < 0 {
 		return false
 	}
 	// We have overlap.
@@ -67,10 +67,10 @@ func getKeyRange(tables []*table.Table) keyRange {
 	smallest := tables[0].Smallest()
 	biggest := tables[0].Biggest()
 	for i := 1; i < len(tables); i++ {
-		if y.CompareKeys(tables[i].Smallest(), smallest) < 0 {
+		if y.CompareKeysWithVer(tables[i].Smallest(), smallest) < 0 {
 			smallest = tables[i].Smallest()
 		}
-		if y.CompareKeys(tables[i].Biggest(), biggest) > 0 {
+		if y.CompareKeysWithVer(tables[i].Biggest(), biggest) > 0 {
 			biggest = tables[i].Biggest()
 		}
 	}

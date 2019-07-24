@@ -156,7 +156,7 @@ func (n *listNode) mergeToSkl(skl *skl.Skiplist) {
 
 func (n *listNode) get(key []byte) (y.ValueStruct, bool) {
 	i := sort.Search(len(n.entries), func(i int) bool {
-		return y.CompareKeys(n.entries[i].Key, key) >= 0
+		return y.CompareKeysWithVer(n.entries[i].Key, key) >= 0
 	})
 	if i < len(n.entries) && y.SameKey(key, n.entries[i].Key) {
 		return n.entries[i].Value, true
@@ -192,7 +192,7 @@ func (it *listNodeIterator) Rewind() {
 
 func (it *listNodeIterator) Seek(key []byte) {
 	it.idx = sort.Search(len(it.n.entries), func(i int) bool {
-		return y.CompareKeys(it.n.entries[i].Key, key) >= 0
+		return y.CompareKeysWithVer(it.n.entries[i].Key, key) >= 0
 	})
 	if it.reversed {
 		if !it.Valid() || !bytes.Equal(it.Key(), key) {

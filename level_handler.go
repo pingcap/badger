@@ -81,7 +81,7 @@ func (s *levelHandler) initTables(tables []*table.Table) {
 	} else {
 		// Sort tables by keys.
 		sort.Slice(s.tables, func(i, j int) bool {
-			return y.CompareKeys(s.tables[i].Smallest(), s.tables[j].Smallest()) < 0
+			return y.CompareKeysWithVer(s.tables[i].Smallest(), s.tables[j].Smallest()) < 0
 		})
 	}
 }
@@ -119,18 +119,18 @@ func (s *levelHandler) deleteTables(toDel []*table.Table) error {
 
 func assertTablesOrder(tables []*table.Table) {
 	for i := 0; i < len(tables)-1; i++ {
-		y.AssertTruef(y.CompareKeys(tables[i].Smallest(), tables[i].Biggest()) <= 0,
+		y.AssertTruef(y.CompareKeysWithVer(tables[i].Smallest(), tables[i].Biggest()) <= 0,
 			"tables[i].Smallest() %v, tables[i].Biggest() %v",
 			tables[i].Smallest(),
 			tables[i].Biggest())
 
-		y.AssertTruef(y.CompareKeys(tables[i].Smallest(), tables[i+1].Smallest()) < 0,
+		y.AssertTruef(y.CompareKeysWithVer(tables[i].Smallest(), tables[i+1].Smallest()) < 0,
 			"tables[i].Smallest() :%v, tables[i+1].Smallest():%v",
 			tables[i].Smallest(),
 			tables[i+1].Smallest())
 
-		y.AssertTruef(y.CompareKeys(tables[i].Biggest(), tables[i+1].Biggest()) < 0,
-			"y.CompareKeys(tables[i].Biggest() %v, tables[i+1].Biggest() %v",
+		y.AssertTruef(y.CompareKeysWithVer(tables[i].Biggest(), tables[i+1].Biggest()) < 0,
+			"y.CompareKeysWithVer(tables[i].Biggest() %v, tables[i+1].Biggest() %v",
 			tables[i].Biggest(), tables[i+1].Biggest())
 	}
 }
@@ -292,7 +292,7 @@ func (s *levelHandler) refLevel0Tables() []*table.Table {
 func (s *levelHandler) refLevelNTable(key []byte) *table.Table {
 	// For level >= 1, we can do a binary search as key range does not overlap.
 	idx := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeys(s.tables[i].Biggest(), key) >= 0
+		return y.CompareKeysWithVer(s.tables[i].Biggest(), key) >= 0
 	})
 	if idx >= len(s.tables) {
 		// Given key is strictly > than every element we have.
@@ -428,10 +428,10 @@ func (s *levelHandler) overlappingTables(_ levelHandlerRLocked, kr keyRange) (in
 
 func getTablesInRange(tbls []*table.Table, start, end []byte) (int, int) {
 	left := sort.Search(len(tbls), func(i int) bool {
-		return y.CompareKeys(start, tbls[i].Biggest()) <= 0
+		return y.CompareKeysWithVer(start, tbls[i].Biggest()) <= 0
 	})
 	right := sort.Search(len(tbls), func(i int) bool {
-		return y.CompareKeys(end, tbls[i].Smallest()) < 0
+		return y.CompareKeysWithVer(end, tbls[i].Smallest()) < 0
 	})
 	return left, right
 }

@@ -271,9 +271,9 @@ func (t *Table) ApproximateSizeInRange(start, end []byte) int {
 }
 
 func (t *Table) approximateOffset(it *Iterator, key []byte) int {
-	if y.CompareKeys(t.Biggest(), key) < 0 {
+	if y.CompareKeysWithVer(t.Biggest(), key) < 0 {
 		return int(t.blockEndOffsets[len(t.blockEndOffsets)-1])
-	} else if y.CompareKeys(t.Smallest(), key) > 0 {
+	} else if y.CompareKeysWithVer(t.Smallest(), key) > 0 {
 		return 0
 	}
 	blk := it.seekBlock(key)

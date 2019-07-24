@@ -72,7 +72,7 @@ func (itr *blockIterator) loadEntryEndOffsets() {
 func (itr *blockIterator) seek(key []byte) {
 	foundEntryIdx := sort.Search(len(itr.entryEndOffsets), func(idx int) bool {
 		itr.setIdx(idx)
-		return y.CompareKeys(itr.key, key) >= 0
+		return y.CompareKeysWithVer(itr.key, key) >= 0
 	})
 	itr.setIdx(foundEntryIdx)
 }
@@ -221,7 +221,7 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	}
 	itr.bi.setBlock(block)
 	itr.bi.setIdx(offset)
-	if y.CompareKeys(itr.bi.key, key) >= 0 {
+	if y.CompareKeysWithVer(itr.bi.key, key) >= 0 {
 		return
 	}
 	itr.bi.seek(key)
@@ -235,7 +235,7 @@ func (itr *Iterator) seekBlock(key []byte) int {
 		}
 		baseKeyEndOff := itr.t.baseKeysEndOffs[idx]
 		baseKey := itr.t.baseKeys[baseKeyStartOff:baseKeyEndOff]
-		return y.CompareKeys(baseKey, key) > 0
+		return y.CompareKeysWithVer(baseKey, key) > 0
 	})
 }
 
@@ -461,12 +461,12 @@ func (s *ConcatIterator) Seek(key []byte) {
 	var idx int
 	if !s.reversed {
 		idx = sort.Search(len(s.tables), func(i int) bool {
-			return y.CompareKeys(s.tables[i].Biggest(), key) >= 0
+			return y.CompareKeysWithVer(s.tables[i].Biggest(), key) >= 0
 		})
 	} else {
 		n := len(s.tables)
 		idx = n - 1 - sort.Search(n, func(i int) bool {
-			return y.CompareKeys(s.tables[n-1-i].Smallest(), key) <= 0
+			return y.CompareKeysWithVer(s.tables[n-1-i].Smallest(), key) <= 0
 		})
 	}
 	if idx >= len(s.tables) || idx < 0 {

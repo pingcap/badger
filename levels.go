@@ -338,7 +338,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 	if start != nil {
 		it.Seek(start)
 	}
-	for it.Valid() && (end == nil || y.CompareKeys(it.Key(), end) < 0) {
+	for it.Valid() && (end == nil || y.CompareKeysWithVer(it.Key(), end) < 0) {
 		timeStart := time.Now()
 		fileID := lc.reserveFileID()
 		fd, err := y.CreateSyncedFile(table.NewFilename(fileID, lc.kv.opt.Dir), false)
@@ -353,7 +353,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 		}
 
 		var numKeys uint64
-		for ; it.Valid() && (end == nil || y.CompareKeys(it.Key(), end) < 0); it.Next() {
+		for ; it.Valid() && (end == nil || y.CompareKeysWithVer(it.Key(), end) < 0); it.Next() {
 			vs := it.Value()
 			key := it.Key()
 			// See if we need to skip this key.
@@ -448,7 +448,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 	}
 
 	sort.Slice(newTables, func(i, j int) bool {
-		return y.CompareKeys(newTables[i].Biggest(), newTables[j].Biggest()) < 0
+		return y.CompareKeysWithVer(newTables[i].Biggest(), newTables[j].Biggest()) < 0
 	})
 	lc.kv.vlog.updateGCStats(discardStats.discardSpaces)
 	log.Infof("Discard stats: %v", discardStats)

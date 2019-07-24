@@ -163,7 +163,7 @@ func (n *node) casNextOffset(h int, old, val uint32) bool {
 // If n is nil, this is an "end" marker and we return false.
 //func (s *Skiplist) keyIsAfterNode(key []byte, n *node) bool {
 //	y.Assert(n != s.head)
-//	return n != nil && y.CompareKeys(key, n.key) > 0
+//	return n != nil && y.CompareKeysWithVer(key, n.key) > 0
 //}
 
 func (s *Skiplist) randomHeight() int {
@@ -214,7 +214,7 @@ func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool
 			cmp = -1
 		} else {
 			nextKey := next.key(s.arena)
-			cmp = y.CompareKeys(key, nextKey)
+			cmp = y.CompareKeysWithVer(key, nextKey)
 		}
 		if cmp > 0 {
 			// x.key < next.key < key. We can continue to move right.
@@ -276,7 +276,7 @@ func (s *Skiplist) findSpliceForLevel(key []byte, before, after *node, level int
 			cmp = -1
 		} else {
 			nextKey := next.key(s.arena)
-			cmp = y.CompareKeys(key, nextKey)
+			cmp = y.CompareKeysWithVer(key, nextKey)
 		}
 		if cmp == 0 {
 			// Equality case.
@@ -341,13 +341,13 @@ func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
 				recomputeHeight++
 			} else if hint.prev[recomputeHeight] != s.head &&
 				hint.prev[recomputeHeight] != nil &&
-				y.CompareKeys(key, hint.prev[recomputeHeight].key(s.arena)) <= 0 {
+				y.CompareKeysWithVer(key, hint.prev[recomputeHeight].key(s.arena)) <= 0 {
 				// Key is before splice.
 				bad := hint.prev[recomputeHeight]
 				for bad == hint.prev[recomputeHeight] {
 					recomputeHeight++
 				}
-			} else if hint.next[recomputeHeight] != nil && y.CompareKeys(key, hint.next[recomputeHeight].key(s.arena)) > 0 {
+			} else if hint.next[recomputeHeight] != nil && y.CompareKeysWithVer(key, hint.next[recomputeHeight].key(s.arena)) > 0 {
 				// Key is after splice.
 				bad := hint.next[recomputeHeight]
 				for bad == hint.next[recomputeHeight] {

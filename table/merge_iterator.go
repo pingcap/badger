@@ -56,7 +56,7 @@ func (mt *MergeIterator) fix() {
 		return
 	}
 	for mt.smaller.valid {
-		cmp := y.CompareKeys(mt.smaller.key, mt.bigger.key)
+		cmp := y.CompareKeysWithVer(mt.smaller.key, mt.bigger.key)
 		if cmp == 0 {
 			// Ignore the value in second iterator.
 			mt.second.Next()
