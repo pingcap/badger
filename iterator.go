@@ -276,10 +276,10 @@ func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
 	if !opts.hasRange() {
 		return true
 	}
-	if bytes.Compare(opts.endKeyWithTS, it.entries[0].Key) <= 0 {
+	if y.CompareKeysWithVer(opts.endKeyWithTS, it.entries[0].Key) <= 0 {
 		return false
 	}
-	if bytes.Compare(opts.startKeyWithTS, it.entries[len(it.entries)-1].Key) > 0 {
+	if y.CompareKeysWithVer(opts.startKeyWithTS, it.entries[len(it.entries)-1].Key) > 0 {
 		return false
 	}
 	return true
@@ -298,7 +298,7 @@ func (opts *IteratorOptions) OverlapMemTable(t *table.MemTable) bool {
 	if !iter.Valid() {
 		return false
 	}
-	if bytes.Compare(iter.Key(), opts.endKeyWithTS) >= 0 {
+	if y.CompareKeysWithVer(iter.Key(), opts.endKeyWithTS) >= 0 {
 		return false
 	}
 	return true
@@ -308,10 +308,10 @@ func (opts *IteratorOptions) OverlapTable(t *table.Table) bool {
 	if !opts.hasRange() {
 		return true
 	}
-	if bytes.Compare(opts.endKeyWithTS, t.Smallest()) <= 0 {
+	if y.CompareKeysWithVer(opts.endKeyWithTS, t.Smallest()) <= 0 {
 		return false
 	}
-	if bytes.Compare(opts.startKeyWithTS, t.Biggest()) > 0 {
+	if y.CompareKeysWithVer(opts.startKeyWithTS, t.Biggest()) > 0 {
 		return false
 	}
 	iter := t.NewIterator(false)
@@ -320,7 +320,7 @@ func (opts *IteratorOptions) OverlapTable(t *table.Table) bool {
 	if !iter.Valid() {
 		return false
 	}
-	if bytes.Compare(iter.Key(), opts.endKeyWithTS) >= 0 {
+	if y.CompareKeysWithVer(iter.Key(), opts.endKeyWithTS) >= 0 {
 		return false
 	}
 	return true
@@ -335,7 +335,7 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 	}
 	startIdx := sort.Search(len(tables), func(i int) bool {
 		t := tables[i]
-		return bytes.Compare(opts.startKeyWithTS, t.Biggest()) <= 0
+		return y.CompareKeysWithVer(opts.startKeyWithTS, t.Biggest()) <= 0
 	})
 	if startIdx == len(tables) {
 		return nil
@@ -343,7 +343,7 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 	tables = tables[startIdx:]
 	endIdx := sort.Search(len(tables), func(i int) bool {
 		t := tables[i]
-		return bytes.Compare(t.Smallest(), opts.endKeyWithTS) >= 0
+		return y.CompareKeysWithVer(t.Smallest(), opts.endKeyWithTS) >= 0
 	})
 	tables = tables[:endIdx]
 	overlapTables := make([]*table.Table, 0, 8)
