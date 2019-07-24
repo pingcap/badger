@@ -147,6 +147,7 @@ type Txn struct {
 
 	db        *DB
 	discarded bool
+	refs      RefMap
 
 	size         int64
 	count        int64
@@ -346,7 +347,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	}
 
 	seek := y.KeyWithTs(key, txn.readTs)
-	vs := txn.db.get(seek)
+	vs := txn.db.get(seek, txn.refs)
 	if !vs.Valid() {
 		return nil, ErrKeyNotFound
 	}
@@ -386,7 +387,7 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 		}
 		keyValuePairs[i].key = y.KeyWithTs(key, txn.readTs)
 	}
-	txn.db.multiGet(keyValuePairs)
+	txn.db.multiGet(keyValuePairs, txn.refs)
 	items = make([]*Item, len(keys))
 	for i, pair := range keyValuePairs {
 		if pair.found && !isDeleted(pair.val.Meta) {
@@ -415,6 +416,11 @@ func (txn *Txn) Discard() {
 	}
 	if atomic.LoadInt32(&txn.numIterators) > 0 {
 		panic("Unclosed iterator at time of Txn.Discard.")
+	}
+	for t := range txn.refs {
+		if err := t.DecrRef(); err != nil {
+			panic(err)
+		}
 	}
 	txn.discarded = true
 	txn.db.orc.readMark.Done(txn.wmNode)
@@ -519,6 +525,7 @@ func (db *DB) NewTransaction(update bool) *Txn {
 		db:     db,
 		count:  1,                       // One extra entry for BitFin.
 		size:   int64(len(txnKey) + 10), // Some buffer for the extra entry.
+		refs:   RefMap{},
 	}
 	txn.wmNode = db.orc.readMark.Begin(readTS)
 	txn.readTs = txn.wmNode.ReadTS

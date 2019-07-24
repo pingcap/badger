@@ -17,7 +17,6 @@
 package badger
 
 import (
-	"bytes"
 	"fmt"
 	"sort"
 	"sync"
@@ -42,6 +41,18 @@ type levelHandler struct {
 	strLevel     string
 	maxTotalSize int64
 	db           *DB
+}
+
+type RefMap = map[*table.Table]struct{}
+
+func addTableToRefMap(refs RefMap, t *table.Table) {
+	if refs == nil {
+		return
+	}
+	if _, ok := refs[t]; !ok {
+		refs[t] = struct{}{}
+		t.IncrRef()
+	}
 }
 
 func (s *levelHandler) getTotalSize() int64 {
@@ -293,16 +304,17 @@ func (s *levelHandler) refLevelNTable(key []byte) *table.Table {
 }
 
 // get returns value for a given key or the key after that. If not found, return nil.
-func (s *levelHandler) get(key []byte) y.ValueStruct {
+func (s *levelHandler) get(key []byte, refs RefMap) y.ValueStruct {
 	tables := s.refTablesForKey(key)
 	defer forceDecrRefs(tables)
-	return s.getInTables(key, tables)
+	return s.getInTables(key, tables, refs)
 }
 
-func (s *levelHandler) getInTables(key []byte, tables []*table.Table) y.ValueStruct {
+func (s *levelHandler) getInTables(key []byte, tables []*table.Table, refs RefMap) y.ValueStruct {
 	for _, table := range tables {
 		result := s.getInTable(key, table)
 		if result.Valid() {
+			addTableToRefMap(refs, table)
 			return result
 		}
 	}
@@ -332,36 +344,37 @@ func (s *levelHandler) getInTable(key []byte, table *table.Table) (result y.Valu
 	return
 }
 
-func (s *levelHandler) multiGet(pairs []keyValuePair) {
+func (s *levelHandler) multiGet(pairs []keyValuePair, refs RefMap) {
 	tables := s.refTablesForKeys(pairs)
 	defer forceDecrRefs(tables)
 	if s.level == 0 {
-		s.multiGetLevel0(pairs, tables)
+		s.multiGetLevel0(pairs, tables, refs)
 	} else {
-		s.multiGetLevelN(pairs, tables)
+		s.multiGetLevelN(pairs, tables, refs)
 	}
 }
 
-func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table) {
+func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table, refs RefMap) {
 	for _, table := range tables {
 		for i := range pairs {
 			pair := &pairs[i]
 			if pair.found {
 				continue
 			}
-			if bytes.Compare(pair.key, table.Smallest()) < 0 || bytes.Compare(pair.key, table.Biggest()) > 0 {
+			if y.CompareKeys(pair.key, table.Smallest()) < 0 || y.CompareKeys(pair.key, table.Biggest()) > 0 {
 				continue
 			}
 			val := s.getInTable(pair.key, table)
 			if val.Valid() {
 				pair.val = val
 				pair.found = true
+				addTableToRefMap(refs, table)
 			}
 		}
 	}
 }
 
-func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table) {
+func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table, refs RefMap) {
 	for i := range pairs {
 		pair := &pairs[i]
 		if pair.found {
@@ -375,6 +388,7 @@ func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Tabl
 		if val.Valid() {
 			pair.val = val
 			pair.found = true
+			addTableToRefMap(refs, table)
 		}
 	}
 }

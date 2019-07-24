@@ -366,7 +366,7 @@ func TestGetMore(t *testing.T) {
 			got := string(getItemValue(t, item))
 			if expectedValue != got {
 
-				vs := db.get(y.KeyWithTs(k, math.MaxUint64))
+				vs := db.get(y.KeyWithTs(k, math.MaxUint64), nil)
 				fmt.Printf("wanted=%q Item: %s\n", k, item)
 				fmt.Printf("on re-run, got version: %+v\n", vs)
 
@@ -1302,6 +1302,49 @@ func TestIterateVLog(t *testing.T) {
 		require.Equal(t, fmt.Sprintf("key%d", i+3000), string(key))
 		require.Equal(t, expectedVal, iterVals[i])
 	}
+}
+
+func TestMultiGet(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.TableLoadingMode = options.MemoryMap
+	opts.ValueThreshold = 512
+	db, err := Open(opts)
+	require.NoError(t, err)
+	var keys [][]byte
+	for i := 0; i < 1000; i++ {
+		keys = append(keys, []byte(fmt.Sprintf("key%d", i)))
+	}
+	for i := 0; i < 1000; i++ {
+		err = db.Update(func(txn *Txn) error {
+			val := make([]byte, 513)
+			return txn.SetWithMetaSlice(keys[i], val, make([]byte, 16))
+		})
+		require.NoError(t, err)
+	}
+	txn := db.NewTransaction(false)
+	defer txn.Discard()
+	items, err := txn.MultiGet(keys)
+	require.NoError(t, err)
+	for i := range keys {
+		require.NotNil(t, items[i])
+	}
+	// Update more data to trigger compaction.
+	for i := 0; i < 1000; i++ {
+		err = db.Update(func(txn *Txn) error {
+			val := make([]byte, 500)
+			return txn.Set(keys[i], val)
+		})
+		require.NoError(t, err)
+	}
+	// items can be safely accessed.
+	total := 0
+	for _, item := range items {
+		total += int(item.UserMeta()[15])
+	}
+	require.Equal(t, 0, total)
 }
 
 func ExampleOpen() {

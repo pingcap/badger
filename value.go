@@ -308,7 +308,7 @@ func (vlog *valueLog) rewrite(f *logFile) error {
 			log.Infof("Processing entry %d", count)
 		}
 
-		vs := vlog.kv.get(e.Key)
+		vs := vlog.kv.get(e.Key, nil)
 		if discardEntry(e, vs) {
 			return nil
 		}
@@ -1044,7 +1044,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 		r.total += esz
 		r.count++
 
-		vs := vlog.kv.get(e.Key)
+		vs := vlog.kv.get(e.Key, nil)
 		if discardEntry(e, vs) {
 			r.discard += esz
 			return nil
