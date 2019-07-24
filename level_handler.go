@@ -361,7 +361,7 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 			if pair.found {
 				continue
 			}
-			if y.CompareKeys(pair.key, table.Smallest()) < 0 || y.CompareKeys(pair.key, table.Biggest()) > 0 {
+			if y.CompareKeysWithVer(pair.key, table.Smallest()) < 0 || y.CompareKeysWithVer(pair.key, table.Biggest()) > 0 {
 				continue
 			}
 			val := s.getInTable(pair.key, table)
