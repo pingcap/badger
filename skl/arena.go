@@ -35,8 +35,9 @@ const (
 
 // Arena should be lock-free.
 type Arena struct {
-	n   uint32
-	buf []byte
+	n    uint32
+	valN uint32 // Value is allocate from the end.
+	buf  []byte
 }
 
 // newArena returns a new arena.
@@ -51,11 +52,12 @@ func newArena(n int64) *Arena {
 }
 
 func (s *Arena) size() int64 {
-	return int64(atomic.LoadUint32(&s.n))
+	return int64(atomic.LoadUint32(&s.n) + atomic.LoadUint32(&s.valN))
 }
 
 func (s *Arena) reset() {
 	atomic.StoreUint32(&s.n, 0)
+	atomic.StoreUint32(&s.valN, 0)
 }
 
 // putNode allocates a node in the arena. The node is aligned on a pointer-sized
@@ -81,11 +83,9 @@ func (s *Arena) putNode(height int) uint32 {
 // decoding will incur some overhead.
 func (s *Arena) putVal(v y.ValueStruct) uint32 {
 	l := uint32(v.EncodedSize())
-	n := atomic.AddUint32(&s.n, l)
-	y.Assert(int(n) <= len(s.buf))
-	m := n - l
-	v.Encode(s.buf[m:])
-	return m
+	valOff := uint32(len(s.buf)) - atomic.AddUint32(&s.valN, l)
+	v.Encode(s.buf[valOff:])
+	return valOff
 }
 
 func (s *Arena) putKey(key []byte) uint32 {
