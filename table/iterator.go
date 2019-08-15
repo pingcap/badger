@@ -33,7 +33,7 @@ type blockIterator struct {
 	key []byte
 	val []byte
 
-	keyPrefixLen    uint16
+	lastBaseLen     uint16
 	entryEndOffsets []uint32
 }
 
@@ -41,7 +41,7 @@ func (itr *blockIterator) setBlock(b block) {
 	itr.err = nil
 	itr.idx = 0
 	itr.baseKey = itr.baseKey[:0]
-	itr.keyPrefixLen = 0
+	itr.lastBaseLen = 0
 	itr.key = itr.key[:0]
 	itr.val = itr.val[:0]
 	itr.data = b.data
@@ -110,10 +110,10 @@ func (itr *blockIterator) setIdx(i int) {
 	entryData := itr.data[startOffset:endOffset]
 	var h header
 	h.Decode(entryData)
-	if h.baseLen > itr.keyPrefixLen {
-		itr.key = append(itr.key[:0], itr.baseKey[:h.baseLen]...)
+	if h.baseLen > itr.lastBaseLen {
+		itr.key = append(itr.key[:itr.lastBaseLen], itr.baseKey[itr.lastBaseLen:h.baseLen]...)
 	}
-	itr.keyPrefixLen = h.baseLen
+	itr.lastBaseLen = h.baseLen
 	valueOff := headerSize + int(h.diffLen)
 	diffKey := entryData[headerSize:valueOff]
 	itr.key = append(itr.key[:h.baseLen], diffKey...)
