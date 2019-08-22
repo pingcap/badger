@@ -16,56 +16,137 @@
 
 package y
 
-import "expvar"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+const (
+	namespace = "badger"
+	label     = "path"
+)
 
 var (
 	// LSMSize has size of the LSM in bytes
-	LSMSize *expvar.Map
+	LSMSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "lsm_size",
+	}, []string{label})
 	// VlogSize has size of the value log in bytes
-	VlogSize *expvar.Map
-	// PendingWrites tracks the number of pending writes.
-	PendingWrites *expvar.Map
+	VlogSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "vlog_size",
+	}, []string{label})
 
 	// These are cumulative
 
 	// NumReads has cumulative number of reads
-	NumReads *expvar.Int
+	NumReads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_reads",
+	}, []string{label})
 	// NumWrites has cumulative number of writes
-	NumWrites *expvar.Int
+	NumWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_writes",
+	}, []string{label})
 	// NumBytesRead has cumulative number of bytes read
-	NumBytesRead *expvar.Int
+	NumBytesRead = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_bytes_read",
+	}, []string{label})
 	// NumVLogBytesWritten has cumulative number of bytes written
-	NumVLogBytesWritten *expvar.Int
+	NumVLogBytesWritten = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_bytes_written",
+	}, []string{label})
 	// NumLSMGets is number of LMS gets
-	NumLSMGets *expvar.Map
+	NumLSMGets = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_lsm_gets",
+	}, []string{label})
 	// NumLSMBloomHits is number of LMS bloom hits
-	NumLSMBloomHits *expvar.Map
+	NumLSMBloomHits = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_lsm_bloom_hits",
+	}, []string{label})
 	// NumGets is number of gets
-	NumGets *expvar.Int
+	NumGets = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_gets",
+	}, []string{label})
 	// NumPuts is number of puts
-	NumPuts *expvar.Int
-	// NumBlockedPuts is number of blocked puts
-	NumBlockedPuts *expvar.Int
+	NumPuts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_puts",
+	}, []string{label})
 	// NumMemtableGets is number of memtable gets
-	NumMemtableGets *expvar.Int
-	//TotalFileWriteSize *expvar.Int
-	TotalFileWriteSize *expvar.Int
+	NumMemtableGets = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_memtable_gets",
+	}, []string{label})
+
+	// Histograms
+
+	VlogSyncDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "vlog_sync_duration",
+		Buckets:   prometheus.ExponentialBuckets(0.001, 1.5, 20),
+	}, []string{label})
+
+	WriteLSMDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "write_lsm_duration",
+		Buckets:   prometheus.ExponentialBuckets(0.0003, 1.5, 20),
+	}, []string{label})
 )
+
+type MetricsSet struct {
+	LSMSize             prometheus.Gauge
+	VlogSize            prometheus.Gauge
+	NumReads            prometheus.Counter
+	NumWrites           prometheus.Counter
+	NumBytesRead        prometheus.Counter
+	NumVLogBytesWritten prometheus.Counter
+	NumLSMGets          prometheus.Counter
+	NumLSMBloomHits     prometheus.Counter
+	NumGets             prometheus.Counter
+	NumPuts             prometheus.Counter
+	NumMemtableGets     prometheus.Counter
+	VlogSyncDuration    prometheus.Observer
+	WriteLSMDuration    prometheus.Observer
+}
+
+func NewMetricSet(path string) *MetricsSet {
+	return &MetricsSet{
+		LSMSize:             LSMSize.WithLabelValues(path),
+		VlogSize:            VlogSize.WithLabelValues(path),
+		NumReads:            NumReads.WithLabelValues(path),
+		NumWrites:           NumWrites.WithLabelValues(path),
+		NumBytesRead:        NumBytesRead.WithLabelValues(path),
+		NumVLogBytesWritten: NumVLogBytesWritten.WithLabelValues(path),
+		NumLSMGets:          NumLSMGets.WithLabelValues(path),
+		NumLSMBloomHits:     NumLSMBloomHits.WithLabelValues(path),
+		NumGets:             NumGets.WithLabelValues(path),
+		NumPuts:             NumPuts.WithLabelValues(path),
+		NumMemtableGets:     NumMemtableGets.WithLabelValues(path),
+		VlogSyncDuration:    VlogSyncDuration.WithLabelValues(path),
+		WriteLSMDuration:    WriteLSMDuration.WithLabelValues(path),
+	}
+}
 
 // These variables are global and have cumulative values for all kv stores.
 func init() {
-	NumReads = expvar.NewInt("badger_disk_reads_total")
-	NumWrites = expvar.NewInt("badger_disk_writes_total")
-	NumBytesRead = expvar.NewInt("badger_read_bytes")
-	NumVLogBytesWritten = expvar.NewInt("badger_value_log_written_bytes")
-	NumLSMGets = expvar.NewMap("badger_lsm_level_gets_total")
-	NumLSMBloomHits = expvar.NewMap("badger_lsm_bloom_hits_total")
-	NumGets = expvar.NewInt("badger_gets_total")
-	NumPuts = expvar.NewInt("badger_puts_total")
-	NumBlockedPuts = expvar.NewInt("badger_blocked_puts_total")
-	TotalFileWriteSize = expvar.NewInt("badger_write_file_total_bytes")
-	NumMemtableGets = expvar.NewInt("badger_memtable_gets_total")
-	LSMSize = expvar.NewMap("badger_lsm_size_bytes")
-	VlogSize = expvar.NewMap("badger_vlog_size_bytes")
-	PendingWrites = expvar.NewMap("badger_pending_writes_total")
+	prometheus.MustRegister(LSMSize)
+	prometheus.MustRegister(VlogSize)
+	prometheus.MustRegister(NumReads)
+	prometheus.MustRegister(NumWrites)
+	prometheus.MustRegister(NumBytesRead)
+	prometheus.MustRegister(NumVLogBytesWritten)
+	prometheus.MustRegister(NumLSMGets)
+	prometheus.MustRegister(NumLSMBloomHits)
+	prometheus.MustRegister(NumGets)
+	prometheus.MustRegister(NumPuts)
+	prometheus.MustRegister(NumMemtableGets)
+	prometheus.MustRegister(VlogSyncDuration)
+	prometheus.MustRegister(WriteLSMDuration)
 }

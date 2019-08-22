@@ -17,23 +17,21 @@
 package badger
 
 import (
-	"expvar"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	"golang.org/x/time/rate"
-
-	"github.com/ngaut/log"
 
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
+	"github.com/ngaut/log"
 	"github.com/pingcap/errors"
+	"golang.org/x/time/rate"
 )
 
 var (
@@ -77,6 +75,10 @@ type DB struct {
 	orc *oracle
 
 	limiter *rate.Limiter
+
+	metrics  *y.MetricsSet
+	lsmSize  int64
+	vlogSize int64
 }
 
 const (
@@ -254,7 +256,9 @@ func Open(opt Options) (db *DB, err error) {
 		dirLockGuard:  dirLockGuard,
 		valueDirGuard: valueDirLockGuard,
 		orc:           orc,
+		metrics:       y.NewMetricSet(opt.Dir),
 	}
+	db.vlog.metrics = db.metrics
 
 	rateLimit := opt.TableBuilderOptions.BytesPerSecond
 	if rateLimit > 0 {
@@ -490,10 +494,10 @@ func (db *DB) get(key []byte, refs RefMap) y.ValueStruct {
 		}
 	}()
 
-	y.NumGets.Add(1)
+	db.metrics.NumGets.Inc()
 	for _, table := range tables {
 		vs := table.Get(key)
-		y.NumMemtableGets.Add(1)
+		db.metrics.NumMemtableGets.Inc()
 		if vs.Valid() {
 			return vs
 		}
@@ -525,9 +529,8 @@ func (db *DB) multiGet(pairs []keyValuePair, refs RefMap) {
 			mtGets++
 		}
 	}
-
-	y.NumMemtableGets.Add(int64(mtGets))
-	y.NumGets.Add(int64(len(pairs)))
+	db.metrics.NumMemtableGets.Add(float64(mtGets))
+	db.metrics.NumGets.Add(float64(len(pairs)))
 
 	if foundCount == len(pairs) {
 		return
@@ -580,7 +583,7 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 	req.Wg = sync.WaitGroup{}
 	req.Wg.Add(1)
 	db.writeCh <- req // Handled in writeWorker.
-	y.NumPuts.Add(int64(len(entries)))
+	db.metrics.NumPuts.Add(float64(len(entries)))
 
 	return req, nil
 }
@@ -749,12 +752,6 @@ func exists(path string) (bool, error) {
 // This function does a filewalk, calculates the size of vlog and sst files and stores it in
 // y.LSMSize and y.VlogSize.
 func (db *DB) calculateSize() {
-	newInt := func(val int64) *expvar.Int {
-		v := new(expvar.Int)
-		v.Add(val)
-		return v
-	}
-
 	totalSize := func(dir string) (int64, int64) {
 		var lsmSize, vlogSize int64
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -776,13 +773,14 @@ func (db *DB) calculateSize() {
 	}
 
 	lsmSize, vlogSize := totalSize(db.opt.Dir)
-	y.LSMSize.Set(db.opt.Dir, newInt(lsmSize))
 	// If valueDir is different from dir, we'd have to do another walk.
 	if db.opt.ValueDir != db.opt.Dir {
 		_, vlogSize = totalSize(db.opt.ValueDir)
 	}
-	y.VlogSize.Set(db.opt.Dir, newInt(vlogSize))
-
+	atomic.StoreInt64(&db.lsmSize, lsmSize)
+	atomic.StoreInt64(&db.vlogSize, vlogSize)
+	db.metrics.LSMSize.Set(float64(lsmSize))
+	db.metrics.VlogSize.Set(float64(vlogSize))
 }
 
 func (db *DB) updateSize(c *y.Closer) {
@@ -851,13 +849,7 @@ func (db *DB) RunValueLogGC(discardRatio float64) error {
 // Size returns the size of lsm and value log files in bytes. It can be used to decide how often to
 // call RunValueLogGC.
 func (db *DB) Size() (lsm int64, vlog int64) {
-	if y.LSMSize.Get(db.opt.Dir) == nil {
-		lsm, vlog = 0, 0
-		return
-	}
-	lsm = y.LSMSize.Get(db.opt.Dir).(*expvar.Int).Value()
-	vlog = y.VlogSize.Get(db.opt.Dir).(*expvar.Int).Value()
-	return
+	return atomic.LoadInt64(&db.lsmSize), atomic.LoadInt64(&db.vlogSize)
 }
 
 func (db *DB) Tables() []TableInfo {

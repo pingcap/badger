@@ -79,7 +79,9 @@ func (w *writeWorker) runWriteLSM(lc *y.Closer) {
 			close(w.mergeLSMCh)
 			return
 		}
+		start := time.Now()
 		w.writeLSM(reqs)
+		w.metrics.WriteLSMDuration.Observe(time.Since(start).Seconds())
 	}
 }
 

@@ -88,14 +88,9 @@ func (lf *logFile) openReadOnly() error {
 
 // Acquire lock on mmap/file if you are calling this
 func (lf *logFile) read(p valuePointer, s *y.Slice) (buf []byte, err error) {
-	var nbr int64
 	offset := p.Offset
 	buf = s.Resize(int(p.Len))
-	var n int
-	n, err = lf.fd.ReadAt(buf, int64(offset))
-	nbr = int64(n)
-	y.NumReads.Add(1)
-	y.NumBytesRead.Add(nbr)
+	_, err = lf.fd.ReadAt(buf, int64(offset))
 	return buf, err
 }
 
@@ -535,6 +530,7 @@ type valueLog struct {
 
 	garbageCh      chan struct{}
 	lfDiscardStats *lfDiscardStats
+	metrics        *y.MetricsSet
 }
 
 func vlogFilePath(dirPath string, fid uint32) string {
@@ -788,12 +784,16 @@ func (vlog *valueLog) write(reqs []*request) error {
 		if vlog.pendingLen == 0 {
 			return nil
 		}
+		start := time.Now()
 		err := vlog.curWriter.Flush(vlog.opt.SyncWrites)
 		if err != nil {
 			return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
 		}
-		y.NumWrites.Add(1)
-		y.NumVLogBytesWritten.Add(int64(vlog.pendingLen))
+		if vlog.opt.SyncWrites {
+			vlog.metrics.VlogSyncDuration.Observe(time.Since(start).Seconds())
+		}
+		vlog.metrics.NumWrites.Inc()
+		vlog.metrics.NumVLogBytesWritten.Add(float64(vlog.pendingLen))
 		atomic.AddUint64(&vlog.maxPtr, uint64(vlog.pendingLen))
 		vlog.pendingLen = 0
 
@@ -889,6 +889,8 @@ func (vlog *valueLog) readValueBytes(vp valuePointer, s *y.Slice) ([]byte, error
 	lf.lock.RLock()
 	buf, err := lf.read(vp, s)
 	lf.lock.RUnlock()
+	vlog.metrics.NumReads.Inc()
+	vlog.metrics.NumBytesRead.Add(float64(len(buf)))
 	return buf, err
 }
 
