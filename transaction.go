@@ -36,7 +36,6 @@ type oracle struct {
 	isManaged bool // Does not change value, so no locking required.
 
 	sync.Mutex
-	writeLock  sync.Mutex
 	nextCommit uint64
 
 	readMark *y.FastWaterMark
@@ -93,12 +92,12 @@ func (o *oracle) hasConflict(txn *Txn) bool {
 	return false
 }
 
-func (o *oracle) newCommitTs(txn *Txn) uint64 {
+func (o *oracle) preCommit(entries []*Entry, txn *Txn) *request {
 	o.Lock()
 	defer o.Unlock()
 
 	if o.hasConflict(txn) {
-		return 0
+		return nil
 	}
 
 	var ts uint64
@@ -115,10 +114,27 @@ func (o *oracle) newCommitTs(txn *Txn) uint64 {
 	for _, w := range txn.writes {
 		o.commits[w] = ts // Update the commitTs.
 	}
-	return ts
+
+	for _, e := range entries {
+		// Suffix the keys with commit ts, so the key versions are sorted in
+		// descending order of commit timestamp.
+		e.Key = y.KeyWithTs(e.Key, ts)
+	}
+	e := &Entry{
+		Key:   y.KeyWithTs(txnKey, ts),
+		Value: []byte(strconv.FormatUint(ts, 10)),
+		meta:  bitFinTxn,
+	}
+	entries = append(entries, e)
+
+	req, err := txn.db.sendToWriteCh(entries, ts)
+	if err != nil {
+		return nil
+	}
+	return req
 }
 
-func (o *oracle) doneCommit(cts uint64) {
+func (o *oracle) advanceReadTS(cts uint64) {
 	if o.isManaged {
 		// No need to update anything.
 		return
@@ -458,40 +474,22 @@ func (txn *Txn) Commit() error {
 	for _, e := range txn.pendingWrites {
 		e.meta |= bitTxn
 		entries = append(entries, e)
+
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		return bytes.Compare(entries[i].Key, entries[j].Key) < 0
 	})
 
 	state := txn.db.orc
-	state.writeLock.Lock()
-	commitTs := state.newCommitTs(txn)
-	if commitTs == 0 {
-		state.writeLock.Unlock()
+	req := state.preCommit(entries, txn)
+	if req == nil {
 		return ErrConflict
 	}
-	for _, e := range entries {
-		// Suffix the keys with commit ts, so the key versions are sorted in
-		// descending order of commit timestamp.
-		e.Key = y.KeyWithTs(e.Key, commitTs)
-	}
-	e := &Entry{
-		Key:   y.KeyWithTs(txnKey, commitTs),
-		Value: []byte(strconv.FormatUint(commitTs, 10)),
-		meta:  bitFinTxn,
-	}
-	entries = append(entries, e)
 
-	req, err := txn.db.sendToWriteCh(entries)
-	state.writeLock.Unlock()
-	if err != nil {
-		return err
-	}
+	req.EncodeEntries()
 
-	req.Wait()
-	state.doneCommit(commitTs)
-
-	return nil
+	req.Ready.Done()
+	return req.Wait()
 }
 
 // NewTransaction creates a new transaction. Badger supports concurrent execution of transactions,

@@ -18,7 +18,6 @@ package badger
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -510,7 +509,6 @@ type lfDiscardStats struct {
 }
 
 type valueLog struct {
-	buf        bytes.Buffer
 	pendingLen int
 	dirPath    string
 	curWriter  *fileutil.BufferedFileWriter
@@ -723,17 +721,39 @@ type request struct {
 	// Input values
 	Entries []*Entry
 	// Output values and wait group stuff below
-	Ptrs []valuePointer
-	Wg   sync.WaitGroup
-	Err  error
+	ValueBuf []byte
+	Ptrs     []valuePointer
+	Ready    sync.WaitGroup
+	Done     sync.WaitGroup
+	CommitTS uint64
+	Err      error
 }
 
 func (req *request) Wait() error {
-	req.Wg.Wait()
+	req.Done.Wait()
 	req.Entries = nil
+	req.ValueBuf = req.ValueBuf[:0]
+	req.Ptrs = req.Ptrs[:0]
 	err := req.Err
 	requestPool.Put(req)
 	return err
+}
+
+func (req *request) EncodeEntries() {
+	var (
+		offset uint32
+		plen   int
+		p      valuePointer
+	)
+
+	for i := range req.Entries {
+		e := req.Entries[i]
+		p.Offset = offset
+		plen, req.ValueBuf = encodeEntry(req.ValueBuf, e)
+		p.Len = uint32(plen)
+		offset += uint32(plen)
+		req.Ptrs = append(req.Ptrs, p)
+	}
 }
 
 // sync is thread-unsafe and should not be called concurrently with write.
@@ -814,23 +834,20 @@ func (vlog *valueLog) write(reqs []*request) error {
 
 	for i := range reqs {
 		b := reqs[i]
-		b.Ptrs = b.Ptrs[:0]
-		for j := range b.Entries {
-			e := b.Entries[j]
-			var p valuePointer
+		b.Ready.Wait()
+
+		startOffset := vlog.writableOffset() + uint32(vlog.pendingLen)
+		for j := range b.Ptrs {
+			p := &b.Ptrs[j]
 			p.Fid = curlf.fid
 			// Use the offset including buffer length so far.
-			p.Offset = vlog.writableOffset() + uint32(vlog.pendingLen)
-			plen, err := encodeEntry(e, &vlog.buf) // Now encode the entry into buffer.
-			if err != nil {
-				return err
-			}
-			vlog.curWriter.Append(vlog.buf.Bytes())
-			vlog.buf.Reset()
-			vlog.pendingLen += plen
-			p.Len = uint32(plen)
-			b.Ptrs = append(b.Ptrs, p)
+			p.Offset += startOffset
 		}
+
+		if err := vlog.curWriter.Append(b.ValueBuf); err != nil {
+			return err
+		}
+		vlog.pendingLen += len(b.ValueBuf)
 		vlog.numEntriesWritten += uint32(len(b.Entries))
 		// We write to disk here so that all entries that are part of the same transaction are
 		// written to the same vlog file.

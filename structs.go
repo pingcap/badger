@@ -1,7 +1,6 @@
 package badger
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -103,7 +102,7 @@ func (e *Entry) estimateSize(threshold int) int {
 }
 
 // Encodes e to buf. Returns number of bytes written.
-func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
+func encodeEntry(buf []byte, e *Entry) (int, []byte) {
 	h := header{
 		klen:  uint32(len(e.Key)),
 		vlen:  uint32(len(e.Value)),
@@ -116,23 +115,23 @@ func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 
 	hash := crc32.New(y.CastagnoliCrcTable)
 
-	buf.Write(headerEnc[:])
+	buf = append(buf, headerEnc[:]...)
 	hash.Write(headerEnc[:])
 
-	buf.Write(e.UserMeta)
+	buf = append(buf, e.UserMeta...)
 	hash.Write(e.UserMeta)
 
-	buf.Write(e.Key)
+	buf = append(buf, e.Key...)
 	hash.Write(e.Key)
 
-	buf.Write(e.Value)
+	buf = append(buf, e.Value...)
 	hash.Write(e.Value)
 
 	var crcBuf [4]byte
 	binary.BigEndian.PutUint32(crcBuf[:], hash.Sum32())
-	buf.Write(crcBuf[:])
+	buf = append(buf, crcBuf[:]...)
 
-	return len(headerEnc) + len(e.UserMeta) + len(e.Key) + len(e.Value) + len(crcBuf), nil
+	return len(headerEnc) + len(e.UserMeta) + len(e.Key) + len(e.Value) + len(crcBuf), buf
 }
 
 func (e Entry) print(prefix string) {

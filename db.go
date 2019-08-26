@@ -566,7 +566,7 @@ func (db *DB) shouldWriteValueToLSM(e *Entry) bool {
 	return len(e.Value) < db.opt.ValueThreshold
 }
 
-func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
+func (db *DB) sendToWriteCh(entries []*Entry, commitTS uint64) (*request, error) {
 	var count, size int64
 	for _, e := range entries {
 		size += int64(e.estimateSize(db.opt.ValueThreshold))
@@ -579,9 +579,12 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 	// We can only service one request because we need each txn to be stored in a contigous section.
 	// Txns should not interleave among other txns or rewrites.
 	req := requestPool.Get().(*request)
+	req.CommitTS = commitTS
 	req.Entries = entries
-	req.Wg = sync.WaitGroup{}
-	req.Wg.Add(1)
+	req.Ready = sync.WaitGroup{}
+	req.Ready.Add(1)
+	req.Done = sync.WaitGroup{}
+	req.Done.Add(1)
 	db.writeCh <- req // Handled in writeWorker.
 	db.metrics.NumPuts.Add(float64(len(entries)))
 
@@ -592,7 +595,7 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 // will be returned.
 //   Check(kv.BatchSet(entries))
 func (db *DB) batchSet(entries []*Entry) error {
-	req, err := db.sendToWriteCh(entries)
+	req, err := db.writeBatch(entries)
 	if err != nil {
 		return err
 	}
@@ -607,7 +610,7 @@ func (db *DB) batchSet(entries []*Entry) error {
 //      Check(err)
 //   }
 func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
-	req, err := db.sendToWriteCh(entries)
+	req, err := db.writeBatch(entries)
 	if err != nil {
 		return err
 	}
@@ -617,6 +620,16 @@ func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 		f(err)
 	}()
 	return nil
+}
+
+func (db *DB) writeBatch(entries []*Entry) (*request, error) {
+	req, err := db.sendToWriteCh(entries, 0)
+	if err != nil {
+		return nil, err
+	}
+	req.EncodeEntries()
+	req.Ready.Done()
+	return req, nil
 }
 
 var errNoRoom = errors.New("No room for write")

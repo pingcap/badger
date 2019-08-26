@@ -57,6 +57,7 @@ func TestValueBasic(t *testing.T) {
 
 	b := new(request)
 	b.Entries = []*Entry{e, e2}
+	b.EncodeEntries()
 
 	log.write([]*request{b})
 	require.Len(t, b.Ptrs, 2)

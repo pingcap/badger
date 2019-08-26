@@ -131,9 +131,11 @@ func (w *writeWorker) writeLSM(reqs []*request) {
 }
 
 func (w *writeWorker) done(reqs []*request, err error) {
+	w.orc.advanceReadTS(reqs[len(reqs)-1].CommitTS)
+
 	for _, r := range reqs {
 		r.Err = err
-		r.Wg.Done()
+		r.Done.Done()
 	}
 	if err != nil {
 		log.Warnf("ERROR in Badger::writeLSM: %v", err)
