@@ -154,13 +154,11 @@ var DefaultOptions = Options{
 	TableBuilderOptions: options.TableBuilderOptions{
 		EnableHashIndex: false,
 		HashUtilRatio:   0.75,
-		WriteBufferSize: 1 * 1024 * 1024,
-		BytesPerSync:    0,
+		WriteBufferSize: 2 * 1024 * 1024,
 		BytesPerSecond:  -1,
 	},
 	ValueLogWriteOptions: options.ValueLogWriterOptions{
 		WriteBufferSize: 2 * 1024 * 1024,
-		BytesPerSync:    0,
 	},
 }
 

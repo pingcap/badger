@@ -29,6 +29,7 @@ import (
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
+	"github.com/ncw/directio"
 	"github.com/ngaut/log"
 	"github.com/pingcap/errors"
 	"golang.org/x/time/rate"
@@ -695,7 +696,8 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 		}
 
 		fileID := db.lc.reserveFileID()
-		fd, err := y.CreateSyncedFile(table.NewFilename(fileID, db.opt.Dir), false)
+		fileName := table.NewFilename(fileID, db.opt.Dir)
+		fd, err := directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
 			return y.Wrap(err)
 		}
@@ -715,7 +717,11 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 			log.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
 			return err
 		}
-
+		fd.Close()
+		fd, err = os.OpenFile(fileName, os.O_RDWR, 0666)
+		if err != nil {
+			return err
+		}
 		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
 		if err != nil {
 			log.Infof("ERROR while opening table: %v", err)

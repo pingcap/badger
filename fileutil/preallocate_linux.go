@@ -3,8 +3,9 @@
 package fileutil
 
 import (
-	"golang.org/x/sys/unix"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 func preallocate(f *os.File, size int64) error {

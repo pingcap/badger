@@ -18,15 +18,15 @@ package table
 
 import (
 	"encoding/binary"
-	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/options"
-	"golang.org/x/time/rate"
 	"os"
 	"reflect"
 	"unsafe"
 
+	"github.com/coocood/badger/fileutil"
+	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
+	"golang.org/x/time/rate"
 )
 
 const restartInterval = 256 // Might want to change this to be based on total size instead of numKeys.
@@ -54,7 +54,7 @@ const headerSize = 4
 type Builder struct {
 	counter int // Number of keys written for the current block.
 
-	w          *fileutil.BufferedFileWriter
+	w          *fileutil.DirectWriter
 	buf        []byte
 	writtenLen int
 
@@ -81,7 +81,7 @@ type Builder struct {
 func NewTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
 	assumeKeyNum := 256 * 1024
 	return &Builder{
-		w:           fileutil.NewBufferedFileWriter(f, opt.WriteBufferSize, opt.BytesPerSync, limiter),
+		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
 		baseKeysBuf: make([]byte, 0, assumeKeyNum/restartInterval),
 		// assume a large enough num of keys to init bloom filter.
@@ -95,12 +95,6 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilder
 func (b *Builder) Reset(f *os.File) {
 	b.resetBuffers()
 	b.w.Reset(f)
-}
-
-// Reset this builder with new file and rate limiter.
-func (b *Builder) ResetWithLimiter(f *os.File, limiter *rate.Limiter) {
-	b.resetBuffers()
-	b.w.ResetWithLimiter(f, limiter)
 }
 
 func (b *Builder) resetBuffers() {
@@ -231,8 +225,11 @@ func (b *Builder) Finish() error {
 	} else {
 		b.buf = append(b.buf, u32ToBytes(0)...)
 	}
-
-	return b.w.FlushWithData(b.buf, true)
+	err := b.w.Append(b.buf)
+	if err != nil {
+		return err
+	}
+	return b.w.Finish()
 }
 
 func u32ToBytes(v uint32) []byte {

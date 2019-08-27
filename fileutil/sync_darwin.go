@@ -3,8 +3,9 @@
 package fileutil
 
 import (
-	"golang.org/x/sys/unix"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 // Fsync on HFS/OSX flushes the data on to the physical drive but the drive

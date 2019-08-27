@@ -26,13 +26,13 @@ import (
 	"time"
 
 	"github.com/coocood/badger/options"
-	"golang.org/x/time/rate"
-
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
+	"github.com/ncw/directio"
 	"github.com/ngaut/log"
 	"github.com/pingcap/errors"
+	"golang.org/x/time/rate"
 )
 
 type levelsController struct {
@@ -341,7 +341,8 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 	for it.Valid() && (end == nil || y.CompareKeysWithVer(it.Key(), end) < 0) {
 		timeStart := time.Now()
 		fileID := lc.reserveFileID()
-		fd, err := y.CreateSyncedFile(table.NewFilename(fileID, lc.kv.opt.Dir), false)
+		fileName := table.NewFilename(fileID, lc.kv.opt.Dir)
+		fd, err := directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
 			firstErr = err
 			break
@@ -349,7 +350,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 		if builder == nil {
 			builder = table.NewTableBuilder(fd, limiter, lc.opt)
 		} else {
-			builder.ResetWithLimiter(fd, limiter)
+			builder.Reset(fd)
 		}
 
 		var numKeys uint64
@@ -417,6 +418,11 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 		if err := builder.Finish(); err != nil {
 			firstErr = err
 			break
+		}
+		fd.Close()
+		fd, err = os.OpenFile(fileName, os.O_RDWR, 0666)
+		if err != nil {
+			return nil, err
 		}
 		tbl, err := table.OpenTable(fd, lc.kv.opt.TableLoadingMode)
 		if err != nil {

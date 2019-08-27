@@ -19,16 +19,17 @@ package table
 import (
 	"bytes"
 	"fmt"
-	"github.com/coocood/badger/options"
-	"github.com/coocood/badger/y"
-	"github.com/stretchr/testify/require"
-	"golang.org/x/time/rate"
 	"io"
 	"math"
 	"math/rand"
 	"os"
 	"sort"
 	"testing"
+
+	"github.com/coocood/badger/options"
+	"github.com/coocood/badger/y"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 )
 
 func key(prefix string, i int) string {
@@ -39,7 +40,6 @@ var defaultBuilderOpt = options.TableBuilderOptions{
 	EnableHashIndex: true,
 	HashUtilRatio:   0.75,
 	WriteBufferSize: 1024 * 1024,
-	BytesPerSync:    2 * 1024 * 1024,
 }
 
 func buildTestTable(t *testing.T, prefix string, n int) *os.File {

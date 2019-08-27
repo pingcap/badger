@@ -587,7 +587,7 @@ func (vlog *valueLog) openOrCreateFiles(readOnly bool) error {
 				return errors.Wrapf(err, "Unable to open value log file")
 			}
 			opt := &vlog.opt.ValueLogWriteOptions
-			vlog.curWriter = fileutil.NewBufferedFileWriter(lf.fd, opt.WriteBufferSize, opt.BytesPerSync, nil)
+			vlog.curWriter = fileutil.NewBufferedFileWriter(lf.fd, opt.WriteBufferSize, nil)
 		} else {
 			if err := lf.openReadOnly(); err != nil {
 				return err
@@ -623,7 +623,7 @@ func (vlog *valueLog) createVlogFile(fid uint32) (*logFile, error) {
 	}
 	opt := &vlog.opt.ValueLogWriteOptions
 	if vlog.curWriter == nil {
-		vlog.curWriter = fileutil.NewBufferedFileWriter(lf.fd, opt.WriteBufferSize, opt.BytesPerSync, nil)
+		vlog.curWriter = fileutil.NewBufferedFileWriter(lf.fd, opt.WriteBufferSize, nil)
 	} else {
 		vlog.curWriter.Reset(lf.fd)
 	}
@@ -780,7 +780,7 @@ func (vlog *valueLog) flush() error {
 	if vlog.pendingLen == 0 {
 		return nil
 	}
-	err := vlog.curWriter.Flush(false)
+	err := vlog.curWriter.Flush()
 	if err != nil {
 		return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
 	}

@@ -2,6 +2,7 @@ package table
 
 import (
 	"encoding/binary"
+
 	"github.com/dgryski/go-farm"
 )
 

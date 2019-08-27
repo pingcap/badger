@@ -33,11 +33,9 @@ type TableBuilderOptions struct {
 	EnableHashIndex bool
 	HashUtilRatio   float32
 	WriteBufferSize int
-	BytesPerSync    int
 	BytesPerSecond  int
 }
 
 type ValueLogWriterOptions struct {
 	WriteBufferSize int
-	BytesPerSync    int
 }
