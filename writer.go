@@ -65,7 +65,9 @@ func (w *writeWorker) runFlusher(lc *y.Closer) {
 	for {
 		select {
 		case t := <-w.flushCh:
+			start := time.Now()
 			err := t.writer.Sync()
+			w.metrics.VlogSyncDuration.Observe(time.Since(start).Seconds())
 			if err != nil {
 				w.done(t.reqs, err)
 				continue

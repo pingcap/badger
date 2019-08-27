@@ -784,13 +784,9 @@ func (vlog *valueLog) write(reqs []*request) error {
 		if vlog.pendingLen == 0 {
 			return nil
 		}
-		start := time.Now()
 		err := vlog.curWriter.Flush(false)
 		if err != nil {
 			return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
-		}
-		if vlog.opt.SyncWrites {
-			vlog.metrics.VlogSyncDuration.Observe(time.Since(start).Seconds())
 		}
 		vlog.metrics.NumWrites.Inc()
 		vlog.metrics.NumVLogBytesWritten.Add(float64(vlog.pendingLen))
