@@ -49,7 +49,7 @@ func startWriteWorker(db *DB) *y.Closer {
 		DB:         db,
 		writeLSMCh: make(chan []*request, 1),
 		mergeLSMCh: make(chan *table.MemTable, 1),
-		flushCh:    make(chan flushLogTask, 1),
+		flushCh:    make(chan flushLogTask),
 	}
 	if db.opt.SyncWrites {
 		go w.runFlusher(closer)

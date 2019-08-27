@@ -514,7 +514,7 @@ type valueLog struct {
 	pendingLen int
 	dirPath    string
 	curWriter  *fileutil.BufferedFileWriter
-
+	curlf      *logFile
 	// guards our view of which files exist, which to be deleted, how many active iterators
 	filesLock        sync.RWMutex
 	filesMap         map[uint32]*logFile
@@ -603,6 +603,7 @@ func (vlog *valueLog) openOrCreateFiles(readOnly bool) error {
 			return err
 		}
 	}
+	vlog.curlf = vlog.filesMap[vlog.maxFid()]
 	return nil
 }
 
@@ -747,7 +748,7 @@ func (vlog *valueLog) sync() error {
 		vlog.filesLock.RUnlock()
 		return nil
 	}
-	curlf := vlog.filesMap[vlog.maxFid()]
+	curlf := vlog.curlf
 	curlf.lock.RLock()
 	vlog.filesLock.RUnlock()
 
@@ -774,47 +775,44 @@ func (vlog *valueLog) writableOffset() uint32 {
 	return uint32(atomic.LoadUint64(&vlog.maxPtr))
 }
 
-// write is thread-unsafe by design and should not be called concurrently.
-func (vlog *valueLog) write(reqs []*request) error {
-	vlog.filesLock.RLock()
-	curlf := vlog.filesMap[vlog.maxFid()]
-	vlog.filesLock.RUnlock()
-
-	toDisk := func() error {
-		if vlog.pendingLen == 0 {
-			return nil
-		}
-		err := vlog.curWriter.Flush(false)
-		if err != nil {
-			return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
-		}
-		vlog.metrics.NumWrites.Inc()
-		vlog.metrics.NumVLogBytesWritten.Add(float64(vlog.pendingLen))
-		atomic.AddUint64(&vlog.maxPtr, uint64(vlog.pendingLen))
-		vlog.pendingLen = 0
-
-		if vlog.writableOffset() > uint32(vlog.opt.ValueLogFileSize) ||
-			vlog.numEntriesWritten > vlog.opt.ValueLogMaxEntries {
-			var err error
-			if err = curlf.doneWriting(vlog.writableOffset()); err != nil {
-				return err
-			}
-			newlf, err := vlog.createVlogFile(vlog.maxFid() + 1)
-			if err != nil {
-				return err
-			}
-			curlf = newlf
-		}
+func (vlog *valueLog) flush() error {
+	curlf := vlog.curlf
+	if vlog.pendingLen == 0 {
 		return nil
 	}
+	err := vlog.curWriter.Flush(false)
+	if err != nil {
+		return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
+	}
+	vlog.metrics.NumWrites.Inc()
+	vlog.metrics.NumVLogBytesWritten.Add(float64(vlog.pendingLen))
+	atomic.AddUint64(&vlog.maxPtr, uint64(vlog.pendingLen))
+	vlog.pendingLen = 0
 
+	if vlog.writableOffset() > uint32(vlog.opt.ValueLogFileSize) ||
+		vlog.numEntriesWritten > vlog.opt.ValueLogMaxEntries {
+		var err error
+		if err = curlf.doneWriting(vlog.writableOffset()); err != nil {
+			return err
+		}
+		newlf, err := vlog.createVlogFile(vlog.maxFid() + 1)
+		if err != nil {
+			return err
+		}
+		vlog.curlf = newlf
+	}
+	return nil
+}
+
+// write is thread-unsafe by design and should not be called concurrently.
+func (vlog *valueLog) write(reqs []*request) error {
 	for i := range reqs {
 		b := reqs[i]
 		b.Ptrs = b.Ptrs[:0]
 		for j := range b.Entries {
 			e := b.Entries[j]
 			var p valuePointer
-			p.Fid = curlf.fid
+			p.Fid = vlog.curlf.fid
 			// Use the offset including buffer length so far.
 			p.Offset = vlog.writableOffset() + uint32(vlog.pendingLen)
 			plen, err := encodeEntry(e, &vlog.buf) // Now encode the entry into buffer.
@@ -834,12 +832,12 @@ func (vlog *valueLog) write(reqs []*request) error {
 			vlog.writableOffset()+uint32(vlog.pendingLen) > uint32(vlog.opt.ValueLogFileSize) ||
 				vlog.numEntriesWritten > uint32(vlog.opt.ValueLogMaxEntries)
 		if writeNow {
-			if err := toDisk(); err != nil {
+			if err := vlog.flush(); err != nil {
 				return err
 			}
 		}
 	}
-	return toDisk()
+	return vlog.flush()
 
 	// Acquire mutex locks around this manipulation, so that the reads don't try to use
 	// an invalid file descriptor.
