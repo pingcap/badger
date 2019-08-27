@@ -63,6 +63,11 @@ func (bw *BufferedFileWriter) FlushWithData(data []byte, fsync bool) error {
 	return nil
 }
 
+// Sync flush all OS caches to disk.
+func (bw *BufferedFileWriter) Sync() error {
+	return Fdatasync(bw.f)
+}
+
 // Reset this writer with new file.
 func (bw *BufferedFileWriter) Reset(f *os.File) {
 	bw.f = f

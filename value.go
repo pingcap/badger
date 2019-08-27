@@ -785,7 +785,7 @@ func (vlog *valueLog) write(reqs []*request) error {
 			return nil
 		}
 		start := time.Now()
-		err := vlog.curWriter.Flush(vlog.opt.SyncWrites)
+		err := vlog.curWriter.Flush(false)
 		if err != nil {
 			return errors.Wrapf(err, "Unable to write to value log file: %q", curlf.path)
 		}
