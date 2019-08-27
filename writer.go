@@ -40,7 +40,11 @@ type flushLogTask struct {
 }
 
 func startWriteWorker(db *DB) *y.Closer {
-	closer := y.NewCloser(4)
+	numWorkers := 3
+	if db.opt.SyncWrites {
+		numWorkers += 1
+	}
+	closer := y.NewCloser(numWorkers)
 	w := &writeWorker{
 		DB:         db,
 		writeLSMCh: make(chan []*request, 1),
