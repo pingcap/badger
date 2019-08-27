@@ -47,7 +47,9 @@ func startWriteWorker(db *DB) *y.Closer {
 		mergeLSMCh: make(chan *table.MemTable, 1),
 		flushCh:    make(chan flushLogTask, 1),
 	}
-	go w.runFlusher(closer)
+	if db.opt.SyncWrites {
+		go w.runFlusher(closer)
+	}
 	go w.runWriteVLog(closer)
 	go w.runWriteLSM(closer)
 	go w.runMergeLSM(closer)
