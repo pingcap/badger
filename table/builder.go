@@ -193,11 +193,6 @@ func (b *Builder) Add(key []byte, value y.ValueStruct) error {
 	return nil // Currently, there is no meaningful error.
 }
 
-// TODO: vvv this was the comment on ReachedCapacity.
-// FinalSize returns the *rough* final size of the array, counting the header which is not yet written.
-// TODO: Look into why there is a discrepancy. I suspect it is because of Write(empty, empty)
-// at the end. The diff can vary.
-
 // ReachedCapacity returns true if we... roughly (?) reached capacity?
 func (b *Builder) ReachedCapacity(capacity int64) bool {
 	estimateSz := b.writtenLen + len(b.buf) +
@@ -205,6 +200,11 @@ func (b *Builder) ReachedCapacity(capacity int64) bool {
 		len(b.baseKeysBuf) +
 		4*len(b.baseKeysEndOffs)
 	return int64(estimateSz) > capacity
+}
+
+// EstimateSize returns the size of the SST to build.
+func (b *Builder) EstimateSize() int {
+	return b.writtenLen + len(b.buf) + 4*len(b.blockEndOffsets) + len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs)
 }
 
 // Finish finishes the table by appending the index.

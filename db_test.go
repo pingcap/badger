@@ -1192,10 +1192,6 @@ func (f *testFilter) Filter(key, val, userMeta []byte) Decision {
 	return DecisionKeep
 }
 
-func (f *testFilter) Guards() [][]byte {
-	return nil
-}
-
 func TestCompactionFilter(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -1206,7 +1202,7 @@ func TestCompactionFilter(t *testing.T) {
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
-	opts.CompactionFilterFactory = func(targetLevel int) CompactionFilter {
+	opts.CompactionFilterFactory = func(targetLevel int, smallest, biggest []byte) CompactionFilter {
 		return &testFilter{}
 	}
 	db, err := Open(opts)
@@ -1250,6 +1246,77 @@ func TestCompactionFilter(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func (f *testFilter) Guards() []Guard {
+	return []Guard{
+		{
+			Prefix:   nil,
+			MatchLen: 1,
+			MinSize:  64,
+		},
+		{
+			Prefix:   []byte("b"),
+			MatchLen: 4,
+			MinSize:  128,
+		},
+		{
+			Prefix:   []byte("bx"),
+			MatchLen: 5,
+			MinSize:  128,
+		},
+		{
+			Prefix:   []byte("c"),
+			MatchLen: 3,
+			MinSize:  128,
+		},
+	}
+}
+
+func TestSearchGuard(t *testing.T) {
+	filter := &testFilter{}
+	guards := filter.Guards()
+	tests := []struct {
+		key         string
+		guardPrefix string
+	}{
+		{"0", ""},
+		{"br", "b"},
+		{"bn", "b"},
+		{"bx", "bx"},
+		{"crz", "c"},
+	}
+	for _, tt := range tests {
+		guard := searchGuard([]byte(tt.key), guards)
+		require.Equal(t, string(guard.Prefix), tt.guardPrefix)
+	}
+}
+
+func TestShouldFinishFile(t *testing.T) {
+	tests1 := []struct {
+		key     []byte
+		lastKey []byte
+		finish  bool
+	}{
+		{[]byte("k2"), nil, false},
+		{[]byte("k2"), []byte("k1"), true},
+		{[]byte("k12"), []byte("k1"), true},
+		{[]byte("k234"), []byte("k233"), false},
+		{[]byte("k241"), []byte("k233"), true},
+		{[]byte("l233"), []byte("k233"), true},
+	}
+	guard := &Guard{Prefix: []byte("k"), MatchLen: 3, MinSize: 64}
+	for _, tt := range tests1 {
+		finish := shouldFinishFile(tt.key, tt.lastKey, guard, 100, 100)
+		require.Equal(t, tt.finish, finish)
+	}
+	// A guard prefix change always finish the file even if the MinSize has not been reached.
+	require.Equal(t, shouldFinishFile([]byte("l11"), []byte("k11"), guard, 1, 100), true)
+	// guard prefix match, but matchLen changed, must reach MinSize to finish file.
+	require.Equal(t, shouldFinishFile([]byte("k12"), []byte("k11"), guard, 1, 100), false)
+	require.Equal(t, shouldFinishFile([]byte("k12"), []byte("k11"), guard, 65, 100), true)
+	// table max size has reached always finish the file.
+	require.Equal(t, shouldFinishFile([]byte("k111"), []byte("k110"), guard, 33, 32), true)
 }
 
 func TestIterateVLog(t *testing.T) {

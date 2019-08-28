@@ -262,6 +262,7 @@ func (t *Table) block(idx int) (block, error) {
 	return blk, err
 }
 
+/*
 func (t *Table) ApproximateSizeInRange(start, end []byte) int {
 	it := t.NewIteratorNoRef(false)
 	startOff, endOff := t.approximateOffset(it, start), t.approximateOffset(it, end)
@@ -280,6 +281,7 @@ func (t *Table) approximateOffset(it *Iterator, key []byte) int {
 	}
 	return 0
 }
+*/
 
 // Size is its file size in bytes
 func (t *Table) Size() int64 { return int64(t.tableSize) }

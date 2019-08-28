@@ -17,6 +17,7 @@
 package badger
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"math/rand"
@@ -293,13 +294,51 @@ func (ds *DiscardStats) collect(vs y.ValueStruct) {
 	ds.numSkips++
 }
 
+func shouldFinishFile(key, lastKey []byte, guard *Guard, currentSize, maxSize int64) bool {
+	if lastKey == nil {
+		return false
+	}
+	if guard != nil {
+		if !bytes.HasPrefix(key, guard.Prefix) {
+			return true
+		}
+		if !matchGuard(key, lastKey, guard) {
+			if maxSize > guard.MinSize {
+				maxSize = guard.MinSize
+			}
+		}
+	}
+	return currentSize > maxSize
+}
+
+func matchGuard(key, lastKey []byte, guard *Guard) bool {
+	if len(lastKey) < guard.MatchLen {
+		return false
+	}
+	return bytes.HasPrefix(key, lastKey[:guard.MatchLen])
+}
+
+func searchGuard(key []byte, guards []Guard) *Guard {
+	var maxMatchGuard *Guard
+	for i := range guards {
+		guard := &guards[i]
+		if bytes.HasPrefix(key, guard.Prefix) {
+			if maxMatchGuard == nil || len(guard.Prefix) > len(maxMatchGuard.Prefix) {
+				maxMatchGuard = guard
+			}
+		}
+	}
+	return maxMatchGuard
+}
+
 // compactBuildTables merge topTables and botTables to form a list of new tables.
-func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter *rate.Limiter, start, end []byte) ([]*table.Table, error) {
+func (lc *levelsController) compactBuildTables(level int, cd compactDef,
+	limiter *rate.Limiter) (newTables []*table.Table, err error) {
 	topTables := cd.top
 	botTables := cd.bot
 
 	hasOverlap := lc.hasOverlapTable(cd)
-	log.Infof("Key range overlaps with lower levels: %v, start: %v, end: %v", hasOverlap, start, end)
+	log.Infof("Key range overlaps with lower levels: %v", hasOverlap)
 
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
 	// value log file should be GCed.
@@ -327,35 +366,32 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 	minReadTs := lc.kv.orc.readMark.MinReadTS()
 
 	var filter CompactionFilter
+	var guards []Guard
 	if lc.kv.opt.CompactionFilterFactory != nil {
-		filter = lc.kv.opt.CompactionFilterFactory(level+1)
+		filter = lc.kv.opt.CompactionFilterFactory(level+1, cd.smallest(), cd.biggest())
+		guards = filter.Guards()
 	}
 
 	var lastKey, skipKey []byte
-	var newTables []*table.Table
-	var firstErr error
 	var builder *table.Builder
-
-	if start != nil {
-		it.Seek(start)
-	}
 	var bytesRead, bytesWrite, numRead, numWrite int
-	for it.Valid() && (end == nil || y.CompareKeysWithVer(it.Key(), end) < 0) {
+	for it.Valid() {
 		timeStart := time.Now()
 		fileID := lc.reserveFileID()
 		fileName := table.NewFilename(fileID, lc.kv.opt.Dir)
-		fd, err := directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
+		var fd *os.File
+		fd, err = directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
-			firstErr = err
-			break
+			return
 		}
 		if builder == nil {
 			builder = table.NewTableBuilder(fd, limiter, lc.opt)
 		} else {
 			builder.Reset(fd)
 		}
-
-		for ; it.Valid() && (end == nil || y.CompareKeysWithVer(it.Key(), end) < 0); it.Next() {
+		lastKey = nil
+		guard := searchGuard(it.Key(), guards)
+		for ; it.Valid(); it.Next() {
 			numRead++
 			vs := it.Value()
 			key := it.Key()
@@ -370,12 +406,11 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 					skipKey = skipKey[:0]
 				}
 			}
-
 			if !y.SameKey(key, lastKey) {
-				if builder.ReachedCapacity(lc.kv.opt.MaxTableSize) {
-					// Only break if we are on a different key, and have reached capacity. We want
-					// to ensure that all versions of the key are stored in the same sstable, and
-					// not divided across multiple tables at the same level.
+				// Only break if we are on a different key, and have reached capacity. We want
+				// to ensure that all versions of the key are stored in the same sstable, and
+				// not divided across multiple tables at the same level.
+				if shouldFinishFile(key, lastKey, guard, int64(builder.EstimateSize()), lc.kv.opt.MaxTableSize) {
 					break
 				}
 				lastKey = y.SafeCopy(lastKey, key)
@@ -419,19 +454,18 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
 		log.Infof("LOG Compact. Iteration took: %v\n", time.Since(timeStart))
-		if err := builder.Finish(); err != nil {
-			firstErr = err
-			break
+		if err = builder.Finish(); err != nil {
+			return
 		}
 		fd.Close()
 		fd, err = os.OpenFile(fileName, os.O_RDWR, 0666)
 		if err != nil {
-			return nil, err
+			return
 		}
-		tbl, err := table.OpenTable(fd, lc.kv.opt.TableLoadingMode)
+		var tbl *table.Table
+		tbl, err = table.OpenTable(fd, lc.kv.opt.TableLoadingMode)
 		if err != nil {
-			firstErr = err
-			break
+			return
 		}
 		if len(tbl.Smallest()) == 0 {
 			tbl.DecrRef()
@@ -449,22 +483,13 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 		BytesDiscard: int(discardStats.skippedBytes),
 	}
 	lc.kv.metrics.UpdateCompactionStats(cd.nextLevel.strLevel, stats)
-
-	if firstErr == nil {
-		// Ensure created files' directory entries are visible.  We don't mind the extra latency
-		// from not doing this ASAP after all file creation has finished because this is a
-		// background operation.
-		firstErr = syncDir(lc.kv.opt.Dir)
-	}
-
-	if firstErr != nil {
-		// An error happened.  Delete all the newly created table files (by calling DecrRef
-		// -- we're the only holders of a ref).
-		for _, tbl := range newTables {
-			tbl.DecrRef()
-		}
-		errorReturn := errors.Wrapf(firstErr, "While running compaction for: %+v", cd)
-		return nil, errorReturn
+	// Ensure created files' directory entries are visible.  We don't mind the extra latency
+	// from not doing this ASAP after all file creation has finished because this is a
+	// background operation.
+	err = syncDir(lc.kv.opt.Dir)
+	if err != nil {
+		log.Error(err)
+		return
 	}
 
 	sort.Slice(newTables, func(i, j int) bool {
@@ -472,7 +497,8 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 	})
 	lc.kv.vlog.updateGCStats(discardStats.discardSpaces)
 	log.Infof("Discard stats: %v", discardStats)
-	return newTables, nil
+	assertTablesOrder(newTables)
+	return
 }
 
 func buildChangeSet(cd *compactDef, newTables []*table.Table) protos.ManifestChangeSet {
@@ -512,6 +538,21 @@ func (cd *compactDef) unlockLevels() {
 	cd.thisLevel.RUnlock()
 }
 
+func (cd *compactDef) smallest() []byte {
+	if len(cd.bot) > 0 && bytes.Compare(cd.nextRange.left, cd.thisRange.left) < 0 {
+		return cd.nextRange.left
+	}
+	return cd.thisRange.left
+}
+
+func (cd *compactDef) biggest() []byte {
+	if len(cd.bot) > 0 && bytes.Compare(cd.nextRange.right, cd.thisRange.right) > 0 {
+		return cd.nextRange.right
+	}
+	return cd.thisRange.right
+}
+
+/*
 type rangeWithSize struct {
 	start []byte
 	end   []byte
@@ -552,6 +593,7 @@ func (cd *compactDef) sizeInRange(tbls []*table.Table, level int, start, end []b
 	}
 	return sz
 }
+*/
 
 func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 	cd.lockLevels()
@@ -737,7 +779,6 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 	nextLevel := cd.nextLevel
 
 	var newTables []*table.Table
-	var err error
 	var changeSet protos.ManifestChangeSet
 	if l > 0 && len(cd.bot) == 0 {
 		// skip level 0, since it may has many table overlap with each other
@@ -746,11 +787,12 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 			makeTableMoveDownChange(newTables[0].ID(), cd.nextLevel.level),
 		}}
 	} else {
-		newTables, err = lc.compactBuildTables(l, cd, limiter, nil, nil)
+		var err error
+		newTables, err = lc.compactBuildTables(l, cd, limiter)
+		defer forceDecrRefs(newTables)
 		if err != nil {
 			return err
 		}
-		defer forceDecrRefs(newTables)
 		changeSet = buildChangeSet(&cd, newTables)
 	}
 
