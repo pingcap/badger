@@ -70,7 +70,7 @@ func (l *writer) Append(val []byte) error {
 
 func (l *writer) waitRateLimiter() {
 	if l.limiter != nil {
-		err := l.limiter.WaitN(context.Background(), len(l.writeBuf))
+		err := l.limiter.WaitN(context.Background(), int(l.bufOff))
 		if err != nil {
 			panic(err)
 		}
