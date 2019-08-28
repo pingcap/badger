@@ -56,18 +56,14 @@ func (l *writer) Reset(fd *os.File) {
 func (l *writer) Append(val []byte) error {
 	for {
 		n := copy(l.writeBuf[l.bufOff:], val)
+		l.bufOff += int64(n)
 		if n == len(val) {
-			l.bufOff += int64(len(val))
 			return nil
 		}
-		// writeBuf is full.
-		l.waitRateLimiter()
-		_, err := l.fd.WriteAt(l.writeBuf, l.fileOff)
+		err := l.flush()
 		if err != nil {
 			return err
 		}
-		l.fileOff += int64(len(l.writeBuf))
-		l.bufOff = 0
 		val = val[n:]
 	}
 }
@@ -81,18 +77,22 @@ func (l *writer) waitRateLimiter() {
 	}
 }
 
-func (l *BufferedWriter) Flush() error {
+func (l *writer) flush() error {
 	if l.bufOff == 0 {
 		return nil
 	}
 	l.waitRateLimiter()
-	_, err := l.fd.WriteAt(l.writeBuf[:l.bufOff], l.fileOff)
+	_, err := l.fd.Write(l.writeBuf[:l.bufOff])
 	if err != nil {
 		return err
 	}
 	l.fileOff += l.bufOff
 	l.bufOff = 0
 	return nil
+}
+
+func (l *BufferedWriter) Flush() error {
+	return l.flush()
 }
 
 func (l *BufferedWriter) Sync() error {
@@ -103,13 +103,13 @@ func (l *DirectWriter) Finish() error {
 	if l.bufOff == 0 {
 		return nil
 	}
-	writeLen := alignedSize(l.bufOff)
-	l.waitRateLimiter()
-	_, err := l.fd.WriteAt(l.writeBuf[:writeLen], l.fileOff)
+	finalLength := l.fileOff + l.bufOff
+	l.bufOff = alignedSize(l.bufOff)
+	err := l.flush()
 	if err != nil {
 		return err
 	}
-	err = l.fd.Truncate(l.fileOff + l.bufOff)
+	err = l.fd.Truncate(finalLength)
 	if err != nil {
 		return err
 	}
