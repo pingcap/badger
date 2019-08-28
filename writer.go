@@ -35,7 +35,7 @@ type writeWorker struct {
 }
 
 type flushLogTask struct {
-	writer *fileutil.BufferedFileWriter
+	writer *fileutil.BufferedWriter
 	reqs   []*request
 }
 

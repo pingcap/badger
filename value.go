@@ -513,7 +513,7 @@ type valueLog struct {
 	buf        bytes.Buffer
 	pendingLen int
 	dirPath    string
-	curWriter  *fileutil.BufferedFileWriter
+	curWriter  *fileutil.BufferedWriter
 	curlf      *logFile
 	// guards our view of which files exist, which to be deleted, how many active iterators
 	filesLock        sync.RWMutex
@@ -587,7 +587,7 @@ func (vlog *valueLog) openOrCreateFiles(readOnly bool) error {
 				return errors.Wrapf(err, "Unable to open value log file")
 			}
 			opt := &vlog.opt.ValueLogWriteOptions
-			vlog.curWriter = fileutil.NewBufferedFileWriter(lf.fd, opt.WriteBufferSize, nil)
+			vlog.curWriter = fileutil.NewBufferedWriter(lf.fd, opt.WriteBufferSize, nil)
 		} else {
 			if err := lf.openReadOnly(); err != nil {
 				return err
@@ -623,7 +623,7 @@ func (vlog *valueLog) createVlogFile(fid uint32) (*logFile, error) {
 	}
 	opt := &vlog.opt.ValueLogWriteOptions
 	if vlog.curWriter == nil {
-		vlog.curWriter = fileutil.NewBufferedFileWriter(lf.fd, opt.WriteBufferSize, nil)
+		vlog.curWriter = fileutil.NewBufferedWriter(lf.fd, opt.WriteBufferSize, nil)
 	} else {
 		vlog.curWriter.Reset(lf.fd)
 	}
