@@ -378,20 +378,24 @@ func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error
 	return build, offset, err
 }
 
+func addNewToManifest(build *Manifest, tc *protos.ManifestChange) {
+	build.Tables[tc.Id] = tableManifest{
+		Level: uint8(tc.Level),
+	}
+	for len(build.Levels) <= int(tc.Level) {
+		build.Levels = append(build.Levels, levelManifest{make(map[uint64]struct{})})
+	}
+	build.Levels[tc.Level].Tables[tc.Id] = struct{}{}
+	build.Creations++
+}
+
 func applyManifestChange(build *Manifest, tc *protos.ManifestChange) error {
 	switch tc.Op {
 	case protos.ManifestChange_CREATE:
 		if _, ok := build.Tables[tc.Id]; ok {
 			return fmt.Errorf("MANIFEST invalid, table %d exists", tc.Id)
 		}
-		build.Tables[tc.Id] = tableManifest{
-			Level: uint8(tc.Level),
-		}
-		for len(build.Levels) <= int(tc.Level) {
-			build.Levels = append(build.Levels, levelManifest{make(map[uint64]struct{})})
-		}
-		build.Levels[tc.Level].Tables[tc.Id] = struct{}{}
-		build.Creations++
+		addNewToManifest(build, tc)
 	case protos.ManifestChange_DELETE:
 		tm, ok := build.Tables[tc.Id]
 		if !ok {
@@ -400,6 +404,15 @@ func applyManifestChange(build *Manifest, tc *protos.ManifestChange) error {
 		delete(build.Levels[tm.Level].Tables, tc.Id)
 		delete(build.Tables, tc.Id)
 		build.Deletions++
+	case protos.ManifestChange_MOVE_DOWN:
+		tm, ok := build.Tables[tc.Id]
+		if !ok {
+			return fmt.Errorf("MANIFEST moves down non-exisitng table %d", tc.Id)
+		}
+		delete(build.Levels[tm.Level].Tables, tc.Id)
+		delete(build.Tables, tc.Id)
+		build.Deletions++
+		addNewToManifest(build, tc)
 	default:
 		return fmt.Errorf("MANIFEST file has invalid manifestChange op")
 	}
@@ -429,5 +442,13 @@ func makeTableDeleteChange(id uint64) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		Id: id,
 		Op: protos.ManifestChange_DELETE,
+	}
+}
+
+func makeTableMoveDownChange(id uint64, moveToLevel int) *protos.ManifestChange {
+	return &protos.ManifestChange{
+		Id:    id,
+		Op:    protos.ManifestChange_MOVE_DOWN,
+		Level: uint32(moveToLevel),
 	}
 }

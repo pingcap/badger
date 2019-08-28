@@ -22,7 +22,6 @@ import (
 	"math/rand"
 	"os"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/coocood/badger/options"
@@ -329,7 +328,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 
 	var filter CompactionFilter
 	if lc.kv.opt.CompactionFilterFactory != nil {
-		filter = lc.kv.opt.CompactionFilterFactory()
+		filter = lc.kv.opt.CompactionFilterFactory(level+1)
 	}
 
 	var lastKey, skipKey []byte
@@ -641,6 +640,7 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 	return false
 }
 
+/*
 // determineSubCompactPlan returns the number of sub compactors and the estimated size of each compaction job.
 func (lc *levelsController) determineSubCompactPlan(bounds []rangeWithSize) (int, int) {
 	n := lc.kv.opt.MaxSubCompaction
@@ -728,6 +728,7 @@ func (lc *levelsController) shouldStartSubCompaction(cd compactDef) bool {
 	}
 	return false
 }
+*/
 
 func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Limiter) error {
 	timeStart := time.Now()
@@ -735,26 +736,23 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 	thisLevel := cd.thisLevel
 	nextLevel := cd.nextLevel
 
-	// Table should never be moved directly between levels, always be rewritten to allow discarding
-	// invalid versions.
-
 	var newTables []*table.Table
 	var err error
-	if lc.shouldStartSubCompaction(cd) {
-		newTables, err = lc.runSubCompacts(l, cd, limiter)
+	var changeSet protos.ManifestChangeSet
+	if l > 0 && len(cd.bot) == 0 {
+		// skip level 0, since it may has many table overlap with each other
+		newTables = cd.top
+		changeSet = protos.ManifestChangeSet{Changes: []*protos.ManifestChange{
+			makeTableMoveDownChange(newTables[0].ID(), cd.nextLevel.level),
+		}}
 	} else {
 		newTables, err = lc.compactBuildTables(l, cd, limiter, nil, nil)
-	}
-	if err != nil {
-		return err
-	}
-	defer func() {
-		// Only assign to err, if it's not already nil.
-		if decErr := decrRefs(newTables); err == nil {
-			err = decErr
+		if err != nil {
+			return err
 		}
-	}()
-	changeSet := buildChangeSet(&cd, newTables)
+		defer forceDecrRefs(newTables)
+		changeSet = buildChangeSet(&cd, newTables)
+	}
 
 	// We write to the manifest _before_ we delete files (and after we created files)
 	if err := lc.kv.manifest.addChanges(changeSet.Changes); err != nil {

@@ -1192,6 +1192,10 @@ func (f *testFilter) Filter(key, val, userMeta []byte) Decision {
 	return DecisionKeep
 }
 
+func (f *testFilter) Guards() [][]byte {
+	return nil
+}
+
 func TestCompactionFilter(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -1202,7 +1206,7 @@ func TestCompactionFilter(t *testing.T) {
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
-	opts.CompactionFilterFactory = func() CompactionFilter {
+	opts.CompactionFilterFactory = func(targetLevel int) CompactionFilter {
 		return &testFilter{}
 	}
 	db, err := Open(opts)
