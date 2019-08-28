@@ -22,7 +22,7 @@ type BufferedWriter struct {
 type writer struct {
 	fd       *os.File
 	fileOff  int64
-	writeBuf []byte // 4MB
+	writeBuf []byte
 	bufOff   int64
 	limiter  *rate.Limiter
 }
