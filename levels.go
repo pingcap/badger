@@ -435,9 +435,15 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 		}
 	}
 
-	numDiscard, bytesDiscard := int(discardStats.numSkips), int(discardStats.skippedBytes)
-	lc.kv.metrics.UpdateBaseLevelStats(cd.thisLevel.strLevel, numRead, bytesRead, numDiscard, bytesDiscard)
-	lc.kv.metrics.UpdateTargetLevelStats(cd.nextLevel.strLevel, numWrite, bytesWrite)
+	stats := &y.CompactionStats{
+		KeysRead:     numRead,
+		BytesRead:    bytesRead,
+		KeysWrite:    numWrite,
+		BytesWrite:   bytesWrite,
+		KeysDiscard:  int(discardStats.numSkips),
+		BytesDiscard: int(discardStats.skippedBytes),
+	}
+	lc.kv.metrics.UpdateCompactionStats(cd.nextLevel.strLevel, stats)
 
 	if firstErr == nil {
 		// Ensure created files' directory entries are visible.  We don't mind the extra latency

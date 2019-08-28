@@ -23,7 +23,7 @@ import (
 const (
 	namespace  = "badger"
 	labelPath  = "path"
-	labelLevel = "level"
+	labelLevel = "target_level"
 )
 
 var (
@@ -88,35 +88,35 @@ var (
 
 	// Level statistics
 
-	// NumLevelBytesAdded has cumulative size of keys added to level.
-	NumLevelBytesAdded = prometheus.NewCounterVec(prometheus.CounterOpts{
+	// NumCompactionBytesWrite has cumulative size of keys read during compaction.
+	NumCompactionBytesWrite = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
-		Name:      "num_level_bytes_added",
+		Name:      "num_compaction_bytes_write",
 	}, []string{labelPath, labelLevel})
-	// NumLevelBytesMoved has cumulative size of keys move out level.
-	NumLevelBytesMoved = prometheus.NewCounterVec(prometheus.CounterOpts{
+	// NumCompactionBytesRead has cumulative size of keys write during compaction.
+	NumCompactionBytesRead = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
-		Name:      "num_level_bytes_deleted",
+		Name:      "num_compaction_bytes_read",
 	}, []string{labelPath, labelLevel})
-	// NumLevelBytesMoved has cumulative size of discarded keys in level.
-	NumLevelBytesDiscarded = prometheus.NewCounterVec(prometheus.CounterOpts{
+	// NumCompactionBytesRead has cumulative size of discarded keys after compaction.
+	NumCompactionBytesDiscard = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
-		Name:      "num_level_bytes_discarded",
+		Name:      "num_compaction_bytes_discard",
 	}, []string{labelPath, labelLevel})
-	// NumLevelKeysAdded has cumulative count of keys add to level.
-	NumLevelKeysAdded = prometheus.NewCounterVec(prometheus.CounterOpts{
+	// NumCompactionKeysWrite has cumulative count of keys write during compaction.
+	NumCompactionKeysWrite = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
-		Name:      "num_level_keys_added",
+		Name:      "num_compaction_keys_write",
 	}, []string{labelPath, labelLevel})
-	// NumLevelKeysAdded has cumulative count of keys move out level.
-	NumLevelKeysMoved = prometheus.NewCounterVec(prometheus.CounterOpts{
+	// NumCompactionKeysRead has cumulative count of keys read during compaction.
+	NumCompactionKeysRead = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
-		Name:      "num_level_keys_deleted",
+		Name:      "num_compaction_keys_read",
 	}, []string{labelPath, labelLevel})
-	// NumLevelBytesMoved has cumulative count of discarded keys in level.
-	NumLevelKeysDiscarded = prometheus.NewCounterVec(prometheus.CounterOpts{
+	// NumCompactionKeysDiscard has cumulative count of discarded keys after compaction.
+	NumCompactionKeysDiscard = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
-		Name:      "num_level_keys_discarded",
+		Name:      "num_compaction_keys_discard",
 	}, []string{labelPath, labelLevel})
 
 	// Histograms
@@ -170,16 +170,24 @@ func NewMetricSet(path string) *MetricsSet {
 	}
 }
 
-func (m *MetricsSet) UpdateBaseLevelStats(l string, movedCnt, movedSz, discardCnt, discardSz int) {
-	NumLevelKeysMoved.WithLabelValues(m.path, l).Add(float64(movedCnt))
-	NumLevelBytesMoved.WithLabelValues(m.path, l).Add(float64(movedSz))
-	NumLevelKeysDiscarded.WithLabelValues(m.path, l).Add(float64(discardCnt))
-	NumLevelBytesDiscarded.WithLabelValues(m.path, l).Add(float64(discardSz))
+type CompactionStats struct {
+	KeysRead     int
+	BytesRead    int
+	KeysWrite    int
+	BytesWrite   int
+	KeysDiscard  int
+	BytesDiscard int
 }
 
-func (m *MetricsSet) UpdateTargetLevelStats(l string, cnt, sz int) {
-	NumLevelKeysAdded.WithLabelValues(m.path, l).Add(float64(cnt))
-	NumLevelBytesAdded.WithLabelValues(m.path, l).Add(float64(sz))
+func (m *MetricsSet) UpdateCompactionStats(targetLevel string, stats *CompactionStats) {
+	NumCompactionKeysRead.WithLabelValues(m.path, targetLevel).Add(float64(stats.KeysRead))
+	NumCompactionBytesRead.WithLabelValues(m.path, targetLevel).Add(float64(stats.BytesRead))
+
+	NumCompactionKeysWrite.WithLabelValues(m.path, targetLevel).Add(float64(stats.KeysWrite))
+	NumCompactionBytesWrite.WithLabelValues(m.path, targetLevel).Add(float64(stats.BytesWrite))
+
+	NumCompactionKeysDiscard.WithLabelValues(m.path, targetLevel).Add(float64(stats.KeysDiscard))
+	NumCompactionBytesDiscard.WithLabelValues(m.path, targetLevel).Add(float64(stats.BytesDiscard))
 }
 
 // These variables are global and have cumulative values for all kv stores.
@@ -197,10 +205,10 @@ func init() {
 	prometheus.MustRegister(NumMemtableGets)
 	prometheus.MustRegister(VlogSyncDuration)
 	prometheus.MustRegister(WriteLSMDuration)
-	prometheus.MustRegister(NumLevelBytesAdded)
-	prometheus.MustRegister(NumLevelBytesMoved)
-	prometheus.MustRegister(NumLevelBytesDiscarded)
-	prometheus.MustRegister(NumLevelKeysAdded)
-	prometheus.MustRegister(NumLevelKeysMoved)
-	prometheus.MustRegister(NumLevelKeysDiscarded)
+	prometheus.MustRegister(NumCompactionBytesWrite)
+	prometheus.MustRegister(NumCompactionBytesRead)
+	prometheus.MustRegister(NumCompactionBytesDiscard)
+	prometheus.MustRegister(NumCompactionKeysRead)
+	prometheus.MustRegister(NumCompactionKeysWrite)
+	prometheus.MustRegister(NumCompactionKeysDiscard)
 }

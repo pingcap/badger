@@ -661,13 +661,19 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 	defer b.Close()
 	var numWrite, bytesWrite int
 	for iter.Rewind(); iter.Valid(); iter.Next() {
-		if err := b.Add(iter.Key(), iter.Value()); err != nil {
+		key := iter.Key()
+		value := iter.Value()
+		if err := b.Add(key, value); err != nil {
 			return err
 		}
 		numWrite++
-		bytesWrite += len(iter.Key()) + int(iter.Value().EncodedSize())
+		bytesWrite += len(key) + int(value.EncodedSize())
 	}
-	db.metrics.UpdateTargetLevelStats(db.lc.levels[0].strLevel, numWrite, bytesWrite)
+	stats := &y.CompactionStats{
+		KeysWrite:  numWrite,
+		BytesWrite: bytesWrite,
+	}
+	db.metrics.UpdateCompactionStats(db.lc.levels[0].strLevel, stats)
 	return b.Finish()
 }
 
