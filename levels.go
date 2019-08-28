@@ -338,6 +338,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 	if start != nil {
 		it.Seek(start)
 	}
+	var bytesRead, bytesWrite int
 	for it.Valid() && (end == nil || y.CompareKeysWithVer(it.Key(), end) < 0) {
 		timeStart := time.Now()
 		fileID := lc.reserveFileID()
@@ -356,6 +357,8 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 		for ; it.Valid() && (end == nil || y.CompareKeysWithVer(it.Key(), end) < 0); it.Next() {
 			vs := it.Value()
 			key := it.Key()
+			kvSize := int(vs.EncodedSize()) + len(key)
+			bytesRead += kvSize
 			// See if we need to skip this key.
 			if len(skipKey) > 0 {
 				if y.SameKey(key, skipKey) {
@@ -409,6 +412,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 			}
 			numKeys++
 			builder.Add(key, vs)
+			bytesWrite += kvSize
 		}
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
@@ -429,6 +433,10 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef, limiter
 			newTables = append(newTables, tbl)
 		}
 	}
+
+	lc.kv.metrics.NumCompactBytesRead.Add(float64(bytesRead))
+	lc.kv.metrics.NumCompactBytesWrite.Add(float64(bytesWrite))
+	lc.kv.metrics.NumDiscardKeys.Add(float64(discardStats.numSkips))
 
 	if firstErr == nil {
 		// Ensure created files' directory entries are visible.  We don't mind the extra latency

@@ -54,6 +54,21 @@ var (
 		Namespace: namespace,
 		Name:      "num_bytes_read",
 	}, []string{label})
+	// NumCompactBytesRead has cumulative number of bytes read during compaction.
+	NumCompactBytesRead = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_compact_bytes_read",
+	}, []string{label})
+	// NumCompactBytesWrite has cumulative number of bytes write during compaction.
+	NumCompactBytesWrite = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_compact_bytes_write",
+	}, []string{label})
+	// NumDiscardKeys has cumulative number of keys discarded during compaction.
+	NumDiscardKeys = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_discard_keys",
+	}, []string{label})
 	// NumVLogBytesWritten has cumulative number of bytes written
 	NumVLogBytesWritten = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
@@ -101,36 +116,42 @@ var (
 )
 
 type MetricsSet struct {
-	LSMSize             prometheus.Gauge
-	VlogSize            prometheus.Gauge
-	NumReads            prometheus.Counter
-	NumWrites           prometheus.Counter
-	NumBytesRead        prometheus.Counter
-	NumVLogBytesWritten prometheus.Counter
-	NumLSMGets          prometheus.Counter
-	NumLSMBloomHits     prometheus.Counter
-	NumGets             prometheus.Counter
-	NumPuts             prometheus.Counter
-	NumMemtableGets     prometheus.Counter
-	VlogSyncDuration    prometheus.Observer
-	WriteLSMDuration    prometheus.Observer
+	LSMSize              prometheus.Gauge
+	VlogSize             prometheus.Gauge
+	NumReads             prometheus.Counter
+	NumWrites            prometheus.Counter
+	NumBytesRead         prometheus.Counter
+	NumCompactBytesRead  prometheus.Counter
+	NumCompactBytesWrite prometheus.Counter
+	NumDiscardKeys       prometheus.Counter
+	NumVLogBytesWritten  prometheus.Counter
+	NumLSMGets           prometheus.Counter
+	NumLSMBloomHits      prometheus.Counter
+	NumGets              prometheus.Counter
+	NumPuts              prometheus.Counter
+	NumMemtableGets      prometheus.Counter
+	VlogSyncDuration     prometheus.Observer
+	WriteLSMDuration     prometheus.Observer
 }
 
 func NewMetricSet(path string) *MetricsSet {
 	return &MetricsSet{
-		LSMSize:             LSMSize.WithLabelValues(path),
-		VlogSize:            VlogSize.WithLabelValues(path),
-		NumReads:            NumReads.WithLabelValues(path),
-		NumWrites:           NumWrites.WithLabelValues(path),
-		NumBytesRead:        NumBytesRead.WithLabelValues(path),
-		NumVLogBytesWritten: NumVLogBytesWritten.WithLabelValues(path),
-		NumLSMGets:          NumLSMGets.WithLabelValues(path),
-		NumLSMBloomHits:     NumLSMBloomHits.WithLabelValues(path),
-		NumGets:             NumGets.WithLabelValues(path),
-		NumPuts:             NumPuts.WithLabelValues(path),
-		NumMemtableGets:     NumMemtableGets.WithLabelValues(path),
-		VlogSyncDuration:    VlogSyncDuration.WithLabelValues(path),
-		WriteLSMDuration:    WriteLSMDuration.WithLabelValues(path),
+		LSMSize:              LSMSize.WithLabelValues(path),
+		VlogSize:             VlogSize.WithLabelValues(path),
+		NumReads:             NumReads.WithLabelValues(path),
+		NumWrites:            NumWrites.WithLabelValues(path),
+		NumBytesRead:         NumBytesRead.WithLabelValues(path),
+		NumCompactBytesRead:  NumCompactBytesRead.WithLabelValues(path),
+		NumCompactBytesWrite: NumCompactBytesWrite.WithLabelValues(path),
+		NumDiscardKeys:       NumDiscardKeys.WithLabelValues(path),
+		NumVLogBytesWritten:  NumVLogBytesWritten.WithLabelValues(path),
+		NumLSMGets:           NumLSMGets.WithLabelValues(path),
+		NumLSMBloomHits:      NumLSMBloomHits.WithLabelValues(path),
+		NumGets:              NumGets.WithLabelValues(path),
+		NumPuts:              NumPuts.WithLabelValues(path),
+		NumMemtableGets:      NumMemtableGets.WithLabelValues(path),
+		VlogSyncDuration:     VlogSyncDuration.WithLabelValues(path),
+		WriteLSMDuration:     WriteLSMDuration.WithLabelValues(path),
 	}
 }
 
@@ -141,6 +162,9 @@ func init() {
 	prometheus.MustRegister(NumReads)
 	prometheus.MustRegister(NumWrites)
 	prometheus.MustRegister(NumBytesRead)
+	prometheus.MustRegister(NumCompactBytesRead)
+	prometheus.MustRegister(NumCompactBytesWrite)
+	prometheus.MustRegister(NumDiscardKeys)
 	prometheus.MustRegister(NumVLogBytesWritten)
 	prometheus.MustRegister(NumLSMGets)
 	prometheus.MustRegister(NumLSMBloomHits)
