@@ -659,11 +659,15 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 	defer iter.Close()
 	b := table.NewTableBuilder(f, db.limiter, db.opt.TableBuilderOptions)
 	defer b.Close()
+	var numWrite, bytesWrite int
 	for iter.Rewind(); iter.Valid(); iter.Next() {
 		if err := b.Add(iter.Key(), iter.Value()); err != nil {
 			return err
 		}
+		numWrite++
+		bytesWrite += len(iter.Key()) + int(iter.Value().EncodedSize())
 	}
+	db.metrics.UpdateTargetLevelStats(db.lc.levels[0].strLevel, numWrite, bytesWrite)
 	return b.Finish()
 }
 

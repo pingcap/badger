@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	namespace = "badger"
-	label     = "path"
+	namespace  = "badger"
+	labelPath  = "path"
+	labelLevel = "level"
 )
 
 var (
@@ -30,12 +31,12 @@ var (
 	LSMSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "lsm_size",
-	}, []string{label})
+	}, []string{labelPath})
 	// VlogSize has size of the value log in bytes
 	VlogSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "vlog_size",
-	}, []string{label})
+	}, []string{labelPath})
 
 	// These are cumulative
 
@@ -43,62 +44,80 @@ var (
 	NumReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_reads",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumWrites has cumulative number of writes
 	NumWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_writes",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumBytesRead has cumulative number of bytes read
 	NumBytesRead = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_bytes_read",
-	}, []string{label})
-	// NumCompactBytesRead has cumulative number of bytes read during compaction.
-	NumCompactBytesRead = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "num_compact_bytes_read",
-	}, []string{label})
-	// NumCompactBytesWrite has cumulative number of bytes write during compaction.
-	NumCompactBytesWrite = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "num_compact_bytes_write",
-	}, []string{label})
-	// NumDiscardKeys has cumulative number of keys discarded during compaction.
-	NumDiscardKeys = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "num_discard_keys",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumVLogBytesWritten has cumulative number of bytes written
 	NumVLogBytesWritten = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_bytes_written",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumLSMGets is number of LMS gets
 	NumLSMGets = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_lsm_gets",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumLSMBloomHits is number of LMS bloom hits
 	NumLSMBloomHits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_lsm_bloom_hits",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumGets is number of gets
 	NumGets = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_gets",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumPuts is number of puts
 	NumPuts = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_puts",
-	}, []string{label})
+	}, []string{labelPath})
 	// NumMemtableGets is number of memtable gets
 	NumMemtableGets = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "num_memtable_gets",
-	}, []string{label})
+	}, []string{labelPath})
+
+	// Level statistics
+
+	// NumLevelBytesAdded has cumulative size of keys added to level.
+	NumLevelBytesAdded = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_level_bytes_added",
+	}, []string{labelPath, labelLevel})
+	// NumLevelBytesMoved has cumulative size of keys move out level.
+	NumLevelBytesMoved = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_level_bytes_deleted",
+	}, []string{labelPath, labelLevel})
+	// NumLevelBytesMoved has cumulative size of discarded keys in level.
+	NumLevelBytesDiscarded = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_level_bytes_discarded",
+	}, []string{labelPath, labelLevel})
+	// NumLevelKeysAdded has cumulative count of keys add to level.
+	NumLevelKeysAdded = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_level_keys_added",
+	}, []string{labelPath, labelLevel})
+	// NumLevelKeysAdded has cumulative count of keys move out level.
+	NumLevelKeysMoved = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_level_keys_deleted",
+	}, []string{labelPath, labelLevel})
+	// NumLevelBytesMoved has cumulative count of discarded keys in level.
+	NumLevelKeysDiscarded = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_level_keys_discarded",
+	}, []string{labelPath, labelLevel})
 
 	// Histograms
 
@@ -106,53 +125,61 @@ var (
 		Namespace: namespace,
 		Name:      "vlog_sync_duration",
 		Buckets:   prometheus.ExponentialBuckets(0.001, 1.5, 20),
-	}, []string{label})
+	}, []string{labelPath})
 
 	WriteLSMDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace,
 		Name:      "write_lsm_duration",
 		Buckets:   prometheus.ExponentialBuckets(0.0003, 1.5, 20),
-	}, []string{label})
+	}, []string{labelPath})
 )
 
 type MetricsSet struct {
-	LSMSize              prometheus.Gauge
-	VlogSize             prometheus.Gauge
-	NumReads             prometheus.Counter
-	NumWrites            prometheus.Counter
-	NumBytesRead         prometheus.Counter
-	NumCompactBytesRead  prometheus.Counter
-	NumCompactBytesWrite prometheus.Counter
-	NumDiscardKeys       prometheus.Counter
-	NumVLogBytesWritten  prometheus.Counter
-	NumLSMGets           prometheus.Counter
-	NumLSMBloomHits      prometheus.Counter
-	NumGets              prometheus.Counter
-	NumPuts              prometheus.Counter
-	NumMemtableGets      prometheus.Counter
-	VlogSyncDuration     prometheus.Observer
-	WriteLSMDuration     prometheus.Observer
+	path                string
+	LSMSize             prometheus.Gauge
+	VlogSize            prometheus.Gauge
+	NumReads            prometheus.Counter
+	NumWrites           prometheus.Counter
+	NumBytesRead        prometheus.Counter
+	NumVLogBytesWritten prometheus.Counter
+	NumLSMGets          prometheus.Counter
+	NumLSMBloomHits     prometheus.Counter
+	NumGets             prometheus.Counter
+	NumPuts             prometheus.Counter
+	NumMemtableGets     prometheus.Counter
+	VlogSyncDuration    prometheus.Observer
+	WriteLSMDuration    prometheus.Observer
 }
 
 func NewMetricSet(path string) *MetricsSet {
 	return &MetricsSet{
-		LSMSize:              LSMSize.WithLabelValues(path),
-		VlogSize:             VlogSize.WithLabelValues(path),
-		NumReads:             NumReads.WithLabelValues(path),
-		NumWrites:            NumWrites.WithLabelValues(path),
-		NumBytesRead:         NumBytesRead.WithLabelValues(path),
-		NumCompactBytesRead:  NumCompactBytesRead.WithLabelValues(path),
-		NumCompactBytesWrite: NumCompactBytesWrite.WithLabelValues(path),
-		NumDiscardKeys:       NumDiscardKeys.WithLabelValues(path),
-		NumVLogBytesWritten:  NumVLogBytesWritten.WithLabelValues(path),
-		NumLSMGets:           NumLSMGets.WithLabelValues(path),
-		NumLSMBloomHits:      NumLSMBloomHits.WithLabelValues(path),
-		NumGets:              NumGets.WithLabelValues(path),
-		NumPuts:              NumPuts.WithLabelValues(path),
-		NumMemtableGets:      NumMemtableGets.WithLabelValues(path),
-		VlogSyncDuration:     VlogSyncDuration.WithLabelValues(path),
-		WriteLSMDuration:     WriteLSMDuration.WithLabelValues(path),
+		path:                path,
+		LSMSize:             LSMSize.WithLabelValues(path),
+		VlogSize:            VlogSize.WithLabelValues(path),
+		NumReads:            NumReads.WithLabelValues(path),
+		NumWrites:           NumWrites.WithLabelValues(path),
+		NumBytesRead:        NumBytesRead.WithLabelValues(path),
+		NumVLogBytesWritten: NumVLogBytesWritten.WithLabelValues(path),
+		NumLSMGets:          NumLSMGets.WithLabelValues(path),
+		NumLSMBloomHits:     NumLSMBloomHits.WithLabelValues(path),
+		NumGets:             NumGets.WithLabelValues(path),
+		NumPuts:             NumPuts.WithLabelValues(path),
+		NumMemtableGets:     NumMemtableGets.WithLabelValues(path),
+		VlogSyncDuration:    VlogSyncDuration.WithLabelValues(path),
+		WriteLSMDuration:    WriteLSMDuration.WithLabelValues(path),
 	}
+}
+
+func (m *MetricsSet) UpdateBaseLevelStats(l string, movedCnt, movedSz, discardCnt, discardSz int) {
+	NumLevelKeysMoved.WithLabelValues(m.path, l).Add(float64(movedCnt))
+	NumLevelBytesMoved.WithLabelValues(m.path, l).Add(float64(movedSz))
+	NumLevelKeysDiscarded.WithLabelValues(m.path, l).Add(float64(discardCnt))
+	NumLevelBytesDiscarded.WithLabelValues(m.path, l).Add(float64(discardSz))
+}
+
+func (m *MetricsSet) UpdateTargetLevelStats(l string, cnt, sz int) {
+	NumLevelKeysAdded.WithLabelValues(m.path, l).Add(float64(cnt))
+	NumLevelBytesAdded.WithLabelValues(m.path, l).Add(float64(sz))
 }
 
 // These variables are global and have cumulative values for all kv stores.
@@ -162,9 +189,6 @@ func init() {
 	prometheus.MustRegister(NumReads)
 	prometheus.MustRegister(NumWrites)
 	prometheus.MustRegister(NumBytesRead)
-	prometheus.MustRegister(NumCompactBytesRead)
-	prometheus.MustRegister(NumCompactBytesWrite)
-	prometheus.MustRegister(NumDiscardKeys)
 	prometheus.MustRegister(NumVLogBytesWritten)
 	prometheus.MustRegister(NumLSMGets)
 	prometheus.MustRegister(NumLSMBloomHits)
@@ -173,4 +197,10 @@ func init() {
 	prometheus.MustRegister(NumMemtableGets)
 	prometheus.MustRegister(VlogSyncDuration)
 	prometheus.MustRegister(WriteLSMDuration)
+	prometheus.MustRegister(NumLevelBytesAdded)
+	prometheus.MustRegister(NumLevelBytesMoved)
+	prometheus.MustRegister(NumLevelBytesDiscarded)
+	prometheus.MustRegister(NumLevelKeysAdded)
+	prometheus.MustRegister(NumLevelKeysMoved)
+	prometheus.MustRegister(NumLevelKeysDiscarded)
 }
