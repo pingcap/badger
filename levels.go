@@ -784,14 +784,14 @@ func (lc *levelsController) doCompact(p compactionPriority) (bool, error) {
 	}
 	defer lc.cstatus.delete(cd) // Remove the ranges from compaction status.
 
-	log.Infof("Running compaction: %+v\n", cd.thisLevel)
+	log.Infof("Running compaction: %d", cd.thisLevel.level)
 	if err := lc.runCompactDef(l, cd, lc.kv.limiter); err != nil {
 		// This compaction couldn't be done successfully.
 		log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
 		return false, err
 	}
 
-	log.Infof("Compaction Done for level: %+v", cd.thisLevel)
+	log.Infof("Compaction Done for level: %d", cd.thisLevel.level)
 	return true, nil
 }
 
