@@ -13,8 +13,3 @@ func Fsync(f *os.File) error {
 func Fdatasync(f *os.File) error {
 	return f.Sync()
 }
-
-// SyncFileRange does nothing on non linux platform.
-func SyncFileRange(f *os.File, offset int64, size int64) error {
-	return nil
-}
