@@ -42,7 +42,7 @@ var mmap = flag.Bool("vlog_mmap", true, "Specify if value log must be memory-map
 
 func getTestOptions(dir string) Options {
 	opt := DefaultOptions
-	opt.MaxTableSize = 1 << 15 // Force more compaction.
+	opt.MaxTableSize = 4 << 15 // Force more compaction.
 	opt.LevelOneSize = 4 << 15 // Force more compaction.
 	opt.Dir = dir
 	opt.ValueDir = dir
