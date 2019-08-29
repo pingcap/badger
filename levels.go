@@ -295,7 +295,7 @@ func (ds *DiscardStats) collect(vs y.ValueStruct) {
 }
 
 func shouldFinishFile(key, lastKey []byte, guard *Guard, currentSize, maxSize int64) bool {
-	if lastKey == nil {
+	if len(lastKey) == 0 {
 		return false
 	}
 	if guard != nil {
@@ -389,7 +389,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		} else {
 			builder.Reset(fd)
 		}
-		lastKey = nil
+		lastKey = lastKey[:0]
 		guard := searchGuard(it.Key(), guards)
 		for ; it.Valid(); it.Next() {
 			numRead++

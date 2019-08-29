@@ -49,7 +49,7 @@ func (b *hashIndexBuilder) finish(buf []byte) []byte {
 		return append(buf, u32ToBytes(0)...)
 	}
 
-	numBuckets := uint32(float32(len(b.entries)) / b.hashUtilRatio)
+	numBuckets := b.numBuckets()
 	bufLen := len(buf)
 	buf = append(buf, make([]byte, numBuckets*3+4)...)
 	buckets := buf[bufLen:]
@@ -71,6 +71,10 @@ func (b *hashIndexBuilder) finish(buf []byte) []byte {
 	copy(buckets[numBuckets*3:], u32ToBytes(numBuckets))
 
 	return buf
+}
+
+func (b *hashIndexBuilder) numBuckets() uint32 {
+	return uint32(float32(len(b.entries)) / b.hashUtilRatio)
 }
 
 func (b *hashIndexBuilder) reset() {

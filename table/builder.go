@@ -204,7 +204,8 @@ func (b *Builder) ReachedCapacity(capacity int64) bool {
 
 // EstimateSize returns the size of the SST to build.
 func (b *Builder) EstimateSize() int {
-	return b.writtenLen + len(b.buf) + 4*len(b.blockEndOffsets) + len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs)
+	return b.writtenLen + len(b.buf) + 4*len(b.blockEndOffsets) +
+		len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs) + int(b.hashIndexBuilder.numBuckets()*3)
 }
 
 // Finish finishes the table by appending the index.
