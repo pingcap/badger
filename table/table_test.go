@@ -28,6 +28,7 @@ import (
 
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
+	"github.com/dgryski/go-farm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
 )
@@ -129,16 +130,17 @@ func TestHashIndexTS(t *testing.T) {
 	f.Close()
 	f, _ = y.OpenSyncedFile(filename, true)
 	table, err := OpenTable(f, options.MemoryMap)
+	keyHash := farm.Fingerprint64([]byte("key"))
 
-	rk, _, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10))
+	rk, _, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10), keyHash)
 	require.True(t, ok)
 	require.True(t, bytes.Compare(rk, keys[0]) == 0)
 
-	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 6))
+	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 6), keyHash)
 	require.True(t, ok)
 	require.True(t, bytes.Compare(rk, keys[2]) == 0)
 
-	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 2))
+	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 2), keyHash)
 	require.True(t, ok)
 	require.True(t, bytes.Compare(rk, keys[4]) == 0)
 }
@@ -151,7 +153,8 @@ func TestPointGet(t *testing.T) {
 
 	for i := 0; i < 8000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		k, _, ok := table.PointGet(k)
+		keyHash := farm.Fingerprint64(y.ParseKey(k))
+		k, _, ok := table.PointGet(k, keyHash)
 		if !ok {
 			// will fallback to seek
 			continue
@@ -162,7 +165,8 @@ func TestPointGet(t *testing.T) {
 
 	for i := 8000; i < 10000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		rk, _, ok := table.PointGet(k)
+		keyHash := farm.Fingerprint64(y.ParseKey(k))
+		rk, _, ok := table.PointGet(k, keyHash)
 		if !ok {
 			// will fallback to seek
 			continue
@@ -825,8 +829,8 @@ func BenchmarkPointGet(b *testing.B) {
 				rand.Seed(0)
 				for i := 0; i < n; i++ {
 					k := keys[rand.Intn(n)]
-
-					resultKey, resultVs, ok = tbl.PointGet(k)
+					keyHash := farm.Fingerprint64(y.ParseKey(k))
+					resultKey, resultVs, ok = tbl.PointGet(k, keyHash)
 					if !ok {
 						it := tbl.NewIteratorNoRef(false)
 						it.Seek(k)

@@ -1231,21 +1231,27 @@ func TestCompactionFilter(t *testing.T) {
 			return nil
 		})
 	}
+	var deleteNotFoundCount, dropAppearOldCount int
 	err = db.View(func(txn *Txn) error {
 		for i := 0; i < 50; i++ {
 			key := []byte(fmt.Sprintf("key%d", i))
 			item, _ := txn.Get(key)
 			if i%2 == 0 {
 				// For delete decision, the old value can not be read.
-				require.Nil(t, item)
+				if item == nil {
+					deleteNotFoundCount++
+				}
 			} else {
 				// For dropped entry, since no tombstone left, the old value appear again.
-				require.NotNil(t, item)
-				require.Len(t, item.UserMeta(), 0)
+				if item != nil && len(item.UserMeta()) == 0 {
+					dropAppearOldCount++
+				}
 			}
 		}
 		return nil
 	})
+	require.True(t, deleteNotFoundCount > 0)
+	require.True(t, dropAppearOldCount > 0)
 }
 
 func (f *testFilter) Guards() []Guard {

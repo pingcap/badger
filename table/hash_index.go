@@ -10,14 +10,8 @@ const (
 	maxBlockCnt    = 65533
 )
 
-type hashIndexBuilder struct {
-	entries       []indexEntry
-	hashUtilRatio float32
-	invalid       bool
-}
-
-type indexEntry struct {
-	hash uint32
+type hashEntry struct {
+	hash uint64
 
 	// blockIdx is the index of block which contains this key.
 	blockIdx uint16
@@ -26,27 +20,12 @@ type indexEntry struct {
 	offset uint8
 }
 
-func newHashIndexBuilder(hashUtilRatio float32) hashIndexBuilder {
-	return hashIndexBuilder{
-		hashUtilRatio: hashUtilRatio,
-	}
-}
-
-func (b *hashIndexBuilder) addKey(keyHash uint64, blkIdx uint32, offset uint8) {
-	if blkIdx > maxBlockCnt {
-		b.invalid = true
-		b.entries = nil
-		return
-	}
-	b.entries = append(b.entries, indexEntry{uint32(keyHash), uint16(blkIdx), offset})
-}
-
-func (b *hashIndexBuilder) finish(buf []byte) []byte {
-	if b.invalid || len(b.entries) == 0 {
+func buildHashIndex(buf []byte, hashEntries []hashEntry, hashUtilRatio float32) []byte {
+	if len(hashEntries) == 0 {
 		return append(buf, u32ToBytes(0)...)
 	}
 
-	numBuckets := b.numBuckets()
+	numBuckets := uint32(float32(len(hashEntries)) / hashUtilRatio)
 	bufLen := len(buf)
 	buf = append(buf, make([]byte, numBuckets*3+4)...)
 	buckets := buf[bufLen:]
@@ -54,8 +33,8 @@ func (b *hashIndexBuilder) finish(buf []byte) []byte {
 		binary.LittleEndian.PutUint16(buckets[i*3:], resultNoEntry)
 	}
 
-	for _, h := range b.entries {
-		idx := h.hash % numBuckets
+	for _, h := range hashEntries {
+		idx := h.hash % uint64(numBuckets)
 		bucket := buckets[idx*3 : (idx+1)*3]
 		blkIdx := binary.LittleEndian.Uint16(bucket[:2])
 		if blkIdx == resultNoEntry {
@@ -68,15 +47,6 @@ func (b *hashIndexBuilder) finish(buf []byte) []byte {
 	copy(buckets[numBuckets*3:], u32ToBytes(numBuckets))
 
 	return buf
-}
-
-func (b *hashIndexBuilder) numBuckets() uint32 {
-	return uint32(float32(len(b.entries)) / b.hashUtilRatio)
-}
-
-func (b *hashIndexBuilder) reset() {
-	b.entries = b.entries[:0]
-	b.invalid = false
 }
 
 type hashIndex struct {
@@ -93,7 +63,7 @@ func (i *hashIndex) lookup(keyHash uint64) (uint32, uint8) {
 	if i.buckets == nil {
 		return resultFallback, 0
 	}
-	idx := int(keyHash) % i.numBuckets
+	idx := keyHash % uint64(i.numBuckets)
 	buf := i.buckets[idx*3:]
 	blkIdx := binary.LittleEndian.Uint16(buf)
 	return uint32(blkIdx), uint8(buf[2])

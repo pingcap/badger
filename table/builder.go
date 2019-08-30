@@ -71,24 +71,19 @@ type Builder struct {
 	// The offsets are relative to the start of the block.
 	entryEndOffsets []uint32
 
-	bloomFilter bbloom.Bloom
-
-	enableHashIndex  bool
-	hashIndexBuilder hashIndexBuilder
+	hashEntries []hashEntry
+	opt         options.TableBuilderOptions
 }
 
 // NewTableBuilder makes a new TableBuilder.
 // If the limiter is nil, the write speed during table build will not be limited.
 func NewTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
-	assumeKeyNum := 256 * 1024
 	return &Builder{
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
-		baseKeysBuf: make([]byte, 0, assumeKeyNum/restartInterval),
-		// assume a large enough num of keys to init bloom filter.
-		bloomFilter:      bbloom.New(float64(assumeKeyNum), 0.01),
-		enableHashIndex:  opt.EnableHashIndex,
-		hashIndexBuilder: newHashIndexBuilder(opt.HashUtilRatio),
+		baseKeysBuf: make([]byte, 0, 4*1024),
+		hashEntries: make([]hashEntry, 0, 4*1024),
+		opt:         opt,
 	}
 }
 
@@ -108,8 +103,7 @@ func (b *Builder) resetBuffers() {
 	b.blockBaseOffset = 0
 	b.blockEndOffsets = b.blockEndOffsets[:0]
 	b.entryEndOffsets = b.entryEndOffsets[:0]
-	b.bloomFilter.Clear()
-	b.hashIndexBuilder.reset()
+	b.hashEntries = b.hashEntries[:0]
 }
 
 // Close closes the TableBuilder.
@@ -133,10 +127,9 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	if len(key) > 0 {
 		keyNoTs := y.ParseKey(key)
 		keyHash := farm.Fingerprint64(keyNoTs)
-		b.bloomFilter.Add(keyHash)
-		if b.enableHashIndex {
-			b.hashIndexBuilder.addKey(keyHash, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
-		}
+		// It is impossible that a single table contains 16 million keys.
+		y.Assert(len(b.baseKeysEndOffs) < maxBlockCnt)
+		b.hashEntries = append(b.hashEntries, hashEntry{keyHash, uint16(len(b.baseKeysEndOffs)), uint8(b.counter)})
 	}
 
 	// diffKey stores the difference of key with blockBaseKey.
@@ -206,8 +199,11 @@ func (b *Builder) ReachedCapacity(capacity int64) bool {
 
 // EstimateSize returns the size of the SST to build.
 func (b *Builder) EstimateSize() int {
-	return b.writtenLen + len(b.buf) + 4*len(b.blockEndOffsets) +
-		len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs) + int(b.hashIndexBuilder.numBuckets()*3)
+	size := b.writtenLen + len(b.buf) + 4*len(b.blockEndOffsets) + len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs)
+	if b.opt.EnableHashIndex {
+		size += 3 * int(float32(len(b.hashEntries))/b.opt.HashUtilRatio)
+	}
+	return size
 }
 
 // Finish finishes the table by appending the index.
@@ -219,12 +215,16 @@ func (b *Builder) Finish() error {
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.baseKeysEndOffs)))...)
 
 	// Write bloom filter.
-	bfData := b.bloomFilter.BinaryMarshal()
+	bloomFilter := bbloom.New(float64(len(b.hashEntries)), 0.01)
+	for _, he := range b.hashEntries {
+		bloomFilter.Add(he.hash)
+	}
+	bfData := bloomFilter.BinaryMarshal()
 	b.buf = append(b.buf, bfData...)
 	b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
 
-	if b.enableHashIndex {
-		b.buf = b.hashIndexBuilder.finish(b.buf)
+	if b.opt.EnableHashIndex {
+		b.buf = buildHashIndex(b.buf, b.hashEntries, b.opt.HashUtilRatio)
 	} else {
 		b.buf = append(b.buf, u32ToBytes(0)...)
 	}
