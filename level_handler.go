@@ -304,15 +304,15 @@ func (s *levelHandler) refLevelNTable(key []byte) *table.Table {
 }
 
 // get returns value for a given key or the key after that. If not found, return nil.
-func (s *levelHandler) get(key []byte, refs RefMap) y.ValueStruct {
+func (s *levelHandler) get(key []byte, keyHash uint64, refs RefMap) y.ValueStruct {
 	tables := s.refTablesForKey(key)
 	defer forceDecrRefs(tables)
-	return s.getInTables(key, tables, refs)
+	return s.getInTables(key, keyHash, tables, refs)
 }
 
-func (s *levelHandler) getInTables(key []byte, tables []*table.Table, refs RefMap) y.ValueStruct {
+func (s *levelHandler) getInTables(key []byte, keyHash uint64, tables []*table.Table, refs RefMap) y.ValueStruct {
 	for _, table := range tables {
-		result := s.getInTable(key, table)
+		result := s.getInTable(key, keyHash, table)
 		if result.Valid() {
 			addTableToRefMap(refs, table)
 			return result
@@ -321,11 +321,11 @@ func (s *levelHandler) getInTables(key []byte, tables []*table.Table, refs RefMa
 	return y.ValueStruct{}
 }
 
-func (s *levelHandler) getInTable(key []byte, table *table.Table) (result y.ValueStruct) {
-	if table.DoesNotHave(y.ParseKey(key)) {
+func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table) (result y.ValueStruct) {
+	if table.DoesNotHave(keyHash) {
 		return
 	}
-	resultKey, resultVs, ok := table.PointGet(key)
+	resultKey, resultVs, ok := table.PointGet(key, keyHash)
 	if !ok {
 		it := table.NewIteratorNoRef(false)
 		it.Seek(key)
@@ -364,7 +364,7 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 			if y.CompareKeysWithVer(pair.key, table.Smallest()) < 0 || y.CompareKeysWithVer(pair.key, table.Biggest()) > 0 {
 				continue
 			}
-			val := s.getInTable(pair.key, table)
+			val := s.getInTable(pair.key, pair.hash, table)
 			if val.Valid() {
 				pair.val = val
 				pair.found = true
@@ -384,7 +384,7 @@ func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Tabl
 		if table == nil {
 			continue
 		}
-		val := s.getInTable(pair.key, table)
+		val := s.getInTable(pair.key, pair.hash, table)
 		if val.Valid() {
 			pair.val = val
 			pair.found = true

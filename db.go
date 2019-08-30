@@ -29,6 +29,7 @@ import (
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
+	"github.com/dgryski/go-farm"
 	"github.com/ncw/directio"
 	"github.com/ngaut/log"
 	"github.com/pingcap/errors"
@@ -503,7 +504,8 @@ func (db *DB) get(key []byte, refs RefMap) y.ValueStruct {
 			return vs
 		}
 	}
-	return db.lc.get(key, refs)
+	keyHash := farm.Fingerprint64(y.ParseKey(key))
+	return db.lc.get(key, keyHash, refs)
 }
 
 func (db *DB) multiGet(pairs []keyValuePair, refs RefMap) {
@@ -851,7 +853,7 @@ func (db *DB) RunValueLogGC(discardRatio float64) error {
 	// Find head on disk
 	headKey := y.KeyWithTs(head, math.MaxUint64)
 	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
-	vs := db.lc.get(headKey, nil)
+	vs := db.lc.get(headKey, farm.Fingerprint64(head), nil)
 
 	var head valuePointer
 	if len(vs.Value) > 0 {

@@ -911,14 +911,14 @@ func (s *levelsController) close() error {
 }
 
 // get returns the found value if any. If not found, we return nil.
-func (s *levelsController) get(key []byte, refs RefMap) y.ValueStruct {
+func (s *levelsController) get(key []byte, keyHash uint64, refs RefMap) y.ValueStruct {
 	// It's important that we iterate the levels from 0 on upward.  The reason is, if we iterated
 	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
 	// read level L's tables post-compaction and level L+1's tables pre-compaction.  (If we do
 	// parallelize this, we will need to call the h.RLock() function by increasing order of level
 	// number.)
 	for _, h := range s.levels {
-		vs := h.get(key, refs) // Calls h.RLock() and h.RUnlock().
+		vs := h.get(key, keyHash, refs) // Calls h.RLock() and h.RUnlock().
 		if vs.Valid() {
 			return vs
 		}

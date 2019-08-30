@@ -26,6 +26,7 @@ import (
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
+	"github.com/dgryski/go-farm"
 	"golang.org/x/time/rate"
 )
 
@@ -131,9 +132,10 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	// Add key to bloom filter.
 	if len(key) > 0 {
 		keyNoTs := y.ParseKey(key)
-		b.bloomFilter.Add(keyNoTs)
+		keyHash := farm.Fingerprint64(keyNoTs)
+		b.bloomFilter.Add(keyHash)
 		if b.enableHashIndex {
-			b.hashIndexBuilder.addKey(keyNoTs, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
+			b.hashIndexBuilder.addKey(keyHash, uint32(len(b.baseKeysEndOffs)), uint8(b.counter))
 		}
 	}
 

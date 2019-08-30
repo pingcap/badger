@@ -367,6 +367,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 
 type keyValuePair struct {
 	key   []byte
+	hash  uint64
 	val   y.ValueStruct
 	found bool
 }
@@ -385,6 +386,7 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 		if len(key) == 0 {
 			return nil, ErrEmptyKey
 		}
+		keyValuePairs[i].hash = farm.Fingerprint64(key)
 		keyValuePairs[i].key = y.KeyWithTs(key, txn.readTs)
 	}
 	txn.db.multiGet(keyValuePairs, txn.refs)

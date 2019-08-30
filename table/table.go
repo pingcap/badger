@@ -168,9 +168,8 @@ func (t *Table) Close() error {
 // If it find an hash collision the last return value will be false,
 // which means caller should fallback to seek search. Otherwise it value will be true.
 // If the hash index does not contain such an element the returned key will be nil.
-func (t *Table) PointGet(key []byte) ([]byte, y.ValueStruct, bool) {
-	keyNoTS := y.ParseKey(key)
-	blkIdx, offset := t.hIdx.lookup(keyNoTS)
+func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, bool) {
+	blkIdx, offset := t.hIdx.lookup(keyHash)
 	if blkIdx == resultFallback {
 		return nil, y.ValueStruct{}, false
 	}
@@ -300,7 +299,7 @@ func (t *Table) ID() uint64 { return t.id }
 
 // DoesNotHave returns true if (but not "only if") the table does not have the key.  It does a
 // bloom filter lookup.
-func (t *Table) DoesNotHave(key []byte) bool { return !t.bf.Has(key) }
+func (t *Table) DoesNotHave(keyHash uint64) bool { return !t.bf.Has(keyHash) }
 
 // ParseFileID reads the file id out of a filename.
 func ParseFileID(name string) (uint64, bool) {

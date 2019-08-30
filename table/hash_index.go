@@ -2,8 +2,6 @@ package table
 
 import (
 	"encoding/binary"
-
-	"github.com/dgryski/go-farm"
 )
 
 const (
@@ -34,14 +32,13 @@ func newHashIndexBuilder(hashUtilRatio float32) hashIndexBuilder {
 	}
 }
 
-func (b *hashIndexBuilder) addKey(key []byte, blkIdx uint32, offset uint8) {
+func (b *hashIndexBuilder) addKey(keyHash uint64, blkIdx uint32, offset uint8) {
 	if blkIdx > maxBlockCnt {
 		b.invalid = true
 		b.entries = nil
 		return
 	}
-	h := farm.Fingerprint32(key)
-	b.entries = append(b.entries, indexEntry{h, uint16(blkIdx), offset})
+	b.entries = append(b.entries, indexEntry{uint32(keyHash), uint16(blkIdx), offset})
 }
 
 func (b *hashIndexBuilder) finish(buf []byte) []byte {
@@ -92,12 +89,11 @@ func (i *hashIndex) readIndex(buf []byte, numBucket int) {
 	i.numBuckets = numBucket
 }
 
-func (i *hashIndex) lookup(key []byte) (uint32, uint8) {
+func (i *hashIndex) lookup(keyHash uint64) (uint32, uint8) {
 	if i.buckets == nil {
 		return resultFallback, 0
 	}
-	h := farm.Fingerprint32(key)
-	idx := int(h) % i.numBuckets
+	idx := int(keyHash) % i.numBuckets
 	buf := i.buckets[idx*3:]
 	blkIdx := binary.LittleEndian.Uint16(buf)
 	return uint32(blkIdx), uint8(buf[2])
