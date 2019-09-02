@@ -640,7 +640,7 @@ func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables [
 		for _, topTbl := range cd.top {
 			iter := topTbl.NewIteratorNoRef(false)
 			iter.Seek(t.Smallest())
-			if iter.Valid() && bytes.Compare(iter.Key(), t.Biggest()) < 0 {
+			if iter.Valid() && bytes.Compare(iter.Key(), t.Biggest()) <= 0 {
 				cd.bot = append(cd.bot, t)
 				added = true
 				break
