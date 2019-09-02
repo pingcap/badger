@@ -804,7 +804,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 
 	var newTables []*table.Table
 	var changeSet protos.ManifestChangeSet
-	if l > 0 && len(cd.bot) == 0 {
+	if l > 0 && len(cd.bot) == 0 && len(cd.skippedTbls) == 0 {
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.top
 		changeSet = protos.ManifestChangeSet{Changes: []*protos.ManifestChange{
