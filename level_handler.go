@@ -179,6 +179,7 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, skippedTbls []*ta
 	tables = append(tables, skippedTbls...)
 	tables = append(tables, s.tables[right:]...)
 	sortTables(tables)
+	assertTablesOrder(tables)
 	s.tables = tables
 	s.Unlock() // s.Unlock before we DecrRef tables -- that can be slow.
 	return decrRefs(toDecr)
