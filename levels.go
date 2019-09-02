@@ -331,6 +331,17 @@ func searchGuard(key []byte, guards []Guard) *Guard {
 	return maxMatchGuard
 }
 
+func overSkipTables(key []byte, skippedTables []*table.Table) (newSkippedTables []*table.Table, over bool) {
+	var i int
+	for i < len(skippedTables) {
+		t := skippedTables[i]
+		if y.CompareKeysWithVer(key, t.Biggest()) > 0 {
+			i++
+		}
+	}
+	return skippedTables[i:], i > 0
+}
+
 // compactBuildTables merge topTables and botTables to form a list of new tables.
 func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	limiter *rate.Limiter) (newTables []*table.Table, err error) {
@@ -412,9 +423,9 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 				// to ensure that all versions of the key are stored in the same sstable, and
 				// not divided across multiple tables at the same level.
 				if len(skippedTbls) > 0 {
-					skipped := skippedTbls[0]
-					if y.CompareKeysWithVer(key, skipped.Biggest()) > 0 {
-						skippedTbls = skippedTbls[1:]
+					var over bool
+					skippedTbls, over = overSkipTables(key, skippedTbls)
+					if over && !builder.Empty() {
 						break
 					}
 				}
@@ -632,6 +643,8 @@ func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 	return true
 }
 
+const minSkippedTableSize = 1024 * 1024
+
 func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables []*table.Table) {
 	for _, t := range overlappingTables {
 		// If none of the top tables contains the range in an overlapping bottom table,
@@ -647,7 +660,14 @@ func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables [
 			}
 		}
 		if !added {
-			cd.skippedTbls = append(cd.skippedTbls, t)
+			if t.Size() >= minSkippedTableSize {
+				// We need to limit the minimum size of the table to be skipped,
+				// otherwise the number of tables in a level will keep growing
+				// until we meet too many open files error.
+				cd.skippedTbls = append(cd.skippedTbls, t)
+			} else {
+				cd.bot = append(cd.bot, t)
+			}
 		}
 	}
 }
