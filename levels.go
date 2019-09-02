@@ -337,6 +337,8 @@ func overSkipTables(key []byte, skippedTables []*table.Table) (newSkippedTables 
 		t := skippedTables[i]
 		if y.CompareKeysWithVer(key, t.Biggest()) > 0 {
 			i++
+		} else {
+			break
 		}
 	}
 	return skippedTables[i:], i > 0
