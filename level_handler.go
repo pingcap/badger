@@ -80,9 +80,7 @@ func (s *levelHandler) initTables(tables []*table.Table) {
 		})
 	} else {
 		// Sort tables by keys.
-		sort.Slice(s.tables, func(i, j int) bool {
-			return y.CompareKeysWithVer(s.tables[i].Smallest(), s.tables[j].Smallest()) < 0
-		})
+		sortTables(s.tables)
 	}
 }
 
@@ -135,9 +133,15 @@ func assertTablesOrder(tables []*table.Table) {
 	}
 }
 
+func sortTables(tables []*table.Table) {
+	sort.Slice(tables, func(i, j int) bool {
+		return y.CompareKeysWithVer(tables[i].Smallest(), tables[j].Smallest()) < 0
+	})
+}
+
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
-func (s *levelHandler) replaceTables(newTables []*table.Table) error {
+func (s *levelHandler) replaceTables(newTables []*table.Table, skippedTbls []*table.Table) error {
 	// Need to re-search the range of tables in this level to be replaced as other goroutines might
 	// be changing it as well.  (They can't touch our tables, but if they add/remove other tables,
 	// the indices get shifted around.)
@@ -160,28 +164,33 @@ func (s *levelHandler) replaceTables(newTables []*table.Table) error {
 		right: newTables[len(newTables)-1].Biggest(),
 	}
 	left, right := s.overlappingTables(levelHandlerRLocked{}, kr)
-
-	toDecr := make([]*table.Table, right-left)
+	toDecr := make([]*table.Table, 0, right-left)
 	// Update totalSize and reference counts.
 	for i := left; i < right; i++ {
 		tbl := s.tables[i]
-		s.totalSize -= tbl.Size()
-		toDecr[i-left] = tbl
+		if !isSkippedTable(tbl, skippedTbls) {
+			s.totalSize -= tbl.Size()
+			toDecr = append(toDecr, tbl)
+		}
 	}
-
-	// To be safe, just make a copy. TODO: Be more careful and avoid copying.
-	numDeleted := right - left
-	numAdded := len(newTables)
-	tables := make([]*table.Table, len(s.tables)-numDeleted+numAdded)
-	y.Assert(left == copy(tables, s.tables[:left]))
-	t := tables[left:]
-	y.Assert(numAdded == copy(t, newTables))
-	t = t[numAdded:]
-	y.Assert(len(s.tables[right:]) == copy(t, s.tables[right:]))
-	assertTablesOrder(tables)
+	tables := make([]*table.Table, 0, left+len(newTables)+len(skippedTbls)+(len(s.tables)-right))
+	tables = append(tables, s.tables[:left]...)
+	tables = append(tables, newTables...)
+	tables = append(tables, skippedTbls...)
+	tables = append(tables, s.tables[right:]...)
+	sortTables(tables)
 	s.tables = tables
 	s.Unlock() // s.Unlock before we DecrRef tables -- that can be slow.
 	return decrRefs(toDecr)
+}
+
+func isSkippedTable(tbl *table.Table, skips []*table.Table) bool {
+	for _, skip := range skips {
+		if tbl == skip {
+			return true
+		}
+	}
+	return false
 }
 
 func decrRefs(tables []*table.Table) error {
