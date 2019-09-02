@@ -413,7 +413,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 				// not divided across multiple tables at the same level.
 				if len(skippedTbls) > 0 {
 					skipped := skippedTbls[0]
-					if bytes.Compare(key, skipped.Biggest()) > 0 {
+					if y.CompareKeysWithVer(key, skipped.Biggest()) > 0 {
 						skippedTbls = skippedTbls[1:]
 						break
 					}
@@ -640,7 +640,7 @@ func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables [
 		for _, topTbl := range cd.top {
 			iter := topTbl.NewIteratorNoRef(false)
 			iter.Seek(t.Smallest())
-			if iter.Valid() && bytes.Compare(iter.Key(), t.Biggest()) <= 0 {
+			if iter.Valid() && y.CompareKeysWithVer(iter.Key(), t.Biggest()) <= 0 {
 				cd.bot = append(cd.bot, t)
 				added = true
 				break
