@@ -38,9 +38,12 @@ func key(prefix string, i int) string {
 }
 
 var defaultBuilderOpt = options.TableBuilderOptions{
-	EnableHashIndex: true,
-	HashUtilRatio:   0.75,
-	WriteBufferSize: 1024 * 1024,
+	EnableHashIndex:     true,
+	HashUtilRatio:       0.75,
+	WriteBufferSize:     1024 * 1024,
+	MaxLevels:           7,
+	LevelSizeMultiplier: 10,
+	LogicalBloomFPR:     0.01,
 }
 
 func buildTestTable(t *testing.T, prefix string, n int) *os.File {
@@ -79,7 +82,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 			y.Check(err)
 		}
 	}
-	y.Check(b.Finish())
+	y.Check(b.Finish(0))
 	f.Close()
 	f, _ = y.OpenSyncedFile(filename, true)
 	return f
@@ -126,7 +129,7 @@ func TestHashIndexTS(t *testing.T) {
 	for _, k := range keys {
 		b.Add(k, y.ValueStruct{Value: k, Meta: 'A', UserMeta: []byte{0}})
 	}
-	y.Check(b.Finish())
+	y.Check(b.Finish(0))
 	f.Close()
 	f, _ = y.OpenSyncedFile(filename, true)
 	table, err := OpenTable(f, options.MemoryMap)
@@ -717,7 +720,7 @@ func BenchmarkRead(b *testing.B) {
 		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 	}
 
-	y.Check(builder.Finish())
+	y.Check(builder.Finish(0))
 	tbl, err := OpenTable(f, options.MemoryMap)
 	y.Check(err)
 	defer tbl.DecrRef()
@@ -754,7 +757,7 @@ func BenchmarkBuildTable(b *testing.B) {
 				for i := 0; i < n; i++ {
 					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
-				y.Check(builder.Finish())
+				y.Check(builder.Finish(0))
 				_, err := f.Seek(0, io.SeekStart)
 				y.Check(err)
 			}
@@ -769,7 +772,7 @@ func BenchmarkBuildTable(b *testing.B) {
 				for i := 0; i < n; i++ {
 					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
-				y.Check(builder.Finish())
+				y.Check(builder.Finish(0))
 				_, err := f.Seek(0, io.SeekStart)
 				y.Check(err)
 			}
@@ -792,7 +795,7 @@ func BenchmarkPointGet(b *testing.B) {
 			y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
 
-		y.Check(builder.Finish())
+		y.Check(builder.Finish(0))
 		tbl, err := OpenTable(f, options.MemoryMap)
 		y.Check(err)
 		b.ResetTimer()
@@ -863,7 +866,7 @@ func BenchmarkReadAndBuild(b *testing.B) {
 		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 	}
 
-	y.Check(builder.Finish())
+	y.Check(builder.Finish(0))
 	tbl, err := OpenTable(f, options.MemoryMap)
 	y.Check(err)
 	defer tbl.DecrRef()
@@ -883,7 +886,7 @@ func BenchmarkReadAndBuild(b *testing.B) {
 				vs := it.Value()
 				newBuilder.Add(it.Key(), vs)
 			}
-			y.Check(newBuilder.Finish())
+			y.Check(newBuilder.Finish(0))
 			_, err := f.Seek(0, io.SeekStart)
 			y.Check(err)
 		}()
@@ -908,7 +911,7 @@ func BenchmarkReadMerged(b *testing.B) {
 			v := fmt.Sprintf("%d", id)
 			y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
-		y.Check(builder.Finish())
+		y.Check(builder.Finish(0))
 		tbl, err := OpenTable(f, options.MemoryMap)
 		y.Check(err)
 		tables = append(tables, tbl)

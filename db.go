@@ -676,8 +676,8 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 		KeysWrite:  numWrite,
 		BytesWrite: bytesWrite,
 	}
-	db.metrics.UpdateCompactionStats(db.lc.levels[0].strLevel, stats)
-	return b.Finish()
+	db.lc.levels[0].metrics.UpdateCompactionStats(stats)
+	return b.Finish(0)
 }
 
 type flushTask struct {

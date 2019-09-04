@@ -30,10 +30,13 @@ const (
 )
 
 type TableBuilderOptions struct {
-	EnableHashIndex bool
-	HashUtilRatio   float32
-	WriteBufferSize int
-	BytesPerSecond  int
+	EnableHashIndex     bool
+	HashUtilRatio       float32
+	WriteBufferSize     int
+	BytesPerSecond      int
+	MaxLevels           int
+	LevelSizeMultiplier int
+	LogicalBloomFPR     float64
 }
 
 type ValueLogWriterOptions struct {

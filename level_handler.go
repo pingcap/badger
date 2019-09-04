@@ -41,6 +41,7 @@ type levelHandler struct {
 	strLevel     string
 	maxTotalSize int64
 	db           *DB
+	metrics      *y.LevelMetricsSet
 }
 
 type RefMap = map[*table.Table]struct{}
@@ -214,10 +215,12 @@ func forceDecrRefs(tables []*table.Table) {
 }
 
 func newLevelHandler(db *DB, level int) *levelHandler {
+	label := fmt.Sprintf("l%d", level)
 	return &levelHandler{
 		level:    level,
-		strLevel: fmt.Sprintf("l%d", level),
+		strLevel: label,
 		db:       db,
+		metrics:  db.metrics.NewLevelMetricsSet(label),
 	}
 }
 
@@ -332,6 +335,7 @@ func (s *levelHandler) getInTables(key []byte, keyHash uint64, tables []*table.T
 }
 
 func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table) (result y.ValueStruct) {
+	s.metrics.NumLSMGets.Inc()
 	if table.DoesNotHave(keyHash) {
 		return
 	}
@@ -340,13 +344,16 @@ func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table
 		it := table.NewIteratorNoRef(false)
 		it.Seek(key)
 		if !it.Valid() {
+			s.metrics.NumLSMBloomFalsePositive.Inc()
 			return
 		}
 		if !y.SameKey(key, it.Key()) {
+			s.metrics.NumLSMBloomFalsePositive.Inc()
 			return
 		}
 		resultKey, resultVs = it.Key(), it.Value()
 	} else if resultKey == nil {
+		s.metrics.NumLSMBloomFalsePositive.Inc()
 		return
 	}
 	result = resultVs

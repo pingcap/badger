@@ -81,12 +81,12 @@ func newLevelsController(kv *DB, mf *Manifest, opt options.TableBuilderOptions) 
 	y.Assert(kv.opt.NumLevelZeroTablesStall > kv.opt.NumLevelZeroTables)
 	s := &levelsController{
 		kv:     kv,
-		levels: make([]*levelHandler, kv.opt.MaxLevels),
+		levels: make([]*levelHandler, kv.opt.TableBuilderOptions.MaxLevels),
 		opt:    opt,
 	}
-	s.cstatus.levels = make([]*levelCompactStatus, kv.opt.MaxLevels)
+	s.cstatus.levels = make([]*levelCompactStatus, kv.opt.TableBuilderOptions.MaxLevels)
 
-	for i := 0; i < kv.opt.MaxLevels; i++ {
+	for i := 0; i < kv.opt.TableBuilderOptions.MaxLevels; i++ {
 		s.levels[i] = newLevelHandler(kv, i)
 		if i == 0 {
 			// Do nothing.
@@ -94,7 +94,7 @@ func newLevelsController(kv *DB, mf *Manifest, opt options.TableBuilderOptions) 
 			// Level 1 probably shouldn't be too much bigger than level 0.
 			s.levels[i].maxTotalSize = kv.opt.LevelOneSize
 		} else {
-			s.levels[i].maxTotalSize = s.levels[i-1].maxTotalSize * int64(kv.opt.LevelSizeMultiplier)
+			s.levels[i].maxTotalSize = s.levels[i-1].maxTotalSize * int64(kv.opt.TableBuilderOptions.LevelSizeMultiplier)
 		}
 		s.cstatus.levels[i] = new(levelCompactStatus)
 	}
@@ -105,7 +105,7 @@ func newLevelsController(kv *DB, mf *Manifest, opt options.TableBuilderOptions) 
 	}
 
 	// Some files may be deleted. Let's reload.
-	tables := make([][]*table.Table, kv.opt.MaxLevels)
+	tables := make([][]*table.Table, kv.opt.TableBuilderOptions.MaxLevels)
 	var maxFileID uint64
 	for fileID, tableManifest := range mf.Tables {
 		fname := table.NewFilename(fileID, kv.opt.Dir)
@@ -475,7 +475,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
 		log.Infof("LOG Compact. Iteration took: %v\n", time.Since(timeStart))
-		if err = builder.Finish(); err != nil {
+		if err = builder.Finish(cd.nextLevel.level); err != nil {
 			return
 		}
 		fd.Close()
@@ -503,7 +503,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		KeysDiscard:  int(discardStats.numSkips),
 		BytesDiscard: int(discardStats.skippedBytes),
 	}
-	lc.kv.metrics.UpdateCompactionStats(cd.nextLevel.strLevel, stats)
+	cd.nextLevel.metrics.UpdateCompactionStats(stats)
 	// Ensure created files' directory entries are visible.  We don't mind the extra latency
 	// from not doing this ASAP after all file creation has finished because this is a
 	// background operation.
@@ -867,7 +867,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 // doCompact picks some table on level l and compacts it away to the next level.
 func (lc *levelsController) doCompact(p compactionPriority) (bool, error) {
 	l := p.level
-	y.Assert(l+1 < lc.kv.opt.MaxLevels) // Sanity check.
+	y.Assert(l+1 < lc.kv.opt.TableBuilderOptions.MaxLevels) // Sanity check.
 
 	cd := compactDef{
 		thisLevel: lc.levels[l],
@@ -919,7 +919,7 @@ func (lc *levelsController) addLevel0Table(t *table.Table) error {
 		log.Warnf("STALLED STALLED STALLED STALLED STALLED STALLED STALLED STALLED: %v\n",
 			time.Since(lastUnstalled))
 		lc.cstatus.RLock()
-		for i := 0; i < lc.kv.opt.MaxLevels; i++ {
+		for i := 0; i < lc.kv.opt.TableBuilderOptions.MaxLevels; i++ {
 			log.Infof("level=%d. Status=%s Size=%d\n",
 				i, lc.cstatus.levels[i].debug(), lc.levels[i].getTotalSize())
 		}
@@ -963,6 +963,8 @@ func (s *levelsController) get(key []byte, keyHash uint64, refs RefMap) y.ValueS
 	// read level L's tables post-compaction and level L+1's tables pre-compaction.  (If we do
 	// parallelize this, we will need to call the h.RLock() function by increasing order of level
 	// number.)
+	start := time.Now()
+	defer s.kv.metrics.LSMGetDuration.Observe(time.Since(start).Seconds())
 	for _, h := range s.levels {
 		vs := h.get(key, keyHash, refs) // Calls h.RLock() and h.RUnlock().
 		if vs.Valid() {
@@ -973,9 +975,11 @@ func (s *levelsController) get(key []byte, keyHash uint64, refs RefMap) y.ValueS
 }
 
 func (s *levelsController) multiGet(pairs []keyValuePair, refs RefMap) {
+	start := time.Now()
 	for _, h := range s.levels {
 		h.multiGet(pairs, refs)
 	}
+	s.kv.metrics.LSMMultiGetDuration.Observe(time.Since(start).Seconds())
 }
 
 func appendIteratorsReversed(out []y.Iterator, th []*table.Table, reversed bool) []y.Iterator {

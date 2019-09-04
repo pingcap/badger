@@ -52,9 +52,7 @@ type Options struct {
 	// 3. Flags that user might want to review
 	// ----------------------------------------
 	// The following affect all levels of LSM tree.
-	MaxTableSize        int64 // Each table (or file) is at most this size.
-	LevelSizeMultiplier int   // Equals SizeOf(Li+1)/SizeOf(Li).
-	MaxLevels           int   // Maximum number of levels of compaction.
+	MaxTableSize int64 // Each table (or file) is at most this size.
 	// If value size >= this threshold, only store value offsets in tree.
 	ValueThreshold int
 	// Maximum number of tables to keep in memory, before stalling.
@@ -147,12 +145,10 @@ const (
 var DefaultOptions = Options{
 	DoNotCompact:        false,
 	LevelOneSize:        256 << 20,
-	LevelSizeMultiplier: 10,
 	TableLoadingMode:    options.LoadToRAM,
 	ValueLogLoadingMode: options.FileIO,
 	// table.MemoryMap to mmap() the tables.
 	// table.Nothing to not preload the tables.
-	MaxLevels:               7,
 	MaxTableSize:            64 << 20,
 	NumCompactors:           3,
 	MaxSubCompaction:        3,
@@ -165,10 +161,13 @@ var DefaultOptions = Options{
 	ValueThreshold:          32,
 	Truncate:                false,
 	TableBuilderOptions: options.TableBuilderOptions{
-		EnableHashIndex: false,
-		HashUtilRatio:   0.75,
-		WriteBufferSize: 2 * 1024 * 1024,
-		BytesPerSecond:  -1,
+		EnableHashIndex:     false,
+		HashUtilRatio:       0.75,
+		WriteBufferSize:     2 * 1024 * 1024,
+		BytesPerSecond:      -1,
+		MaxLevels:           7,
+		LevelSizeMultiplier: 10,
+		LogicalBloomFPR:     0.01,
 	},
 	ValueLogWriteOptions: options.ValueLogWriterOptions{
 		WriteBufferSize: 2 * 1024 * 1024,

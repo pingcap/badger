@@ -60,16 +60,6 @@ var (
 		Namespace: namespace,
 		Name:      "num_bytes_written",
 	}, []string{labelPath})
-	// NumLSMGets is number of LMS gets
-	NumLSMGets = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "num_lsm_gets",
-	}, []string{labelPath})
-	// NumLSMBloomHits is number of LMS bloom hits
-	NumLSMBloomHits = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "num_lsm_bloom_hits",
-	}, []string{labelPath})
 	// NumGets is number of gets
 	NumGets = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
@@ -118,6 +108,16 @@ var (
 		Namespace: namespace,
 		Name:      "num_compaction_keys_discard",
 	}, []string{labelPath, labelLevel})
+	// NumLSMGets is number of LMS gets
+	NumLSMGets = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_lsm_gets",
+	}, []string{labelPath, labelLevel})
+	// NumLSMBloomFalsePositive is number of LMS bloom hits
+	NumLSMBloomFalsePositive = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_lsm_bloom_false_positive",
+	}, []string{labelPath, labelLevel})
 
 	// Histograms
 
@@ -132,6 +132,18 @@ var (
 		Name:      "write_lsm_duration",
 		Buckets:   prometheus.ExponentialBuckets(0.0003, 1.5, 20),
 	}, []string{labelPath})
+
+	LSMGetDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "lsm_get_duration",
+		Buckets:   prometheus.ExponentialBuckets(0.0003, 1.5, 20),
+	}, []string{labelPath})
+
+	LSMMultiGetDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "lsm_multi_get_duration",
+		Buckets:   prometheus.ExponentialBuckets(0.0003, 1.5, 20),
+	}, []string{labelPath})
 )
 
 type MetricsSet struct {
@@ -142,13 +154,13 @@ type MetricsSet struct {
 	NumWrites           prometheus.Counter
 	NumBytesRead        prometheus.Counter
 	NumVLogBytesWritten prometheus.Counter
-	NumLSMGets          prometheus.Counter
-	NumLSMBloomHits     prometheus.Counter
 	NumGets             prometheus.Counter
 	NumPuts             prometheus.Counter
 	NumMemtableGets     prometheus.Counter
 	VlogSyncDuration    prometheus.Observer
 	WriteLSMDuration    prometheus.Observer
+	LSMGetDuration      prometheus.Observer
+	LSMMultiGetDuration prometheus.Observer
 }
 
 func NewMetricSet(path string) *MetricsSet {
@@ -160,14 +172,41 @@ func NewMetricSet(path string) *MetricsSet {
 		NumWrites:           NumWrites.WithLabelValues(path),
 		NumBytesRead:        NumBytesRead.WithLabelValues(path),
 		NumVLogBytesWritten: NumVLogBytesWritten.WithLabelValues(path),
-		NumLSMGets:          NumLSMGets.WithLabelValues(path),
-		NumLSMBloomHits:     NumLSMBloomHits.WithLabelValues(path),
+
 		NumGets:             NumGets.WithLabelValues(path),
 		NumPuts:             NumPuts.WithLabelValues(path),
 		NumMemtableGets:     NumMemtableGets.WithLabelValues(path),
 		VlogSyncDuration:    VlogSyncDuration.WithLabelValues(path),
 		WriteLSMDuration:    WriteLSMDuration.WithLabelValues(path),
+		LSMGetDuration:      LSMGetDuration.WithLabelValues(path),
+		LSMMultiGetDuration: LSMMultiGetDuration.WithLabelValues(path),
 	}
+}
+
+func (m *MetricsSet) NewLevelMetricsSet(levelLabel string) *LevelMetricsSet {
+	return &LevelMetricsSet{
+		MetricsSet:                m,
+		NumLSMGets:                NumLSMGets.WithLabelValues(m.path, levelLabel),
+		NumLSMBloomFalsePositive:  NumLSMBloomFalsePositive.WithLabelValues(m.path, levelLabel),
+		NumCompactionKeysRead:     NumCompactionKeysRead.WithLabelValues(m.path, levelLabel),
+		NumCompactionBytesRead:    NumCompactionBytesRead.WithLabelValues(m.path, levelLabel),
+		NumCompactionKeysWrite:    NumCompactionKeysWrite.WithLabelValues(m.path, levelLabel),
+		NumCompactionBytesWrite:   NumCompactionBytesWrite.WithLabelValues(m.path, levelLabel),
+		NumCompactionKeysDiscard:  NumCompactionKeysDiscard.WithLabelValues(m.path, levelLabel),
+		NumCompactionBytesDiscard: NumCompactionBytesDiscard.WithLabelValues(m.path, levelLabel),
+	}
+}
+
+type LevelMetricsSet struct {
+	*MetricsSet
+	NumCompactionKeysRead     prometheus.Counter
+	NumCompactionBytesRead    prometheus.Counter
+	NumCompactionKeysWrite    prometheus.Counter
+	NumCompactionBytesWrite   prometheus.Counter
+	NumCompactionKeysDiscard  prometheus.Counter
+	NumCompactionBytesDiscard prometheus.Counter
+	NumLSMGets                prometheus.Counter
+	NumLSMBloomFalsePositive  prometheus.Counter
 }
 
 type CompactionStats struct {
@@ -179,15 +218,15 @@ type CompactionStats struct {
 	BytesDiscard int
 }
 
-func (m *MetricsSet) UpdateCompactionStats(targetLevel string, stats *CompactionStats) {
-	NumCompactionKeysRead.WithLabelValues(m.path, targetLevel).Add(float64(stats.KeysRead))
-	NumCompactionBytesRead.WithLabelValues(m.path, targetLevel).Add(float64(stats.BytesRead))
+func (m *LevelMetricsSet) UpdateCompactionStats(stats *CompactionStats) {
+	m.NumCompactionKeysRead.Add(float64(stats.KeysRead))
+	m.NumCompactionBytesRead.Add(float64(stats.BytesRead))
 
-	NumCompactionKeysWrite.WithLabelValues(m.path, targetLevel).Add(float64(stats.KeysWrite))
-	NumCompactionBytesWrite.WithLabelValues(m.path, targetLevel).Add(float64(stats.BytesWrite))
+	m.NumCompactionKeysWrite.Add(float64(stats.KeysWrite))
+	m.NumCompactionBytesWrite.Add(float64(stats.BytesWrite))
 
-	NumCompactionKeysDiscard.WithLabelValues(m.path, targetLevel).Add(float64(stats.KeysDiscard))
-	NumCompactionBytesDiscard.WithLabelValues(m.path, targetLevel).Add(float64(stats.BytesDiscard))
+	m.NumCompactionKeysDiscard.Add(float64(stats.KeysDiscard))
+	m.NumCompactionBytesDiscard.Add(float64(stats.BytesDiscard))
 }
 
 // These variables are global and have cumulative values for all kv stores.
@@ -199,12 +238,14 @@ func init() {
 	prometheus.MustRegister(NumBytesRead)
 	prometheus.MustRegister(NumVLogBytesWritten)
 	prometheus.MustRegister(NumLSMGets)
-	prometheus.MustRegister(NumLSMBloomHits)
+	prometheus.MustRegister(NumLSMBloomFalsePositive)
 	prometheus.MustRegister(NumGets)
 	prometheus.MustRegister(NumPuts)
 	prometheus.MustRegister(NumMemtableGets)
 	prometheus.MustRegister(VlogSyncDuration)
 	prometheus.MustRegister(WriteLSMDuration)
+	prometheus.MustRegister(LSMGetDuration)
+	prometheus.MustRegister(LSMMultiGetDuration)
 	prometheus.MustRegister(NumCompactionBytesWrite)
 	prometheus.MustRegister(NumCompactionBytesRead)
 	prometheus.MustRegister(NumCompactionBytesDiscard)
