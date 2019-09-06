@@ -215,7 +215,7 @@ func forceDecrRefs(tables []*table.Table) {
 }
 
 func newLevelHandler(db *DB, level int) *levelHandler {
-	label := fmt.Sprintf("l%d", level)
+	label := fmt.Sprintf("L%d", level)
 	return &levelHandler{
 		level:    level,
 		strLevel: label,
