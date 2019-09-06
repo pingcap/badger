@@ -134,7 +134,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 		return keyValues[i][0] < keyValues[j][0]
 	})
 
-	b := table.NewTableBuilder(f, nil, DefaultOptions.TableBuilderOptions)
+	b := table.NewTableBuilder(f, nil,0, DefaultOptions.TableBuilderOptions)
 	defer b.Close()
 	for _, kv := range keyValues {
 		y.Assert(len(kv) == 2)
@@ -148,7 +148,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 			y.Check(err)
 		}
 	}
-	y.Check(b.Finish(0))
+	y.Check(b.Finish())
 	f.Close()
 	f, _ = y.OpenSyncedFile(filename, true)
 	return f

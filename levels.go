@@ -399,7 +399,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 			return
 		}
 		if builder == nil {
-			builder = table.NewTableBuilder(fd, limiter, lc.opt)
+			builder = table.NewTableBuilder(fd, limiter, cd.nextLevel.level, lc.opt)
 		} else {
 			builder.Reset(fd)
 		}
@@ -475,7 +475,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
 		log.Infof("LOG Compact. Iteration took: %v\n", time.Since(timeStart))
-		if err = builder.Finish(cd.nextLevel.level); err != nil {
+		if err = builder.Finish(); err != nil {
 			return
 		}
 		fd.Close()

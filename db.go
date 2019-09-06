@@ -660,7 +660,7 @@ func arenaSize(opt Options) int64 {
 func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 	iter := s.NewIterator(false)
 	defer iter.Close()
-	b := table.NewTableBuilder(f, db.limiter, db.opt.TableBuilderOptions)
+	b := table.NewTableBuilder(f, db.limiter, 0, db.opt.TableBuilderOptions)
 	defer b.Close()
 	var numWrite, bytesWrite int
 	for iter.Rewind(); iter.Valid(); iter.Next() {
@@ -677,7 +677,7 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 		BytesWrite: bytesWrite,
 	}
 	db.lc.levels[0].metrics.UpdateCompactionStats(stats)
-	return b.Finish(0)
+	return b.Finish()
 }
 
 type flushTask struct {
