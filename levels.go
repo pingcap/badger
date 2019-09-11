@@ -704,6 +704,7 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 			continue
 		}
 		cd.top = []*table.Table{t}
+		cd.bot = cd.bot[:0]
 		left, right := cd.nextLevel.overlappingTables(levelHandlerRLocked{}, cd.thisRange)
 		overlappingTables := cd.nextLevel.tables[left:right]
 		lc.fillBottomTables(cd, overlappingTables)
