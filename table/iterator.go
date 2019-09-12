@@ -32,9 +32,10 @@ type blockIterator struct {
 	err     error
 	baseKey []byte
 
-	globalTs uint64
-	key      []byte
-	val      []byte
+	useGlobalTs bool
+	globalTs    [8]byte
+	key         []byte
+	val         []byte
 
 	lastBaseLen     uint16
 	entryEndOffsets []uint32
@@ -120,10 +121,8 @@ func (itr *blockIterator) setIdx(i int) {
 	valueOff := headerSize + int(h.diffLen)
 	diffKey := entryData[headerSize:valueOff]
 	itr.key = append(itr.key[:h.baseLen], diffKey...)
-	if itr.globalTs != math.MaxUint64 {
-		var buf [8]byte
-		binary.BigEndian.PutUint64(buf[:], itr.globalTs)
-		itr.key = append(itr.key, buf[:]...)
+	if itr.useGlobalTs {
+		itr.key = append(itr.key, itr.globalTs[:]...)
 	}
 	itr.val = entryData[valueOff:]
 }
@@ -151,19 +150,16 @@ type Iterator struct {
 // NewIterator returns a new iterator of the Table
 func (t *Table) NewIterator(reversed bool) *Iterator {
 	t.IncrRef() // Important.
-	return &Iterator{
-		t:        t,
-		reversed: reversed,
-		bi:       blockIterator{globalTs: t.globalTs},
-	}
+	return t.NewIteratorNoRef(reversed)
 }
 
 func (t *Table) NewIteratorNoRef(reversed bool) *Iterator {
-	return &Iterator{
-		t:        t,
-		reversed: reversed,
-		bi:       blockIterator{globalTs: t.globalTs},
+	it := &Iterator{t: t, reversed: reversed}
+	if t.globalTs != math.MaxUint64 {
+		it.bi.useGlobalTs = true
+		binary.BigEndian.PutUint64(it.bi.globalTs[:], t.globalTs)
 	}
+	return it
 }
 
 // Close closes the iterator (and it must be called).
