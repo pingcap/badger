@@ -20,11 +20,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"math"
 	"sort"
 
 	"github.com/coocood/badger/y"
 )
+
+var maxGlobalTs = [8]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 type blockIterator struct {
 	data    []byte
@@ -32,10 +33,9 @@ type blockIterator struct {
 	err     error
 	baseKey []byte
 
-	useGlobalTs bool
-	globalTs    [8]byte
-	key         []byte
-	val         []byte
+	globalTs [8]byte
+	key      []byte
+	val      []byte
 
 	lastBaseLen     uint16
 	entryEndOffsets []uint32
@@ -121,7 +121,7 @@ func (itr *blockIterator) setIdx(i int) {
 	valueOff := headerSize + int(h.diffLen)
 	diffKey := entryData[headerSize:valueOff]
 	itr.key = append(itr.key[:h.baseLen], diffKey...)
-	if itr.useGlobalTs {
+	if itr.globalTs != maxGlobalTs {
 		itr.key = append(itr.key, itr.globalTs[:]...)
 	}
 	itr.val = entryData[valueOff:]
@@ -155,10 +155,7 @@ func (t *Table) NewIterator(reversed bool) *Iterator {
 
 func (t *Table) NewIteratorNoRef(reversed bool) *Iterator {
 	it := &Iterator{t: t, reversed: reversed}
-	if t.globalTs != math.MaxUint64 {
-		it.bi.useGlobalTs = true
-		binary.BigEndian.PutUint64(it.bi.globalTs[:], t.globalTs)
-	}
+	binary.BigEndian.PutUint64(it.bi.globalTs[:], t.globalTs)
 	return it
 }
 
