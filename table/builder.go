@@ -74,6 +74,7 @@ type Builder struct {
 
 	hashEntries []hashEntry
 	bloomFpr    float64
+	isExternal  bool
 	opt         options.TableBuilderOptions
 }
 
@@ -90,6 +91,18 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		baseKeysBuf: make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    fprBase / levelFactor,
+		opt:         opt,
+	}
+}
+
+func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
+	return &Builder{
+		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
+		buf:         make([]byte, 0, 4*1024),
+		baseKeysBuf: make([]byte, 0, 4*1024),
+		hashEntries: make([]hashEntry, 0, 4*1024),
+		bloomFpr:    opt.LogicalBloomFPR,
+		isExternal:  true,
 		opt:         opt,
 	}
 }
@@ -132,7 +145,10 @@ func (b Builder) keyDiff(newKey []byte) []byte {
 func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	// Add key to bloom filter.
 	if len(key) > 0 {
-		keyNoTs := y.ParseKey(key)
+		keyNoTs := key
+		if !b.isExternal {
+			keyNoTs = y.ParseKey(key)
+		}
 		keyHash := farm.Fingerprint64(keyNoTs)
 		// It is impossible that a single table contains 16 million keys.
 		y.Assert(len(b.baseKeysEndOffs) < maxBlockCnt)
@@ -235,10 +251,16 @@ func (b *Builder) Finish() error {
 	} else {
 		b.buf = append(b.buf, u32ToBytes(0)...)
 	}
-	err := b.w.Append(b.buf)
-	if err != nil {
+	if err := b.w.Append(b.buf); err != nil {
 		return err
 	}
+
+	var tsBuf [8]byte
+	binary.BigEndian.PutUint64(tsBuf[:], math.MaxUint64)
+	if err := b.w.Append(tsBuf[:]); err != nil {
+		return err
+	}
+
 	return b.w.Finish()
 }
 

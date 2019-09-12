@@ -46,7 +46,7 @@ var defaultBuilderOpt = options.TableBuilderOptions{
 	LogicalBloomFPR:     0.01,
 }
 
-func buildTestTable(t *testing.T, prefix string, n int) *os.File {
+func generateKeyValues(prefix string, n int) [][]string {
 	y.Assert(n <= 10000)
 	keyValues := make([][]string, n)
 	for i := 0; i < n; i++ {
@@ -54,7 +54,11 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 		v := fmt.Sprintf("%d", i)
 		keyValues[i] = []string{k, v}
 	}
-	return buildTable(t, keyValues)
+	return keyValues
+}
+
+func buildTestTable(t *testing.T, prefix string, n int) *os.File {
+	return buildTable(t, generateKeyValues(prefix, n))
 }
 
 // keyValues is n by 2 where n is number of pairs.
@@ -180,6 +184,53 @@ func TestPointGet(t *testing.T) {
 		}
 		require.False(t, y.SameKey(k, rk), "point get not point to correct key")
 	}
+}
+
+func TestExternalTable(t *testing.T) {
+	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	f, err := y.OpenSyncedFile(filename, true)
+	if t != nil {
+		require.NoError(t, err)
+	} else {
+		y.Check(err)
+	}
+
+	n := 200
+	b := NewExternalTableBuilder(f, rate.NewLimiter(rate.Inf, math.MaxInt32), defaultBuilderOpt)
+	kvs := generateKeyValues("key", n)
+	for _, kv := range kvs {
+		y.Assert(len(kv) == 2)
+		err := b.Add([]byte(kv[0]), y.ValueStruct{Value: []byte(kv[1]), Meta: 'A', UserMeta: []byte{0}})
+		if t != nil {
+			require.NoError(t, err)
+		} else {
+			y.Check(err)
+		}
+	}
+	y.Check(b.Finish())
+	f.Close()
+	f, _ = y.OpenSyncedFile(filename, true)
+	table, err := OpenTable(f, options.MemoryMap)
+	require.NoError(t, err)
+	require.NoError(t, table.SetGlobalTs(10))
+
+	require.NoError(t, f.Close())
+	f, _ = y.OpenSyncedFile(filename, true)
+	table, err = OpenTable(f, options.MemoryMap)
+	require.NoError(t, err)
+	defer table.DecrRef()
+
+	it := table.NewIterator(false)
+	defer it.Close()
+	count := 0
+	for it.Rewind(); it.Valid(); it.Next() {
+		v := it.Value()
+		k := y.KeyWithTs([]byte(key("key", count)), 10)
+		require.EqualValues(t, k, it.Key())
+		require.EqualValues(t, fmt.Sprintf("%d", count), string(v.Value))
+		count++
+	}
+	require.Equal(t, count, n)
 }
 
 func TestSeekToFirst(t *testing.T) {

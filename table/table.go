@@ -17,7 +17,9 @@
 package table
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,6 +28,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
@@ -41,6 +44,7 @@ type Table struct {
 	fd        *os.File // Own fd.
 	tableSize int      // Initialized in OpenTable, using fd.Stat().
 
+	globalTs        uint64
 	blockEndOffsets []uint32
 	baseKeys        []byte
 	baseKeysEndOffs []uint32
@@ -54,8 +58,7 @@ type Table struct {
 	smallest, biggest []byte // Smallest and largest keys.
 	id                uint64 // file id, part of filename
 
-	bf bbloom.Bloom
-
+	bf   bbloom.Bloom
 	hIdx hashIndex
 }
 
@@ -208,8 +211,12 @@ func (t *Table) readNoFail(off int, sz int) []byte {
 func (t *Table) readIndex() {
 	readPos := t.tableSize
 
+	readPos -= 8
+	buf := t.readNoFail(readPos, 8)
+	t.globalTs = binary.BigEndian.Uint64(buf)
+
 	readPos -= 4
-	buf := t.readNoFail(readPos, 4)
+	buf = t.readNoFail(readPos, 4)
 	numBuckets := int(bytesToU32(buf))
 	if numBuckets != 0 {
 		hashLen := numBuckets * 3
@@ -281,6 +288,21 @@ func (t *Table) approximateOffset(it *Iterator, key []byte) int {
 	return 0
 }
 */
+
+// SetGlobalTs update the global ts of external ingested tables.
+func (t *Table) SetGlobalTs(ts uint64) error {
+	var buf [8]byte
+	ts = math.MaxUint64-ts
+	binary.BigEndian.PutUint64(buf[:], ts)
+	if _, err := t.fd.WriteAt(buf[:], t.Size()-8); err != nil {
+		return err
+	}
+	if err := fileutil.Fsync(t.fd); err != nil {
+		return err
+	}
+	t.globalTs = ts
+	return nil
+}
 
 // Size is its file size in bytes
 func (t *Table) Size() int64 { return int64(t.tableSize) }

@@ -18,7 +18,9 @@ package table
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
+	"math"
 	"sort"
 
 	"github.com/coocood/badger/y"
@@ -30,8 +32,9 @@ type blockIterator struct {
 	err     error
 	baseKey []byte
 
-	key []byte
-	val []byte
+	globalTs uint64
+	key      []byte
+	val      []byte
 
 	lastBaseLen     uint16
 	entryEndOffsets []uint32
@@ -117,6 +120,11 @@ func (itr *blockIterator) setIdx(i int) {
 	valueOff := headerSize + int(h.diffLen)
 	diffKey := entryData[headerSize:valueOff]
 	itr.key = append(itr.key[:h.baseLen], diffKey...)
+	if itr.globalTs != math.MaxUint64 {
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], itr.globalTs)
+		itr.key = append(itr.key, buf[:]...)
+	}
 	itr.val = entryData[valueOff:]
 }
 
@@ -143,12 +151,19 @@ type Iterator struct {
 // NewIterator returns a new iterator of the Table
 func (t *Table) NewIterator(reversed bool) *Iterator {
 	t.IncrRef() // Important.
-	ti := &Iterator{t: t, reversed: reversed}
-	return ti
+	return &Iterator{
+		t:        t,
+		reversed: reversed,
+		bi:       blockIterator{globalTs: t.globalTs},
+	}
 }
 
 func (t *Table) NewIteratorNoRef(reversed bool) *Iterator {
-	return &Iterator{t: t, reversed: reversed}
+	return &Iterator{
+		t:        t,
+		reversed: reversed,
+		bi:       blockIterator{globalTs: t.globalTs},
+	}
 }
 
 // Close closes the iterator (and it must be called).
@@ -416,7 +431,7 @@ func (s *ConcatIterator) setIdx(idx int) {
 	} else {
 		if s.iters[s.idx] == nil {
 			// We already increased table refs, so init without IncrRef here
-			ti := &Iterator{t: s.tables[s.idx], reversed: s.reversed}
+			ti := s.tables[s.idx].NewIteratorNoRef(s.reversed)
 			ti.next()
 			s.iters[s.idx] = ti
 		}
