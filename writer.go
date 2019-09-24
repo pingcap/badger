@@ -84,31 +84,45 @@ func (w *writeWorker) runWriteVLog(lc *y.Closer) {
 	for {
 		var r *request
 		select {
+		case task := <-w.ingestCh:
+			w.ingestTables(task)
+			task.Done()
 		case r = <-w.writeCh:
+			reqs := make([]*request, len(w.writeCh)+1)
+			reqs[0] = r
+			w.pollWriteCh(reqs[1:])
+			if err := w.writeVLog(reqs); err != nil {
+				return
+			}
 		case <-lc.HasBeenClosed():
 			w.closeWriteVLog()
 			return
 		}
-		l := len(w.writeCh)
-		reqs := make([]*request, l+1)
-		reqs[0] = r
-		for i := 0; i < l; i++ {
-			reqs[i+1] = <-w.writeCh
-		}
-		err := w.vlog.write(reqs)
-		if err != nil {
-			w.done(reqs, err)
-			return
-		}
-		if w.opt.SyncWrites {
-			w.flushCh <- flushLogTask{
-				writer: w.vlog.curWriter,
-				reqs:   reqs,
-			}
-		} else {
-			w.writeLSMCh <- reqs
-		}
 	}
+}
+
+func (w *writeWorker) pollWriteCh(buf []*request) []*request {
+	for i := 0; i < len(buf); i++ {
+		buf[i] = <-w.writeCh
+	}
+	return buf
+}
+
+func (w *writeWorker) writeVLog(reqs []*request) error {
+	err := w.vlog.write(reqs)
+	if err != nil {
+		w.done(reqs, err)
+		return err
+	}
+	if w.opt.SyncWrites {
+		w.flushCh <- flushLogTask{
+			writer: w.vlog.curWriter,
+			reqs:   reqs,
+		}
+	} else {
+		w.writeLSMCh <- reqs
+	}
+	return nil
 }
 
 func (w *writeWorker) runWriteLSM(lc *y.Closer) {
@@ -190,19 +204,7 @@ func (w *writeWorker) writeToLSM(entries []*Entry, ptrs []valuePointer) error {
 		return errors.Errorf("Ptrs and Entries don't match: %v, %v", entries, ptrs)
 	}
 
-	var i uint64
-	var err error
-	for err = w.ensureRoomForWrite(); err == errNoRoom; err = w.ensureRoomForWrite() {
-		i++
-		if i%100 == 0 {
-			log.Warnf("Making room for writes")
-		}
-		// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
-		// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
-		// you will get a deadlock.
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
+	if err := w.ensureRoomForWrite(); err != nil {
 		return err
 	}
 

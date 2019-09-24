@@ -301,6 +301,8 @@ func (t *Table) SetGlobalTs(ts uint64) error {
 		return err
 	}
 	t.globalTs = ts
+	t.smallest = y.KeyWithTs(t.smallest, ts)
+	t.biggest = y.KeyWithTs(t.biggest, ts)
 	return nil
 }
 

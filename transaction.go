@@ -118,6 +118,12 @@ func (o *oracle) newCommitTs(txn *Txn) uint64 {
 	return ts
 }
 
+func (o *oracle) allocTs() uint64 {
+	ts := o.nextCommit
+	o.nextCommit++
+	return ts
+}
+
 func (o *oracle) doneCommit(cts uint64) {
 	if o.isManaged {
 		// No need to update anything.

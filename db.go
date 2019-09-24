@@ -17,6 +17,8 @@
 package badger
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -70,6 +72,7 @@ type DB struct {
 	vptr      valuePointer // less than or equal to a pointer to the last vlog value put into mt
 	writeCh   chan *request
 	flushChan chan flushTask // For flushing memtables.
+	ingestCh  chan *ingestTask
 
 	// mem table buffer to avoid expensive allocating big chunk of memory
 	memTableCh chan *table.MemTable
@@ -97,10 +100,7 @@ func replayFunction(out *DB) func(Entry, valuePointer) error {
 	var lastCommit uint64
 
 	toLSM := func(nk []byte, vs y.ValueStruct) {
-		for err := out.ensureRoomForWrite(); err != nil; err = out.ensureRoomForWrite() {
-			log.Infof("Replay: Making room for writes")
-			time.Sleep(10 * time.Millisecond)
-		}
+		out.ensureRoomForWrite()
 		out.mt.PutToSkl(nk, vs)
 	}
 
@@ -253,6 +253,7 @@ func Open(opt Options) (db *DB, err error) {
 		flushChan:     make(chan flushTask, opt.NumMemtables),
 		writeCh:       make(chan *request, kvWriteChCapacity),
 		memTableCh:    make(chan *table.MemTable, 1),
+		ingestCh:      make(chan *ingestTask),
 		opt:           opt,
 		manifest:      manifestFile,
 		dirLockGuard:  dirLockGuard,
@@ -336,6 +337,74 @@ func Open(opt Options) (db *DB, err error) {
 	return db, nil
 }
 
+func (db *DB) IngestExternalFiles(files []*os.File) error {
+	tbls, err := db.prepareExternalFiles(files)
+	if err != nil {
+		return err
+	}
+
+	if err := db.checkExternalTables(tbls); err != nil {
+		return err
+	}
+
+	task := &ingestTask{tbls: tbls}
+	task.Add(1)
+	db.ingestCh <- task
+	task.Wait()
+	return task.err
+}
+
+func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
+	tbls := make([]*table.Table, len(files))
+	for i, fd := range files {
+		id := db.lc.reserveFileID()
+		filename := table.NewFilename(id, db.opt.Dir)
+
+		err := os.Link(fd.Name(), filename)
+		if err != nil {
+			return nil, err
+		}
+
+		fd, err := os.OpenFile(fd.Name(), os.O_RDWR, 0666)
+		if err != nil {
+			return nil, err
+		}
+
+		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
+		if err != nil {
+			return nil, err
+		}
+
+		tbls[i] = tbl
+	}
+
+	return tbls, syncDir(db.lc.kv.opt.Dir)
+}
+
+func (db *DB) checkExternalTables(tbls []*table.Table) error {
+	for i, t := range tbls {
+		for j, o := range tbls {
+			if i == j {
+				continue
+			}
+
+			cmp := bytes.Compare(t.Smallest(), o.Smallest())
+			if cmp == 0 {
+				return errors.New(fmt.Sprintf("%s overlap with %s", t.Smallest(), o.Smallest()))
+			} else if cmp < 0 {
+				if bytes.Compare(t.Biggest(), o.Smallest()) >= 0 {
+					return errors.New(fmt.Sprintf("%s overlap with %s", t.Biggest(), o.Smallest()))
+				}
+			} else {
+				if bytes.Compare(t.Smallest(), o.Biggest()) <= 0 {
+					return errors.New(fmt.Sprintf("%s overlap with %s", t.Smallest(), o.Biggest()))
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Close closes a DB. It's crucial to call it to ensure all the pending updates
 // make their way to disk. Calling DB.Close() multiple times is not safe and would
 // cause panic.
@@ -365,7 +434,7 @@ func (db *DB) Close() (err error) {
 				defer db.Unlock()
 				y.Assert(db.mt != nil)
 				select {
-				case db.flushChan <- flushTask{db.mt, db.vptr}:
+				case db.flushChan <- flushTask{db.mt, db.vptr, nil}:
 					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
 					db.mt = nil                    // Will segfault if we try writing!
 					log.Infof("pushed to flush chan\n")
@@ -383,7 +452,7 @@ func (db *DB) Close() (err error) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	db.flushChan <- flushTask{nil, valuePointer{}} // Tell flusher to quit.
+	db.flushChan <- flushTask{nil, valuePointer{}, nil} // Tell flusher to quit.
 
 	if db.closers.memtable != nil {
 		db.closers.memtable.Wait()
@@ -622,33 +691,42 @@ func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 	return nil
 }
 
-var errNoRoom = errors.New("No room for write")
-
 // ensureRoomForWrite is always called serially.
 func (db *DB) ensureRoomForWrite() error {
 	if db.mt.MemSize() < db.opt.MaxTableSize {
 		return nil
 	}
+	return db.flushMemTable(nil)
+}
+
+func (db *DB) flushMemTable(wg *sync.WaitGroup) error {
 	newMemTable := <-db.memTableCh
-	// Ensure value log is synced to disk so this memtable's contents wouldn't be lost.
-	err := db.vlog.sync()
-	if err != nil {
-		return err
-	}
-	db.Lock()
-	defer db.Unlock()
-	select {
-	case db.flushChan <- flushTask{db.mt, db.vptr}:
-		log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
-			db.mt.MemSize(), len(db.flushChan))
-		// We manage to push this task. Let's modify imm.
-		db.imm = append(db.imm, db.mt)
-		db.mt = newMemTable
-		// New memtable is empty. We certainly have room.
-		return nil
-	default:
-		// We need to do this to unlock and allow the flusher to modify imm.
-		return errNoRoom
+	for {
+		// Ensure value log is synced to disk so this memtable's contents wouldn't be lost.
+		err := db.vlog.sync()
+		if err != nil {
+			return err
+		}
+
+		db.Lock()
+		select {
+		case db.flushChan <- flushTask{db.mt, db.vptr, wg}:
+			log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
+				db.mt.MemSize(), len(db.flushChan))
+			// We manage to push this task. Let's modify imm.
+			db.imm = append(db.imm, db.mt)
+			db.mt = newMemTable
+			db.Unlock()
+			// New memtable is empty. We certainly have room.
+			return nil
+		default:
+			db.Unlock()
+			log.Warnf("Making room for writes")
+			// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
+			// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
+			// you will get a deadlock.
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
@@ -683,6 +761,7 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 type flushTask struct {
 	mt   *table.MemTable
 	vptr valuePointer
+	wg   *sync.WaitGroup
 }
 
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
@@ -752,6 +831,10 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 		db.imm = db.imm[1:]
 		ft.mt.DecrRef() // Return memory.
 		db.Unlock()
+
+		if ft.wg != nil {
+			ft.wg.Done()
+		}
 	}
 	return nil
 }

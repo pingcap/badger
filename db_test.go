@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/coocood/badger/options"
-
+	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 	"github.com/stretchr/testify/require"
 )
@@ -1422,6 +1422,183 @@ func TestMultiGet(t *testing.T) {
 		total += int(item.UserMeta()[15])
 	}
 	require.Equal(t, 0, total)
+}
+
+func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
+	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	f, err := y.OpenSyncedFile(filename, true)
+	require.NoError(t, err)
+	builder := table.NewExternalTableBuilder(f, nil, options.TableBuilderOptions{
+		EnableHashIndex:     true,
+		HashUtilRatio:       0.75,
+		WriteBufferSize:     1024 * 1024,
+		MaxLevels:           7,
+		LevelSizeMultiplier: 10,
+		LogicalBloomFPR:     0.01,
+	})
+
+	for i, k := range keys {
+		err := builder.Add(k, y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})
+		require.NoError(t, err)
+	}
+	require.NoError(t, builder.Finish())
+	return f
+}
+
+func TestIngestSimple(t *testing.T) {
+	var ingestKeys [][]byte
+	for i := 1000; i < 2000; i++ {
+		ingestKeys = append(ingestKeys, []byte(fmt.Sprintf("key%04d", i)))
+	}
+	f := buildSst(t, ingestKeys, ingestKeys)
+	defer os.Remove(f.Name())
+
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.TableLoadingMode = options.MemoryMap
+	opts.ValueThreshold = 512
+	db, err := Open(opts)
+	require.NoError(t, err)
+
+	var keys [][]byte
+	for i := 0; i < 1000; i++ {
+		keys = append(keys, []byte(fmt.Sprintf("key%d", i)))
+	}
+	for i := 0; i < 1000; i++ {
+		err = db.Update(func(txn *Txn) error {
+			return txn.SetWithMetaSlice(keys[i], keys[i], []byte{0})
+		})
+		require.NoError(t, err)
+	}
+
+	err = db.IngestExternalFiles([]*os.File{f})
+	require.NoError(t, err)
+
+	txn := db.NewTransaction(false)
+	for _, k := range append(keys, ingestKeys...) {
+		item, err := txn.Get(k)
+		require.NoError(t, err)
+		v, err := item.Value()
+		require.NoError(t, err)
+		require.Equal(t, k, v)
+	}
+}
+
+func TestIngestOverwrite(t *testing.T) {
+	var ingestKeys, ingestVals [][]byte
+	for i := 0; i < 1000; i++ {
+		ingestKeys = append(ingestKeys, []byte(fmt.Sprintf("key%04d", i)))
+		ingestVals = append(ingestVals, []byte(fmt.Sprintf("val%04d", i)))
+	}
+	f := buildSst(t, ingestKeys, ingestVals)
+	defer os.Remove(f.Name())
+
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.TableLoadingMode = options.MemoryMap
+	opts.ValueThreshold = 512
+	db, err := Open(opts)
+	require.NoError(t, err)
+
+	var keys [][]byte
+	for i := 0; i < 1000; i++ {
+		keys = append(keys, []byte(fmt.Sprintf("key%d", i)))
+	}
+	for i := 0; i < 1000; i++ {
+		err = db.Update(func(txn *Txn) error {
+			return txn.SetWithMetaSlice(keys[i], keys[i], []byte{0})
+		})
+		require.NoError(t, err)
+	}
+
+	err = db.IngestExternalFiles([]*os.File{f})
+	require.NoError(t, err)
+
+	txn := db.NewTransaction(false)
+	for i, k := range ingestKeys {
+		item, err := txn.Get(k)
+		require.NoError(t, err)
+		v, err := item.Value()
+		require.NoError(t, err)
+		require.Equal(t, ingestVals[i], v)
+	}
+}
+
+func TestIngestWhileWrite(t *testing.T) {
+	var ingestKeys, ingestVals [][][]byte
+	var files []*os.File
+	for n := 0; n < 10; n++ {
+		var keys, vals [][]byte
+		for i := n * 1000; i < (n+1)*1000; i++ {
+			keys = append(keys, []byte(fmt.Sprintf("key%05d", i)))
+			vals = append(vals, []byte(fmt.Sprintf("val%05d", i)))
+		}
+		f := buildSst(t, keys, vals)
+		files = append(files, f)
+		ingestKeys = append(ingestKeys, keys)
+		ingestVals = append(ingestVals, vals)
+	}
+	defer func() {
+		for _, f := range files {
+			os.Remove(f.Name())
+		}
+	}()
+
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.TableLoadingMode = options.MemoryMap
+	opts.ValueThreshold = 512
+	db, err := Open(opts)
+	require.NoError(t, err)
+
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				close(done)
+				return
+			default:
+			}
+
+			err = db.Update(func(txn *Txn) error {
+				for n := 0; n < 10; n++ {
+					key := []byte(fmt.Sprintf("key%05d", n*1000+1))
+					if err := txn.Set(key, key); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			require.NoError(t, err)
+		}
+	}()
+
+	err = db.IngestExternalFiles(files)
+	require.NoError(t, err)
+	close(stop)
+	<-done
+
+	txn := db.NewTransaction(false)
+	for i, keys := range ingestKeys {
+		vals := ingestVals[i]
+		for j, k := range keys {
+			val := vals[j]
+			item, err := txn.Get(k)
+			require.NoError(t, err)
+			v, err := item.Value()
+			require.NoError(t, err)
+			if !bytes.Equal(val, v) {
+				require.Equal(t, k, v)
+			}
+		}
+	}
 }
 
 func ExampleOpen() {

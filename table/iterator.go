@@ -236,6 +236,7 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 }
 
 func (itr *Iterator) seekBlock(key []byte) int {
+	var baseKeyBuf []byte
 	return sort.Search(len(itr.t.blockEndOffsets), func(idx int) bool {
 		baseKeyStartOff := 0
 		if idx > 0 {
@@ -243,6 +244,10 @@ func (itr *Iterator) seekBlock(key []byte) int {
 		}
 		baseKeyEndOff := itr.t.baseKeysEndOffs[idx]
 		baseKey := itr.t.baseKeys[baseKeyStartOff:baseKeyEndOff]
+		if itr.bi.globalTs != maxGlobalTs {
+			baseKey = append(baseKeyBuf[:0], baseKey...)
+			baseKey = append(baseKey, itr.bi.globalTs[:]...)
+		}
 		return y.CompareKeysWithVer(baseKey, key) > 0
 	})
 }
