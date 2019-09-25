@@ -161,6 +161,7 @@ func Test_BackupRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Println("backup1 length:", backup.Len())
+	require.NoError(t, db1.Close())
 
 	opts = DefaultOptions
 	opts.Dir = s2Path
@@ -216,6 +217,8 @@ func Test_BackupRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Println("backup2 length:", backup.Len())
+	require.NoError(t, db2.Close())
+
 	opts = DefaultOptions
 	opts.Dir = s3Path
 	opts.ValueDir = s3Path
@@ -252,5 +255,5 @@ func Test_BackupRestore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-
+	require.NoError(t, db3.Close())
 }

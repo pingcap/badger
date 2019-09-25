@@ -134,7 +134,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 		return keyValues[i][0] < keyValues[j][0]
 	})
 
-	b := table.NewTableBuilder(f, nil,0, DefaultOptions.TableBuilderOptions)
+	b := table.NewTableBuilder(f, nil, 0, DefaultOptions.TableBuilderOptions)
 	defer b.Close()
 	for _, kv := range keyValues {
 		y.Assert(len(kv) == 2)
@@ -163,6 +163,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	opt.ValueDir = dir
 	kv, err := Open(opt)
 	require.NoError(t, err)
+	defer kv.Close()
 
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)

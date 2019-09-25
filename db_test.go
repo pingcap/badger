@@ -895,6 +895,8 @@ func TestLargeKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
+
 	for i := 0; i < 1000; i++ {
 		tx := db.NewTransaction(true)
 		for _, kv := range benchmarkData {
@@ -988,6 +990,7 @@ func TestWriteDeadlock(t *testing.T) {
 	opt.ValueLogFileSize = 10 << 20
 	db, err := Open(opt)
 	require.NoError(t, err)
+	defer db.Close()
 
 	print := func(count *int) {
 		*count++
@@ -1207,6 +1210,7 @@ func TestCompactionFilter(t *testing.T) {
 	}
 	db, err := Open(opts)
 	require.NoError(t, err)
+	defer db.Close()
 	val := make([]byte, 1024*4)
 	// Insert 50 entries that will be kept.
 	for i := 0; i < 50; i++ {
@@ -1335,6 +1339,7 @@ func TestIterateVLog(t *testing.T) {
 	opts.ValueThreshold = 1000
 	db, err := Open(opts)
 	require.NoError(t, err)
+	defer db.Close()
 	for i := 0; i < 3000; i++ {
 		err = db.Update(func(txn *Txn) error {
 			key := []byte(fmt.Sprintf("key%d", i))
@@ -1390,6 +1395,7 @@ func TestMultiGet(t *testing.T) {
 	opts.ValueThreshold = 512
 	db, err := Open(opts)
 	require.NoError(t, err)
+	defer db.Close()
 	var keys [][]byte
 	for i := 0; i < 1000; i++ {
 		keys = append(keys, []byte(fmt.Sprintf("key%d", i)))
