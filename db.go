@@ -21,6 +21,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -595,6 +596,9 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 // will be returned.
 //   Check(kv.BatchSet(entries))
 func (db *DB) batchSet(entries []*Entry) error {
+	sort.Slice(entries, func(i, j int) bool {
+		return y.CompareKeysWithVer(entries[i].Key, entries[j].Key) < 0
+	})
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
 		return err

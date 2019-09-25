@@ -1002,11 +1002,12 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 		log.Infof("Error while finding file size: %v", err)
 		return err
 	}
-	window := float64(fi.Size()) * 0.1 // 10% of the file as window.
+	windowSize := float64(fi.Size()) * 0.1 // 10% of the file as window.
+	windowSizeM := windowSize / (1 << 20)
 
 	// Pick a random start point for the log.
 	skipFirstM := float64(rand.Int63n(fi.Size())) // Pick a random starting location.
-	skipFirstM -= window                          // Avoid hitting EOF by moving back by window.
+	skipFirstM -= windowSize                          // Avoid hitting EOF by moving back by window.
 	skipFirstM /= float64(mi)                     // Convert to MBs.
 	log.Infof("Skip first %5.2f MB of file of size: %d MB", skipFirstM, fi.Size()/mi)
 	var skipped float64
@@ -1029,7 +1030,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 			log.Infof("Stopping sampling after 10K entries.")
 			return errStop
 		}
-		if r.total > window {
+		if r.total > windowSize {
 			log.Infof("Stopping sampling after reaching window size.")
 			return errStop
 		}
@@ -1087,7 +1088,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 		lf.fid, skipped, numIterations, r)
 
 	// If we sampled at least 10MB, we can make a call about rewrite.
-	if (r.count < 10000 && r.total < 10.0) || r.discard < discardRatio*r.total {
+	if (r.count < 10000 && r.total < windowSizeM*0.75) || r.discard < discardRatio*r.total {
 		log.Infof("Skipping GC on fid: %d", lf.fid)
 		return ErrNoRewrite
 	}
