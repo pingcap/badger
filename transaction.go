@@ -119,8 +119,10 @@ func (o *oracle) newCommitTs(txn *Txn) uint64 {
 }
 
 func (o *oracle) allocTs() uint64 {
+	o.Lock()
 	ts := o.nextCommit
 	o.nextCommit++
+	o.Unlock()
 	return ts
 }
 

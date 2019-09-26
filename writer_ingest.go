@@ -65,7 +65,7 @@ func (w *writeWorker) prepareIngest(task *ingestTask) ([]*table.Table, uint64, e
 }
 
 func (w *writeWorker) findLevelToPlace(tbl *table.Table) (int, error) {
-	cs := w.lc.cstatus
+	cs := &w.lc.cstatus
 	kr := keyRange{
 		left:  tbl.Smallest(),
 		right: tbl.Biggest(),
@@ -78,7 +78,7 @@ func (w *writeWorker) findLevelToPlace(tbl *table.Table) (int, error) {
 	cs.Lock()
 	var level int
 	for level = 1; level < w.opt.TableBuilderOptions.MaxLevels; level++ {
-		if !w.checkRangeInLevel(kr, level) {
+		if !w.canPlaceRangeInLevel(kr, level) {
 			break
 		}
 	}
@@ -95,32 +95,33 @@ func (w *writeWorker) checkRangeInMemTables(kr keyRange) error {
 	it := w.mt.NewIterator(false)
 	it.Seek(kr.left)
 	if it.Valid() && y.CompareKeysWithVer(it.Key(), kr.right) <= 0 {
-		wg := new(sync.WaitGroup)
-		wg.Add(1)
-		if err := w.flushMemTable(wg); err != nil {
+		if err := w.flushMemTable(); err != nil {
 			return err
 		}
-		wg.Wait()
 	}
 
 	w.Lock()
-	i := 0
-	for _, mt := range w.imm {
-		it := mt.NewIterator(false)
-		it.Seek(kr.left)
-		if !it.Valid() || y.CompareKeysWithVer(it.Key(), kr.right) > 0 {
-			w.imm[i] = mt
-			i++
-		}
+	for w.overlapWithFlushingMemTables(kr) {
+		w.flushMemTableCond.Wait()
 	}
-	w.imm = w.imm[:i]
 	w.Unlock()
 
 	return nil
 }
 
-func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) bool {
-	cs := w.lc.cstatus
+func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
+	for _, mt := range w.imm {
+		it := mt.NewIterator(false)
+		it.Seek(kr.left)
+		if !it.Valid() || y.CompareKeysWithVer(it.Key(), kr.right) <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *writeWorker) canPlaceRangeInLevel(kr keyRange, level int) bool {
+	cs := &w.lc.cstatus
 	handler := w.lc.levels[level]
 	handler.RLock()
 	defer handler.RUnlock()

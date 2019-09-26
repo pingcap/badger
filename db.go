@@ -18,7 +18,6 @@ package badger
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"math"
 	"os"
@@ -57,7 +56,8 @@ type closers struct {
 // DB provides the various functions required to interact with Badger.
 // DB is thread-safe.
 type DB struct {
-	sync.RWMutex // Guards list of inmemory tables, not individual reads and writes.
+	sync.RWMutex      // Guards list of inmemory tables, not individual reads and writes.
+	flushMemTableCond sync.Cond
 
 	dirLockGuard *directoryLockGuard
 	// nil if Dir and ValueDir are the same
@@ -262,6 +262,7 @@ func Open(opt Options) (db *DB, err error) {
 		orc:           orc,
 		metrics:       y.NewMetricSet(opt.Dir),
 	}
+	db.flushMemTableCond.L = &db.RWMutex
 	db.vlog.metrics = db.metrics
 
 	rateLimit := opt.TableBuilderOptions.BytesPerSecond
@@ -389,27 +390,26 @@ func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
 	return tbls, syncDir(db.lc.kv.opt.Dir)
 }
 
-func (db *DB) checkExternalTables(tbls []*table.Table) error {
-	for i, t := range tbls {
-		for j, o := range tbls {
-			if i == j {
-				continue
-			}
+var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
 
-			cmp := bytes.Compare(t.Smallest(), o.Smallest())
-			if cmp == 0 {
-				return errors.New(fmt.Sprintf("%s overlap with %s", t.Smallest(), o.Smallest()))
-			} else if cmp < 0 {
-				if bytes.Compare(t.Biggest(), o.Smallest()) >= 0 {
-					return errors.New(fmt.Sprintf("%s overlap with %s", t.Biggest(), o.Smallest()))
-				}
-			} else {
-				if bytes.Compare(t.Smallest(), o.Biggest()) <= 0 {
-					return errors.New(fmt.Sprintf("%s overlap with %s", t.Smallest(), o.Biggest()))
-				}
-			}
+func (db *DB) checkExternalTables(tbls []*table.Table) error {
+	keys := make([][]byte, 0, len(tbls)*2)
+	for _, t := range tbls {
+		keys = append(keys, t.Smallest(), t.Biggest())
+	}
+	ok := sort.SliceIsSorted(keys, func(i, j int) bool {
+		return bytes.Compare(keys[i], keys[j]) < 0
+	})
+	if !ok {
+		return ErrExternalTableOverlap
+	}
+
+	for i := 0; i < len(keys)-1; i++ {
+		if bytes.Compare(keys[i], keys[i+1]) == 0 {
+			return ErrExternalTableOverlap
 		}
 	}
+
 	return nil
 }
 
@@ -442,7 +442,7 @@ func (db *DB) Close() (err error) {
 				defer db.Unlock()
 				y.Assert(db.mt != nil)
 				select {
-				case db.flushChan <- flushTask{db.mt, db.vptr, nil}:
+				case db.flushChan <- flushTask{db.mt, db.vptr}:
 					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
 					db.mt = nil                    // Will segfault if we try writing!
 					log.Infof("pushed to flush chan\n")
@@ -460,7 +460,7 @@ func (db *DB) Close() (err error) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	db.flushChan <- flushTask{nil, valuePointer{}, nil} // Tell flusher to quit.
+	db.flushChan <- flushTask{nil, valuePointer{}} // Tell flusher to quit.
 
 	if db.closers.memtable != nil {
 		db.closers.memtable.SignalAndWait()
@@ -707,21 +707,21 @@ func (db *DB) ensureRoomForWrite() error {
 	if db.mt.MemSize() < db.opt.MaxTableSize {
 		return nil
 	}
-	return db.flushMemTable(nil)
+	return db.flushMemTable()
 }
 
-func (db *DB) flushMemTable(wg *sync.WaitGroup) error {
+func (db *DB) flushMemTable() error {
 	newMemTable := <-db.memTableCh
-	for {
-		// Ensure value log is synced to disk so this memtable's contents wouldn't be lost.
-		err := db.vlog.sync()
-		if err != nil {
-			return err
-		}
+	// Ensure value log is synced to disk so this memtable's contents wouldn't be lost.
+	err := db.vlog.sync()
+	if err != nil {
+		return err
+	}
 
+	for {
 		db.Lock()
 		select {
-		case db.flushChan <- flushTask{db.mt, db.vptr, wg}:
+		case db.flushChan <- flushTask{db.mt, db.vptr}:
 			log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
 				db.mt.MemSize(), len(db.flushChan))
 			// We manage to push this task. Let's modify imm.
@@ -772,7 +772,6 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 type flushTask struct {
 	mt   *table.MemTable
 	vptr valuePointer
-	wg   *sync.WaitGroup
 }
 
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
@@ -842,10 +841,7 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 		db.imm = db.imm[1:]
 		ft.mt.DecrRef() // Return memory.
 		db.Unlock()
-
-		if ft.wg != nil {
-			ft.wg.Done()
-		}
+		db.flushMemTableCond.Broadcast()
 	}
 	return nil
 }
