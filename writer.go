@@ -144,6 +144,7 @@ func (w *writeWorker) runMergeLSM(lc *y.Closer) {
 	defer lc.Done()
 	for mt := range w.mergeLSMCh {
 		mt.MergeListToSkl()
+		mt.DecrRef()
 	}
 }
 
@@ -242,6 +243,7 @@ func (w *writeWorker) writeToLSM(entries []*Entry, ptrs []valuePointer) error {
 		}
 	}
 	w.mt.PutToPendingList(es)
+	w.mt.IncrRef()
 	w.mergeLSMCh <- w.mt
 	return nil
 }

@@ -69,6 +69,9 @@ func (mt *MergeIterator) fix() {
 				secondValid = mt.bigger.valid
 			}
 			if !secondValid {
+				if mt.second == mt.smaller.iter && mt.bigger.valid {
+					mt.swap()
+				}
 				return
 			}
 			continue

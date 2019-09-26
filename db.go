@@ -23,6 +23,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -268,9 +269,16 @@ func Open(opt Options) (db *DB, err error) {
 		db.limiter = rate.NewLimiter(rate.Limit(rateLimit), rateLimit)
 	}
 
+	db.closers.memtable = y.NewCloser(1)
 	go func() {
+		lc := db.closers.memtable
 		for {
-			db.memTableCh <- table.NewMemTable(arenaSize(db.opt))
+			select {
+			case db.memTableCh <- table.NewMemTable(arenaSize(db.opt)):
+			case <-lc.HasBeenClosed():
+				lc.Done()
+				return
+			}
 		}
 	}()
 
@@ -289,7 +297,7 @@ func Open(opt Options) (db *DB, err error) {
 		db.closers.compactors = y.NewCloser(1)
 		db.lc.startCompact(db.closers.compactors)
 
-		db.closers.memtable = y.NewCloser(1)
+		db.closers.memtable.AddRunning(1)
 		go db.flushMemtable(db.closers.memtable) // Need levels controller to be up.
 	}
 
@@ -455,7 +463,7 @@ func (db *DB) Close() (err error) {
 	db.flushChan <- flushTask{nil, valuePointer{}, nil} // Tell flusher to quit.
 
 	if db.closers.memtable != nil {
-		db.closers.memtable.Wait()
+		db.closers.memtable.SignalAndWait()
 		log.Infof("Memtable flushed")
 	}
 	if db.closers.compactors != nil {
@@ -664,6 +672,9 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 // will be returned.
 //   Check(kv.BatchSet(entries))
 func (db *DB) batchSet(entries []*Entry) error {
+	sort.Slice(entries, func(i, j int) bool {
+		return y.CompareKeysWithVer(entries[i].Key, entries[j].Key) < 0
+	})
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
 		return err
