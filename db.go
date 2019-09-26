@@ -346,6 +346,11 @@ func Open(opt Options) (db *DB, err error) {
 	return db, nil
 }
 
+// ErrExternalTableOverlap returned by IngestExternalFiles when files overlaps.
+var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
+
+// IngestExternalFiles ingest external constructed tables into DB.
+// Note: insure there is no concurrent write overlap with tables to be ingested.
 func (db *DB) IngestExternalFiles(files []*os.File) error {
 	tbls, err := db.prepareExternalFiles(files)
 	if err != nil {
@@ -389,8 +394,6 @@ func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
 
 	return tbls, syncDir(db.lc.kv.opt.Dir)
 }
-
-var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
 
 func (db *DB) checkExternalTables(tbls []*table.Table) error {
 	keys := make([][]byte, 0, len(tbls)*2)

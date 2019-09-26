@@ -86,7 +86,6 @@ func (w *writeWorker) runWriteVLog(lc *y.Closer) {
 		select {
 		case task := <-w.ingestCh:
 			w.ingestTables(task)
-			task.Done()
 		case r = <-w.writeCh:
 			reqs := make([]*request, len(w.writeCh)+1)
 			reqs[0] = r
