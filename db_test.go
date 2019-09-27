@@ -1479,8 +1479,9 @@ func TestIngestSimple(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	err = db.IngestExternalFiles([]*os.File{f})
+	cnt, err := db.IngestExternalFiles([]*os.File{f})
 	require.NoError(t, err)
+	require.Equal(t, 1, cnt)
 
 	txn := db.NewTransaction(false)
 	for _, k := range append(keys, ingestKeys...) {
@@ -1495,9 +1496,11 @@ func TestIngestSimple(t *testing.T) {
 func TestIngestOverwrite(t *testing.T) {
 	var ingestKeys, ingestVals [][]byte
 	for i := 0; i < 1000; i++ {
-		ingestKeys = append(ingestKeys, []byte(fmt.Sprintf("key%04d", i)))
-		ingestVals = append(ingestVals, []byte(fmt.Sprintf("val%04d", i)))
+		ingestKeys = append(ingestKeys, []byte(fmt.Sprintf("key%07d", i)))
+		ingestVals = append(ingestVals, []byte(fmt.Sprintf("val%07d", i)))
 	}
+	ingestKeys = append(ingestKeys, []byte(fmt.Sprintf("key%07d", 9000)))
+	ingestVals = append(ingestVals, []byte(fmt.Sprintf("val%07d", 9000)))
 	f := buildSst(t, ingestKeys, ingestVals)
 	defer os.Remove(f.Name())
 
@@ -1507,22 +1510,26 @@ func TestIngestOverwrite(t *testing.T) {
 	opts := getTestOptions(dir)
 	opts.TableLoadingMode = options.MemoryMap
 	opts.ValueThreshold = 512
+	opts.NumLevelZeroTables = 1
+	opts.NumLevelZeroTablesStall = 2
+	opts.LevelOneSize *= 5
 	db, err := Open(opts)
 	require.NoError(t, err)
 
-	var keys [][]byte
-	for i := 0; i < 1000; i++ {
-		keys = append(keys, []byte(fmt.Sprintf("key%d", i)))
-	}
-	for i := 0; i < 1000; i++ {
+	for i := 1000; i < 50000; i++ {
+		if i == 9000 {
+			continue
+		}
+		key := []byte(fmt.Sprintf("key%07d", i))
 		err = db.Update(func(txn *Txn) error {
-			return txn.SetWithMetaSlice(keys[i], keys[i], []byte{0})
+			return txn.SetWithMetaSlice(key, key, []byte{0})
 		})
 		require.NoError(t, err)
 	}
 
-	err = db.IngestExternalFiles([]*os.File{f})
+	cnt, err := db.IngestExternalFiles([]*os.File{f})
 	require.NoError(t, err)
+	require.Equal(t, 1, cnt)
 
 	txn := db.NewTransaction(false)
 	for i, k := range ingestKeys {
@@ -1586,8 +1593,9 @@ func TestIngestWhileWrite(t *testing.T) {
 		}
 	}()
 
-	err = db.IngestExternalFiles(files)
+	cnt, err := db.IngestExternalFiles(files)
 	require.NoError(t, err)
+	require.Equal(t, len(files), cnt)
 	close(stop)
 	<-done
 

@@ -351,21 +351,21 @@ var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
 
 // IngestExternalFiles ingest external constructed tables into DB.
 // Note: insure there is no concurrent write overlap with tables to be ingested.
-func (db *DB) IngestExternalFiles(files []*os.File) error {
+func (db *DB) IngestExternalFiles(files []*os.File) (int, error) {
 	tbls, err := db.prepareExternalFiles(files)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	if err := db.checkExternalTables(tbls); err != nil {
-		return err
+		return 0, err
 	}
 
 	task := &ingestTask{tbls: tbls}
 	task.Add(1)
 	db.ingestCh <- task
 	task.Wait()
-	return task.err
+	return task.cnt, task.err
 }
 
 func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
