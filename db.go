@@ -407,7 +407,7 @@ func (db *DB) checkExternalTables(tbls []*table.Table) error {
 		return ErrExternalTableOverlap
 	}
 
-	for i := 0; i < len(keys)-1; i++ {
+	for i := 1; i < len(keys)-1; i += 2 {
 		if bytes.Compare(keys[i], keys[i+1]) == 0 {
 			return ErrExternalTableOverlap
 		}
