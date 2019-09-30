@@ -1615,6 +1615,90 @@ func TestIngestWhileWrite(t *testing.T) {
 	}
 }
 
+func TestIngestSplit(t *testing.T) {
+	var ingestKeys [][]byte
+	var files []*os.File
+	{
+		keys := [][]byte{[]byte("c"), []byte("d")}
+		ingestKeys = append(ingestKeys, keys...)
+		files = append(files, buildSst(t, keys, keys))
+	}
+	{
+		keys := [][]byte{[]byte("e"), []byte("h")}
+		ingestKeys = append(ingestKeys, keys...)
+		files = append(files, buildSst(t, keys, keys))
+	}
+	{
+		keys := [][]byte{[]byte("l"), []byte("o")}
+		ingestKeys = append(ingestKeys, keys...)
+		files = append(files, buildSst(t, keys, keys))
+	}
+	defer func() {
+		for _, f := range files {
+			os.Remove(f.Name())
+		}
+	}()
+
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.TableLoadingMode = options.MemoryMap
+	opts.ValueThreshold = 512
+	opts.NumLevelZeroTables = 10
+	opts.NumLevelZeroTablesStall = 20
+	db, err := Open(opts)
+	require.NoError(t, err)
+
+	keys := [][]byte{[]byte("a"), []byte("b"), []byte("i"), []byte("k"), []byte("x"), []byte("z")}
+	err = db.Update(func(txn *Txn) error {
+		for _, k := range keys {
+			if err := txn.Set(k, k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	wg, err := db.flushMemTable()
+	require.NoError(t, err)
+	wg.Wait()
+
+	l0 := db.lc.levels[0]
+	l1 := db.lc.levels[1]
+	l0.Lock()
+	l1.Lock()
+	l1.tables = append(l1.tables, l0.tables[0])
+	l0.tables[0] = nil
+	l0.tables = l0.tables[:0]
+	l0.Unlock()
+	l1.Unlock()
+
+	cnt, err := db.IngestExternalFiles(files)
+	require.NoError(t, err)
+	require.Equal(t, 3, cnt)
+
+	txn := db.NewTransaction(false)
+	for _, k := range append(keys, ingestKeys...) {
+		item, err := txn.Get(k)
+		require.NoError(t, err, string(k))
+		v, err := item.Value()
+		require.NoError(t, err)
+		require.Equal(t, k, v)
+	}
+
+	l1.RLock()
+	tblCnt := 0
+	for _, t := range l1.tables {
+		if t.HasGlobalTs() {
+			tblCnt++
+		}
+	}
+	l1.RUnlock()
+	require.Equal(t, 2, tblCnt)
+}
+
 func ExampleOpen() {
 	dir, err := ioutil.TempDir("", "badger")
 	if err != nil {

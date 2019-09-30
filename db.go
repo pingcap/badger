@@ -56,8 +56,7 @@ type closers struct {
 // DB provides the various functions required to interact with Badger.
 // DB is thread-safe.
 type DB struct {
-	sync.RWMutex      // Guards list of inmemory tables, not individual reads and writes.
-	flushMemTableCond sync.Cond
+	sync.RWMutex // Guards list of inmemory tables, not individual reads and writes.
 
 	dirLockGuard *directoryLockGuard
 	// nil if Dir and ValueDir are the same
@@ -72,7 +71,7 @@ type DB struct {
 	vlog      valueLog
 	vptr      valuePointer // less than or equal to a pointer to the last vlog value put into mt
 	writeCh   chan *request
-	flushChan chan flushTask // For flushing memtables.
+	flushChan chan *flushTask // For flushing memtables.
 	ingestCh  chan *ingestTask
 
 	// mem table buffer to avoid expensive allocating big chunk of memory
@@ -251,7 +250,7 @@ func Open(opt Options) (db *DB, err error) {
 
 	db = &DB{
 		imm:           make([]*table.MemTable, 0, opt.NumMemtables),
-		flushChan:     make(chan flushTask, opt.NumMemtables),
+		flushChan:     make(chan *flushTask, opt.NumMemtables),
 		writeCh:       make(chan *request, kvWriteChCapacity),
 		memTableCh:    make(chan *table.MemTable, 1),
 		ingestCh:      make(chan *ingestTask),
@@ -262,7 +261,6 @@ func Open(opt Options) (db *DB, err error) {
 		orc:           orc,
 		metrics:       y.NewMetricSet(opt.Dir),
 	}
-	db.flushMemTableCond.L = &db.RWMutex
 	db.vlog.metrics = db.metrics
 
 	rateLimit := opt.TableBuilderOptions.BytesPerSecond
@@ -445,7 +443,7 @@ func (db *DB) Close() (err error) {
 				defer db.Unlock()
 				y.Assert(db.mt != nil)
 				select {
-				case db.flushChan <- flushTask{db.mt, db.vptr}:
+				case db.flushChan <- newFlushTask(db.mt, db.vptr):
 					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
 					db.mt = nil                    // Will segfault if we try writing!
 					log.Infof("pushed to flush chan\n")
@@ -463,7 +461,7 @@ func (db *DB) Close() (err error) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	db.flushChan <- flushTask{nil, valuePointer{}} // Tell flusher to quit.
+	db.flushChan <- newFlushTask(nil, valuePointer{}) // Tell flusher to quit.
 
 	if db.closers.memtable != nil {
 		db.closers.memtable.SignalAndWait()
@@ -710,21 +708,23 @@ func (db *DB) ensureRoomForWrite() error {
 	if db.mt.MemSize() < db.opt.MaxTableSize {
 		return nil
 	}
-	return db.flushMemTable()
+	_, err := db.flushMemTable()
+	return err
 }
 
-func (db *DB) flushMemTable() error {
+func (db *DB) flushMemTable() (*sync.WaitGroup, error) {
 	newMemTable := <-db.memTableCh
 	// Ensure value log is synced to disk so this memtable's contents wouldn't be lost.
 	err := db.vlog.sync()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for {
 		db.Lock()
+		ft := newFlushTask(db.mt, db.vptr)
 		select {
-		case db.flushChan <- flushTask{db.mt, db.vptr}:
+		case db.flushChan <- ft:
 			log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
 				db.mt.MemSize(), len(db.flushChan))
 			// We manage to push this task. Let's modify imm.
@@ -732,7 +732,7 @@ func (db *DB) flushMemTable() error {
 			db.mt = newMemTable
 			db.Unlock()
 			// New memtable is empty. We certainly have room.
-			return nil
+			return &ft.wg, nil
 		default:
 			db.Unlock()
 			log.Warnf("Making room for writes")
@@ -775,6 +775,13 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 type flushTask struct {
 	mt   *table.MemTable
 	vptr valuePointer
+	wg   sync.WaitGroup
+}
+
+func newFlushTask(mt *table.MemTable, vptr valuePointer) *flushTask {
+	ft := &flushTask{mt: mt, vptr: vptr}
+	ft.wg.Add(1)
+	return ft
 }
 
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
@@ -844,7 +851,7 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 		db.imm = db.imm[1:]
 		ft.mt.DecrRef() // Return memory.
 		db.Unlock()
-		db.flushMemTableCond.Broadcast()
+		ft.wg.Done()
 	}
 	return nil
 }

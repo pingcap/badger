@@ -17,7 +17,7 @@ type ingestTask struct {
 }
 
 func (w *writeWorker) ingestTables(task *ingestTask) {
-	ts, err := w.prepareIngestTask(task)
+	ts, wg, err := w.prepareIngestTask(task)
 	if err != nil {
 		task.err = err
 		task.Done()
@@ -30,16 +30,21 @@ func (w *writeWorker) ingestTables(task *ingestTask) {
 		defer task.Done()
 		defer w.orc.doneCommit(ts)
 
+		ends := make([][]byte, 0, len(task.tbls))
+
 		for _, t := range task.tbls {
 			if task.err = t.SetGlobalTs(ts); task.err != nil {
 				return
 			}
+			ends = append(ends, t.Biggest())
 		}
 
-		w.waitOverlappedMemTableFlush(task.tbls)
+		if wg != nil {
+			wg.Wait()
+		}
 
-		for _, tbl := range task.tbls {
-			if task.err = w.ingestTable(tbl); task.err != nil {
+		for i, tbl := range task.tbls {
+			if task.err = w.ingestTable(tbl, ends[i+1:]); task.err != nil {
 				return
 			}
 			task.cnt++
@@ -47,14 +52,14 @@ func (w *writeWorker) ingestTables(task *ingestTask) {
 	}()
 }
 
-func (w *writeWorker) prepareIngestTask(task *ingestTask) (uint64, error) {
+func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.WaitGroup, err error) {
 	w.orc.writeLock.Lock()
-	ts := w.orc.allocTs()
+	ts = w.orc.allocTs()
 	reqs := w.pollWriteCh(make([]*request, len(w.writeCh)))
 	w.orc.writeLock.Unlock()
 
-	if err := w.writeVLog(reqs); err != nil {
-		return 0, err
+	if err = w.writeVLog(reqs); err != nil {
+		return 0, nil, err
 	}
 
 	it := w.mt.NewIterator(false)
@@ -62,17 +67,16 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (uint64, error) {
 	for _, t := range task.tbls {
 		it.Seek(y.KeyWithTs(t.Smallest(), math.MaxUint64))
 		if it.Valid() && y.CompareKeysWithVer(it.Key(), y.KeyWithTs(t.Biggest(), 0)) <= 0 {
-			if err := w.flushMemTable(); err != nil {
-				return 0, err
+			if wg, err = w.flushMemTable(); err != nil {
+				return
 			}
 			break
 		}
 	}
-
-	return ts, nil
+	return
 }
 
-func (w *writeWorker) ingestTable(tbl *table.Table) error {
+func (w *writeWorker) ingestTable(tbl *table.Table, splitHints [][]byte) error {
 	cs := &w.lc.cstatus
 	kr := keyRange{
 		left:  tbl.Smallest(),
@@ -86,8 +90,17 @@ func (w *writeWorker) ingestTable(tbl *table.Table) error {
 
 	cs.Lock()
 	for targetLevel = 0; targetLevel < w.opt.TableBuilderOptions.MaxLevels; targetLevel++ {
-		if tbls, ok := w.checkRangeInLevel(kr, targetLevel); !ok {
-			overlappingTables = tbls
+		tbls, overlap, ok := w.checkRangeInLevel(kr, targetLevel)
+		if !ok {
+			// cannot place table in current level, back to previous level.
+			if targetLevel != 0 {
+				targetLevel--
+			}
+			break
+		}
+
+		overlappingTables = tbls
+		if overlap {
 			break
 		}
 	}
@@ -108,7 +121,7 @@ func (w *writeWorker) ingestTable(tbl *table.Table) error {
 	defer l.remove(kr)
 
 	if targetLevel != 0 && len(overlappingTables) != 0 {
-		return w.runIngestCompact(targetLevel, tbl, overlappingTables)
+		return w.runIngestCompact(targetLevel, tbl, overlappingTables, splitHints)
 	}
 
 	change := makeTableCreateChange(tbl.ID(), targetLevel)
@@ -119,13 +132,13 @@ func (w *writeWorker) ingestTable(tbl *table.Table) error {
 	return nil
 }
 
-func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingTables []*table.Table) error {
+func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingTables []*table.Table, splitHints [][]byte) error {
 	cd := compactDef{
 		nextLevel: w.lc.levels[level],
 		top:       []*table.Table{tbl},
 	}
 	w.lc.fillBottomTables(&cd, overlappingTables)
-	newTables, err := w.lc.compactBuildTables(level-1, cd, w.limiter)
+	newTables, err := w.lc.compactBuildTables(level-1, cd, w.limiter, splitHints)
 	if err != nil {
 		return err
 	}
@@ -145,18 +158,6 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 	return cd.nextLevel.replaceTables(newTables, cd.skippedTbls)
 }
 
-func (w *writeWorker) waitOverlappedMemTableFlush(tbls []*table.Table) error {
-	for _, t := range tbls {
-		kr := keyRange{left: t.Smallest(), right: t.Biggest()}
-		w.Lock()
-		for w.overlapWithFlushingMemTables(kr) {
-			w.flushMemTableCond.Wait()
-		}
-		w.Unlock()
-	}
-	return nil
-}
-
 func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
 	for _, mt := range w.imm {
 		it := mt.NewIterator(false)
@@ -170,19 +171,19 @@ func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
 	return false
 }
 
-func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) ([]*table.Table, bool) {
+func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) (overlappingTables []*table.Table, overlap bool, ok bool) {
 	cs := &w.lc.cstatus
 	handler := w.lc.levels[level]
 	handler.RLock()
 	defer handler.RUnlock()
 
 	if len(handler.tables) == 0 && level != 0 {
-		return nil, false
+		return nil, false, false
 	}
 
 	l := cs.levels[level]
 	if l.overlapsWith(kr) {
-		return nil, false
+		return nil, false, false
 	}
 
 	var left, right int
@@ -192,14 +193,13 @@ func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) ([]*table.Table,
 		left, right = handler.overlappingTables(levelHandlerRLocked{}, kr)
 	}
 
-	ok := true
 	for i := left; i < right; i++ {
 		it := handler.tables[i].NewIteratorNoRef(false)
 		it.Seek(kr.left)
 		if it.Valid() && y.CompareKeysWithVer(it.Key(), kr.right) <= 0 {
-			ok = false
+			overlap = true
 			break
 		}
 	}
-	return handler.tables[left:right], ok
+	return handler.tables[left:right], overlap, true
 }

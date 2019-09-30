@@ -289,18 +289,23 @@ func (t *Table) approximateOffset(it *Iterator, key []byte) int {
 }
 */
 
+// HasGlobalTs returns table does set global ts.
+func (t *Table) HasGlobalTs() bool {
+	return t.globalTs != math.MaxUint64
+}
+
 // SetGlobalTs update the global ts of external ingested tables.
 func (t *Table) SetGlobalTs(ts uint64) error {
 	var buf [8]byte
-	ts = math.MaxUint64-ts
-	binary.BigEndian.PutUint64(buf[:], ts)
+	encodeTs := math.MaxUint64 - ts
+	binary.BigEndian.PutUint64(buf[:], encodeTs)
 	if _, err := t.fd.WriteAt(buf[:], t.Size()-8); err != nil {
 		return err
 	}
 	if err := fileutil.Fsync(t.fd); err != nil {
 		return err
 	}
-	t.globalTs = ts
+	t.globalTs = encodeTs
 	t.smallest = y.KeyWithTs(t.smallest, ts)
 	t.biggest = y.KeyWithTs(t.biggest, ts)
 	return nil

@@ -251,9 +251,8 @@ func (s *levelHandler) addTable(t *table.Table) {
 		return
 	}
 
-	end := y.KeyWithTs(t.Biggest(), 0)
 	i := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeysWithVer(s.tables[i].Smallest(), end) >= 0
+		return y.CompareKeysWithVer(s.tables[i].Smallest(), t.Biggest()) >= 0
 	})
 	if i == len(s.tables) {
 		s.tables = append(s.tables, t)

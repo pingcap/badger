@@ -346,7 +346,7 @@ func overSkipTables(key []byte, skippedTables []*table.Table) (newSkippedTables 
 
 // compactBuildTables merge topTables and botTables to form a list of new tables.
 func (lc *levelsController) compactBuildTables(level int, cd compactDef,
-	limiter *rate.Limiter) (newTables []*table.Table, err error) {
+	limiter *rate.Limiter, splitHints [][]byte) (newTables []*table.Table, err error) {
 	topTables := cd.top
 	botTables := cd.bot
 
@@ -432,6 +432,13 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 					}
 				}
 				if shouldFinishFile(key, lastKey, guard, int64(builder.EstimateSize()), lc.kv.opt.MaxTableSize) {
+					break
+				}
+				if len(splitHints) != 0 && y.CompareKeysWithVer(key, splitHints[0]) >= 0 {
+					splitHints = splitHints[1:]
+					for len(splitHints) > 0 && y.CompareKeysWithVer(key, splitHints[0]) >= 0 {
+						splitHints = splitHints[1:]
+					}
 					break
 				}
 				lastKey = y.SafeCopy(lastKey, key)
@@ -838,7 +845,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 		}}
 	} else {
 		var err error
-		newTables, err = lc.compactBuildTables(l, cd, limiter)
+		newTables, err = lc.compactBuildTables(l, cd, limiter, nil)
 		defer forceDecrRefs(newTables)
 		if err != nil {
 			return err
