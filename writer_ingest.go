@@ -115,10 +115,7 @@ func (w *writeWorker) ingestTable(tbl *table.Table) error {
 	if err := w.manifest.addChanges([]*protos.ManifestChange{change}); err != nil {
 		return err
 	}
-	l0 := w.lc.levels[0]
-	l0.Lock()
-	l0.tables = append(l0.tables, tbl)
-	l0.Unlock()
+	w.lc.levels[targetLevel].addTable(tbl)
 	return nil
 }
 

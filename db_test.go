@@ -1516,7 +1516,7 @@ func TestIngestOverwrite(t *testing.T) {
 	db, err := Open(opts)
 	require.NoError(t, err)
 
-	for i := 1000; i < 50000; i++ {
+	for i := 1000; i < 20000; i++ {
 		if i == 9000 {
 			continue
 		}
