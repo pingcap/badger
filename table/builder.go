@@ -24,12 +24,15 @@ import (
 	"reflect"
 	"unsafe"
 
+	"github.com/DataDog/zstd"
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
 	"github.com/dgryski/go-farm"
+	"github.com/golang/snappy"
+	"github.com/pingcap/errors"
 	"golang.org/x/time/rate"
 )
 
@@ -204,28 +207,38 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	b.buf = append(b.buf, h.Encode()...)
 	b.buf = append(b.buf, diffKey...) // We only need to store the key difference.
 	b.buf = v.EncodeTo(b.buf)
-	b.entryEndOffsets = append(b.entryEndOffsets, uint32(b.writtenLen+len(b.buf))-b.blockBaseOffset)
+	b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
 	b.counter++ // Increment number of keys added for this current block.
 }
 
 func (b *Builder) finishBlock() error {
 	b.buf = append(b.buf, u32SliceToBytes(b.entryEndOffsets)...)
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.entryEndOffsets)))...)
-	b.blockEndOffsets = append(b.blockEndOffsets, uint32(b.writtenLen+len(b.buf)))
 
 	// Add base key.
 	b.baseKeysBuf = append(b.baseKeysBuf, b.blockBaseKey...)
 	b.baseKeysEndOffs = append(b.baseKeysEndOffs, uint32(len(b.baseKeysBuf)))
 
+	data := b.buf
+	if b.opt.Compression != options.None {
+		var err error
+		// TODO: Find a way to reuse buffers. Current implementation creates a
+		// new buffer for each compressData call.
+		data, err = b.compressData(b.buf)
+		y.Check(err)
+	}
+
+	if err := b.w.Append(data); err != nil {
+		return err
+	}
+	b.blockEndOffsets = append(b.blockEndOffsets, uint32(b.writtenLen+len(data)))
+	b.writtenLen += len(data)
+	b.blockBaseOffset = uint32(b.writtenLen + len(data))
+
 	// Reset the block for the next build.
 	b.entryEndOffsets = b.entryEndOffsets[:0]
 	b.counter = 0
 	b.blockBaseKey = b.blockBaseKey[:0]
-	b.blockBaseOffset = uint32(b.writtenLen + len(b.buf))
-	b.writtenLen += len(b.buf)
-	if err := b.w.Append(b.buf); err != nil {
-		return err
-	}
 	b.buf = b.buf[:0]
 	return nil
 }
@@ -355,4 +368,17 @@ func bytesToU32Slice(b []byte) []uint32 {
 
 func bytesToU32(b []byte) uint32 {
 	return binary.LittleEndian.Uint32(b)
+}
+
+// compressData compresses the given data.
+func (b *Builder) compressData(data []byte) ([]byte, error) {
+	switch b.opt.Compression {
+	case options.None:
+		return data, nil
+	case options.Snappy:
+		return snappy.Encode(nil, data), nil
+	case options.ZSTD:
+		return zstd.Compress(nil, data)
+	}
+	return nil, errors.New("Unsupported compression type")
 }

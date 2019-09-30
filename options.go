@@ -172,6 +172,8 @@ var DefaultOptions = Options{
 		BytesPerSecond:      -1,
 		MaxLevels:           7,
 		LevelSizeMultiplier: 10,
+		BlockSize:           4 * 1024,
+		Compression:         options.ZSTD,
 		LogicalBloomFPR:     0.01,
 		SuRFOptions: options.SuRFOptions{
 			HashSuffixLen:  8,

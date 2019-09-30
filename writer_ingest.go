@@ -127,7 +127,8 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints [][]byte) error {
 		return w.runIngestCompact(targetLevel, tbl, overlappingTables, splitHints, ref)
 	}
 
-	change := makeTableCreateChange(tbl.ID(), targetLevel)
+	// TODO: compression type for external table
+	change := newCreateChange(tbl.ID(), targetLevel, w.opt.TableBuilderOptions.Compression)
 	if err := w.manifest.addChanges([]*protos.ManifestChange{change}, nil); err != nil {
 		return err
 	}
@@ -149,10 +150,10 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 
 	var changes []*protos.ManifestChange
 	for _, t := range newTables {
-		changes = append(changes, makeTableCreateChange(t.ID(), level))
+		changes = append(changes, newCreateChange(t.ID(), level, w.opt.TableBuilderOptions.Compression))
 	}
 	for _, t := range cd.bot {
-		changes = append(changes, makeTableDeleteChange(t.ID()))
+		changes = append(changes, newDeleteChange(t.ID()))
 	}
 
 	if err := w.manifest.addChanges(changes, nil); err != nil {

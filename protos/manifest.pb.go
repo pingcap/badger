@@ -3,16 +3,24 @@
 
 package protos
 
-import proto "github.com/golang/protobuf/proto"
-import fmt "fmt"
-import math "math"
-
-import io "io"
+import (
+	fmt "fmt"
+	proto "github.com/golang/protobuf/proto"
+	io "io"
+	math "math"
+	math_bits "math/bits"
+)
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
+
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the proto package it is being compiled against.
+// A compilation error at this line likely means your copy of the
+// proto package needs to be updated.
+const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 
 type ManifestChange_Operation int32
 
@@ -27,6 +35,7 @@ var ManifestChange_Operation_name = map[int32]string{
 	1: "DELETE",
 	2: "MOVE_DOWN",
 }
+
 var ManifestChange_Operation_value = map[string]int32{
 	"CREATE":    0,
 	"DELETE":    1,
@@ -36,20 +45,52 @@ var ManifestChange_Operation_value = map[string]int32{
 func (x ManifestChange_Operation) String() string {
 	return proto.EnumName(ManifestChange_Operation_name, int32(x))
 }
+
 func (ManifestChange_Operation) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptorManifest, []int{2, 0}
+	return fileDescriptor_0bb23f43f7afb4c1, []int{2, 0}
 }
 
 type ManifestChangeSet struct {
 	// A set of changes that are applied atomically.
-	Changes []*ManifestChange `protobuf:"bytes,1,rep,name=changes" json:"changes,omitempty"`
-	Head    *HeadInfo         `protobuf:"bytes,2,opt,name=head" json:"head,omitempty"`
+	Changes              []*ManifestChange `protobuf:"bytes,1,rep,name=changes,proto3" json:"changes,omitempty"`
+	Head                 *HeadInfo         `protobuf:"bytes,2,opt,name=head,proto3" json:"head,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}          `json:"-"`
+	XXX_unrecognized     []byte            `json:"-"`
+	XXX_sizecache        int32             `json:"-"`
 }
 
-func (m *ManifestChangeSet) Reset()                    { *m = ManifestChangeSet{} }
-func (m *ManifestChangeSet) String() string            { return proto.CompactTextString(m) }
-func (*ManifestChangeSet) ProtoMessage()               {}
-func (*ManifestChangeSet) Descriptor() ([]byte, []int) { return fileDescriptorManifest, []int{0} }
+func (m *ManifestChangeSet) Reset()         { *m = ManifestChangeSet{} }
+func (m *ManifestChangeSet) String() string { return proto.CompactTextString(m) }
+func (*ManifestChangeSet) ProtoMessage()    {}
+func (*ManifestChangeSet) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0bb23f43f7afb4c1, []int{0}
+}
+func (m *ManifestChangeSet) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ManifestChangeSet) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ManifestChangeSet.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ManifestChangeSet) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ManifestChangeSet.Merge(m, src)
+}
+func (m *ManifestChangeSet) XXX_Size() int {
+	return m.Size()
+}
+func (m *ManifestChangeSet) XXX_DiscardUnknown() {
+	xxx_messageInfo_ManifestChangeSet.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ManifestChangeSet proto.InternalMessageInfo
 
 func (m *ManifestChangeSet) GetChanges() []*ManifestChange {
 	if m != nil {
@@ -66,15 +107,46 @@ func (m *ManifestChangeSet) GetHead() *HeadInfo {
 }
 
 type HeadInfo struct {
-	Version   uint64 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
-	LogID     uint32 `protobuf:"varint,2,opt,name=logID,proto3" json:"logID,omitempty"`
-	LogOffset uint32 `protobuf:"varint,3,opt,name=logOffset,proto3" json:"logOffset,omitempty"`
+	Version              uint64   `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	LogID                uint32   `protobuf:"varint,2,opt,name=logID,proto3" json:"logID,omitempty"`
+	LogOffset            uint32   `protobuf:"varint,3,opt,name=logOffset,proto3" json:"logOffset,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
 }
 
-func (m *HeadInfo) Reset()                    { *m = HeadInfo{} }
-func (m *HeadInfo) String() string            { return proto.CompactTextString(m) }
-func (*HeadInfo) ProtoMessage()               {}
-func (*HeadInfo) Descriptor() ([]byte, []int) { return fileDescriptorManifest, []int{1} }
+func (m *HeadInfo) Reset()         { *m = HeadInfo{} }
+func (m *HeadInfo) String() string { return proto.CompactTextString(m) }
+func (*HeadInfo) ProtoMessage()    {}
+func (*HeadInfo) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0bb23f43f7afb4c1, []int{1}
+}
+func (m *HeadInfo) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *HeadInfo) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_HeadInfo.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *HeadInfo) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_HeadInfo.Merge(m, src)
+}
+func (m *HeadInfo) XXX_Size() int {
+	return m.Size()
+}
+func (m *HeadInfo) XXX_DiscardUnknown() {
+	xxx_messageInfo_HeadInfo.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_HeadInfo proto.InternalMessageInfo
 
 func (m *HeadInfo) GetVersion() uint64 {
 	if m != nil {
@@ -98,15 +170,47 @@ func (m *HeadInfo) GetLogOffset() uint32 {
 }
 
 type ManifestChange struct {
-	Id    uint64                   `protobuf:"varint,1,opt,name=Id,proto3" json:"Id,omitempty"`
-	Op    ManifestChange_Operation `protobuf:"varint,2,opt,name=Op,proto3,enum=protos.ManifestChange_Operation" json:"Op,omitempty"`
-	Level uint32                   `protobuf:"varint,3,opt,name=Level,proto3" json:"Level,omitempty"`
+	Id                   uint64                   `protobuf:"varint,1,opt,name=Id,json=id,proto3" json:"Id,omitempty"`
+	Op                   ManifestChange_Operation `protobuf:"varint,2,opt,name=Op,json=op,proto3,enum=protos.ManifestChange_Operation" json:"Op,omitempty"`
+	Level                uint32                   `protobuf:"varint,3,opt,name=Level,json=level,proto3" json:"Level,omitempty"`
+	Compression          uint32                   `protobuf:"varint,6,opt,name=compression,proto3" json:"compression,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}                 `json:"-"`
+	XXX_unrecognized     []byte                   `json:"-"`
+	XXX_sizecache        int32                    `json:"-"`
 }
 
-func (m *ManifestChange) Reset()                    { *m = ManifestChange{} }
-func (m *ManifestChange) String() string            { return proto.CompactTextString(m) }
-func (*ManifestChange) ProtoMessage()               {}
-func (*ManifestChange) Descriptor() ([]byte, []int) { return fileDescriptorManifest, []int{2} }
+func (m *ManifestChange) Reset()         { *m = ManifestChange{} }
+func (m *ManifestChange) String() string { return proto.CompactTextString(m) }
+func (*ManifestChange) ProtoMessage()    {}
+func (*ManifestChange) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0bb23f43f7afb4c1, []int{2}
+}
+func (m *ManifestChange) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ManifestChange) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ManifestChange.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ManifestChange) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ManifestChange.Merge(m, src)
+}
+func (m *ManifestChange) XXX_Size() int {
+	return m.Size()
+}
+func (m *ManifestChange) XXX_DiscardUnknown() {
+	xxx_messageInfo_ManifestChange.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ManifestChange proto.InternalMessageInfo
 
 func (m *ManifestChange) GetId() uint64 {
 	if m != nil {
@@ -129,16 +233,50 @@ func (m *ManifestChange) GetLevel() uint32 {
 	return 0
 }
 
+func (m *ManifestChange) GetCompression() uint32 {
+	if m != nil {
+		return m.Compression
+	}
+	return 0
+}
+
 func init() {
+	proto.RegisterEnum("protos.ManifestChange_Operation", ManifestChange_Operation_name, ManifestChange_Operation_value)
 	proto.RegisterType((*ManifestChangeSet)(nil), "protos.ManifestChangeSet")
 	proto.RegisterType((*HeadInfo)(nil), "protos.HeadInfo")
 	proto.RegisterType((*ManifestChange)(nil), "protos.ManifestChange")
-	proto.RegisterEnum("protos.ManifestChange_Operation", ManifestChange_Operation_name, ManifestChange_Operation_value)
 }
+
+func init() { proto.RegisterFile("manifest.proto", fileDescriptor_0bb23f43f7afb4c1) }
+
+var fileDescriptor_0bb23f43f7afb4c1 = []byte{
+	// 312 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x6c, 0x51, 0xdd, 0x4a, 0xf3, 0x30,
+	0x18, 0x5e, 0xb2, 0xbf, 0x6f, 0xef, 0x58, 0xe9, 0x17, 0x44, 0x7a, 0x20, 0xa5, 0x14, 0x0f, 0x76,
+	0x34, 0x46, 0xbd, 0x02, 0xdd, 0x02, 0x16, 0x36, 0x0b, 0x71, 0xa8, 0x67, 0x52, 0xd7, 0xb4, 0x2b,
+	0x76, 0x4d, 0x69, 0xca, 0xae, 0xc5, 0xab, 0xf1, 0xd8, 0x43, 0x2f, 0x41, 0xea, 0x8d, 0x48, 0xd3,
+	0x56, 0x1d, 0x78, 0x94, 0x3c, 0x3f, 0x79, 0xf2, 0xbc, 0xbc, 0xa0, 0xed, 0xfd, 0x34, 0x0e, 0xb9,
+	0x2c, 0x66, 0x59, 0x2e, 0x0a, 0x41, 0x06, 0xea, 0x90, 0xf6, 0x33, 0xfc, 0x5f, 0x37, 0xca, 0x62,
+	0xe7, 0xa7, 0x11, 0xbf, 0xe5, 0x05, 0x99, 0xc3, 0x70, 0xab, 0x80, 0x34, 0x90, 0xd5, 0x9d, 0x8e,
+	0x9d, 0xd3, 0xfa, 0x95, 0x9c, 0x1d, 0x7b, 0x59, 0x6b, 0x23, 0xe7, 0xd0, 0xdb, 0x71, 0x3f, 0x30,
+	0xb0, 0x85, 0xa6, 0x63, 0x47, 0x6f, 0xed, 0xd7, 0xdc, 0x0f, 0xdc, 0x34, 0x14, 0x4c, 0xa9, 0xf6,
+	0x03, 0xfc, 0x6b, 0x19, 0x62, 0xc0, 0xf0, 0xc0, 0x73, 0x19, 0x8b, 0xd4, 0x40, 0x16, 0x9a, 0xf6,
+	0x58, 0x0b, 0xc9, 0x09, 0xf4, 0x13, 0x11, 0xb9, 0x4b, 0x15, 0x36, 0x61, 0x35, 0x20, 0x67, 0x30,
+	0x4a, 0x44, 0xe4, 0x85, 0xa1, 0xe4, 0x85, 0xd1, 0x55, 0xca, 0x0f, 0x61, 0xbf, 0x22, 0xd0, 0x8e,
+	0xbb, 0x11, 0x0d, 0xb0, 0x1b, 0x34, 0xd9, 0x38, 0x0e, 0xc8, 0x1c, 0xb0, 0x97, 0xa9, 0x4c, 0xcd,
+	0xb1, 0xfe, 0x9e, 0x67, 0xe6, 0x65, 0x3c, 0xf7, 0x8b, 0x58, 0xa4, 0x0c, 0x8b, 0xac, 0x2a, 0xb2,
+	0xe2, 0x07, 0x9e, 0x34, 0xdf, 0xf5, 0x93, 0x0a, 0x10, 0x0b, 0xc6, 0x5b, 0xb1, 0xcf, 0x72, 0x2e,
+	0x55, 0xf9, 0x81, 0xd2, 0x7e, 0x53, 0xb6, 0x03, 0xa3, 0xef, 0x20, 0x02, 0x30, 0x58, 0x30, 0x7a,
+	0xb9, 0xa1, 0x7a, 0xa7, 0xba, 0x2f, 0xe9, 0x8a, 0x6e, 0xa8, 0x8e, 0xc8, 0x04, 0x46, 0x6b, 0xef,
+	0x8e, 0x3e, 0x2e, 0xbd, 0xfb, 0x1b, 0x1d, 0x5f, 0xe9, 0x6f, 0xa5, 0x89, 0xde, 0x4b, 0x13, 0x7d,
+	0x94, 0x26, 0x7a, 0xf9, 0x34, 0x3b, 0x4f, 0xf5, 0x86, 0x2e, 0xbe, 0x02, 0x00, 0x00, 0xff, 0xff,
+	0xe7, 0x1a, 0xa1, 0xf9, 0xba, 0x01, 0x00, 0x00,
+}
+
 func (m *ManifestChangeSet) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalTo(dAtA)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
 	if err != nil {
 		return nil, err
 	}
@@ -146,39 +284,52 @@ func (m *ManifestChangeSet) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *ManifestChangeSet) MarshalTo(dAtA []byte) (int, error) {
-	var i int
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ManifestChangeSet) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
 	_ = i
 	var l int
 	_ = l
-	if len(m.Changes) > 0 {
-		for _, msg := range m.Changes {
-			dAtA[i] = 0xa
-			i++
-			i = encodeVarintManifest(dAtA, i, uint64(msg.Size()))
-			n, err := msg.MarshalTo(dAtA[i:])
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if m.Head != nil {
+		{
+			size, err := m.Head.MarshalToSizedBuffer(dAtA[:i])
 			if err != nil {
 				return 0, err
 			}
-			i += n
+			i -= size
+			i = encodeVarintManifest(dAtA, i, uint64(size))
 		}
-	}
-	if m.Head != nil {
+		i--
 		dAtA[i] = 0x12
-		i++
-		i = encodeVarintManifest(dAtA, i, uint64(m.Head.Size()))
-		n1, err := m.Head.MarshalTo(dAtA[i:])
-		if err != nil {
-			return 0, err
-		}
-		i += n1
 	}
-	return i, nil
+	if len(m.Changes) > 0 {
+		for iNdEx := len(m.Changes) - 1; iNdEx >= 0; iNdEx-- {
+			{
+				size, err := m.Changes[iNdEx].MarshalToSizedBuffer(dAtA[:i])
+				if err != nil {
+					return 0, err
+				}
+				i -= size
+				i = encodeVarintManifest(dAtA, i, uint64(size))
+			}
+			i--
+			dAtA[i] = 0xa
+		}
+	}
+	return len(dAtA) - i, nil
 }
 
 func (m *HeadInfo) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalTo(dAtA)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
 	if err != nil {
 		return nil, err
 	}
@@ -186,32 +337,41 @@ func (m *HeadInfo) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *HeadInfo) MarshalTo(dAtA []byte) (int, error) {
-	var i int
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *HeadInfo) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
 	_ = i
 	var l int
 	_ = l
-	if m.Version != 0 {
-		dAtA[i] = 0x8
-		i++
-		i = encodeVarintManifest(dAtA, i, uint64(m.Version))
-	}
-	if m.LogID != 0 {
-		dAtA[i] = 0x10
-		i++
-		i = encodeVarintManifest(dAtA, i, uint64(m.LogID))
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
 	}
 	if m.LogOffset != 0 {
-		dAtA[i] = 0x18
-		i++
 		i = encodeVarintManifest(dAtA, i, uint64(m.LogOffset))
+		i--
+		dAtA[i] = 0x18
 	}
-	return i, nil
+	if m.LogID != 0 {
+		i = encodeVarintManifest(dAtA, i, uint64(m.LogID))
+		i--
+		dAtA[i] = 0x10
+	}
+	if m.Version != 0 {
+		i = encodeVarintManifest(dAtA, i, uint64(m.Version))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
 }
 
 func (m *ManifestChange) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
 	dAtA = make([]byte, size)
-	n, err := m.MarshalTo(dAtA)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
 	if err != nil {
 		return nil, err
 	}
@@ -219,38 +379,57 @@ func (m *ManifestChange) Marshal() (dAtA []byte, err error) {
 }
 
 func (m *ManifestChange) MarshalTo(dAtA []byte) (int, error) {
-	var i int
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ManifestChange) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
 	_ = i
 	var l int
 	_ = l
-	if m.Id != 0 {
-		dAtA[i] = 0x8
-		i++
-		i = encodeVarintManifest(dAtA, i, uint64(m.Id))
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
 	}
-	if m.Op != 0 {
-		dAtA[i] = 0x10
-		i++
-		i = encodeVarintManifest(dAtA, i, uint64(m.Op))
+	if m.Compression != 0 {
+		i = encodeVarintManifest(dAtA, i, uint64(m.Compression))
+		i--
+		dAtA[i] = 0x30
 	}
 	if m.Level != 0 {
-		dAtA[i] = 0x18
-		i++
 		i = encodeVarintManifest(dAtA, i, uint64(m.Level))
+		i--
+		dAtA[i] = 0x18
 	}
-	return i, nil
+	if m.Op != 0 {
+		i = encodeVarintManifest(dAtA, i, uint64(m.Op))
+		i--
+		dAtA[i] = 0x10
+	}
+	if m.Id != 0 {
+		i = encodeVarintManifest(dAtA, i, uint64(m.Id))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
 }
 
 func encodeVarintManifest(dAtA []byte, offset int, v uint64) int {
+	offset -= sovManifest(v)
+	base := offset
 	for v >= 1<<7 {
 		dAtA[offset] = uint8(v&0x7f | 0x80)
 		v >>= 7
 		offset++
 	}
 	dAtA[offset] = uint8(v)
-	return offset + 1
+	return base
 }
 func (m *ManifestChangeSet) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	if len(m.Changes) > 0 {
@@ -263,10 +442,16 @@ func (m *ManifestChangeSet) Size() (n int) {
 		l = m.Head.Size()
 		n += 1 + l + sovManifest(uint64(l))
 	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
 	return n
 }
 
 func (m *HeadInfo) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	if m.Version != 0 {
@@ -278,10 +463,16 @@ func (m *HeadInfo) Size() (n int) {
 	if m.LogOffset != 0 {
 		n += 1 + sovManifest(uint64(m.LogOffset))
 	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
 	return n
 }
 
 func (m *ManifestChange) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	if m.Id != 0 {
@@ -293,18 +484,17 @@ func (m *ManifestChange) Size() (n int) {
 	if m.Level != 0 {
 		n += 1 + sovManifest(uint64(m.Level))
 	}
+	if m.Compression != 0 {
+		n += 1 + sovManifest(uint64(m.Compression))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
 	return n
 }
 
 func sovManifest(x uint64) (n int) {
-	for {
-		n++
-		x >>= 7
-		if x == 0 {
-			break
-		}
-	}
-	return n
+	return (math_bits.Len64(x|1) + 6) / 7
 }
 func sozManifest(x uint64) (n int) {
 	return sovManifest(uint64((x << 1) ^ uint64((int64(x) >> 63))))
@@ -324,7 +514,7 @@ func (m *ManifestChangeSet) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
+			wire |= uint64(b&0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -352,7 +542,7 @@ func (m *ManifestChangeSet) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
+				msglen |= int(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -361,6 +551,9 @@ func (m *ManifestChangeSet) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthManifest
 			}
 			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthManifest
+			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -383,7 +576,7 @@ func (m *ManifestChangeSet) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				msglen |= (int(b) & 0x7F) << shift
+				msglen |= int(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -392,6 +585,9 @@ func (m *ManifestChangeSet) Unmarshal(dAtA []byte) error {
 				return ErrInvalidLengthManifest
 			}
 			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthManifest
+			}
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
@@ -411,9 +607,13 @@ func (m *ManifestChangeSet) Unmarshal(dAtA []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthManifest
 			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthManifest
+			}
 			if (iNdEx + skippy) > l {
 				return io.ErrUnexpectedEOF
 			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
 			iNdEx += skippy
 		}
 	}
@@ -438,7 +638,7 @@ func (m *HeadInfo) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
+			wire |= uint64(b&0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -466,7 +666,7 @@ func (m *HeadInfo) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Version |= (uint64(b) & 0x7F) << shift
+				m.Version |= uint64(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -485,7 +685,7 @@ func (m *HeadInfo) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.LogID |= (uint32(b) & 0x7F) << shift
+				m.LogID |= uint32(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -504,7 +704,7 @@ func (m *HeadInfo) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.LogOffset |= (uint32(b) & 0x7F) << shift
+				m.LogOffset |= uint32(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -518,9 +718,13 @@ func (m *HeadInfo) Unmarshal(dAtA []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthManifest
 			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthManifest
+			}
 			if (iNdEx + skippy) > l {
 				return io.ErrUnexpectedEOF
 			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
 			iNdEx += skippy
 		}
 	}
@@ -545,7 +749,7 @@ func (m *ManifestChange) Unmarshal(dAtA []byte) error {
 			}
 			b := dAtA[iNdEx]
 			iNdEx++
-			wire |= (uint64(b) & 0x7F) << shift
+			wire |= uint64(b&0x7F) << shift
 			if b < 0x80 {
 				break
 			}
@@ -573,7 +777,7 @@ func (m *ManifestChange) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Id |= (uint64(b) & 0x7F) << shift
+				m.Id |= uint64(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -592,7 +796,7 @@ func (m *ManifestChange) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Op |= (ManifestChange_Operation(b) & 0x7F) << shift
+				m.Op |= ManifestChange_Operation(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -611,7 +815,26 @@ func (m *ManifestChange) Unmarshal(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Level |= (uint32(b) & 0x7F) << shift
+				m.Level |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Compression", wireType)
+			}
+			m.Compression = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowManifest
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Compression |= uint32(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -625,9 +848,13 @@ func (m *ManifestChange) Unmarshal(dAtA []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthManifest
 			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthManifest
+			}
 			if (iNdEx + skippy) > l {
 				return io.ErrUnexpectedEOF
 			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
 			iNdEx += skippy
 		}
 	}
@@ -640,6 +867,7 @@ func (m *ManifestChange) Unmarshal(dAtA []byte) error {
 func skipManifest(dAtA []byte) (n int, err error) {
 	l := len(dAtA)
 	iNdEx := 0
+	depth := 0
 	for iNdEx < l {
 		var wire uint64
 		for shift := uint(0); ; shift += 7 {
@@ -671,10 +899,8 @@ func skipManifest(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
-			return iNdEx, nil
 		case 1:
 			iNdEx += 8
-			return iNdEx, nil
 		case 2:
 			var length int
 			for shift := uint(0); ; shift += 7 {
@@ -691,78 +917,34 @@ func skipManifest(dAtA []byte) (n int, err error) {
 					break
 				}
 			}
-			iNdEx += length
 			if length < 0 {
 				return 0, ErrInvalidLengthManifest
 			}
-			return iNdEx, nil
+			iNdEx += length
 		case 3:
-			for {
-				var innerWire uint64
-				var start int = iNdEx
-				for shift := uint(0); ; shift += 7 {
-					if shift >= 64 {
-						return 0, ErrIntOverflowManifest
-					}
-					if iNdEx >= l {
-						return 0, io.ErrUnexpectedEOF
-					}
-					b := dAtA[iNdEx]
-					iNdEx++
-					innerWire |= (uint64(b) & 0x7F) << shift
-					if b < 0x80 {
-						break
-					}
-				}
-				innerWireType := int(innerWire & 0x7)
-				if innerWireType == 4 {
-					break
-				}
-				next, err := skipManifest(dAtA[start:])
-				if err != nil {
-					return 0, err
-				}
-				iNdEx = start + next
-			}
-			return iNdEx, nil
+			depth++
 		case 4:
-			return iNdEx, nil
+			if depth == 0 {
+				return 0, ErrUnexpectedEndOfGroupManifest
+			}
+			depth--
 		case 5:
 			iNdEx += 4
-			return iNdEx, nil
 		default:
 			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
 		}
+		if iNdEx < 0 {
+			return 0, ErrInvalidLengthManifest
+		}
+		if depth == 0 {
+			return iNdEx, nil
+		}
 	}
-	panic("unreachable")
+	return 0, io.ErrUnexpectedEOF
 }
 
 var (
-	ErrInvalidLengthManifest = fmt.Errorf("proto: negative length found during unmarshaling")
-	ErrIntOverflowManifest   = fmt.Errorf("proto: integer overflow")
+	ErrInvalidLengthManifest        = fmt.Errorf("proto: negative length found during unmarshaling")
+	ErrIntOverflowManifest          = fmt.Errorf("proto: integer overflow")
+	ErrUnexpectedEndOfGroupManifest = fmt.Errorf("proto: unexpected end of group")
 )
-
-func init() { proto.RegisterFile("manifest.proto", fileDescriptorManifest) }
-
-var fileDescriptorManifest = []byte{
-	// 297 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0xe2, 0xcb, 0x4d, 0xcc, 0xcb,
-	0x4c, 0x4b, 0x2d, 0x2e, 0xd1, 0x2b, 0x28, 0xca, 0x2f, 0xc9, 0x17, 0x62, 0x03, 0x53, 0xc5, 0x4a,
-	0xd9, 0x5c, 0x82, 0xbe, 0x50, 0x19, 0xe7, 0x8c, 0xc4, 0xbc, 0xf4, 0xd4, 0xe0, 0xd4, 0x12, 0x21,
-	0x03, 0x2e, 0xf6, 0x64, 0x30, 0xa7, 0x58, 0x82, 0x51, 0x81, 0x59, 0x83, 0xdb, 0x48, 0x0c, 0xa2,
-	0xab, 0x58, 0x0f, 0x55, 0x6d, 0x10, 0x4c, 0x99, 0x90, 0x0a, 0x17, 0x4b, 0x46, 0x6a, 0x62, 0x8a,
-	0x04, 0x93, 0x02, 0xa3, 0x06, 0xb7, 0x91, 0x00, 0x4c, 0xb9, 0x47, 0x6a, 0x62, 0x8a, 0x67, 0x5e,
-	0x5a, 0x7e, 0x10, 0x58, 0x56, 0x29, 0x82, 0x8b, 0x03, 0x26, 0x22, 0x24, 0xc1, 0xc5, 0x5e, 0x96,
-	0x5a, 0x54, 0x9c, 0x99, 0x9f, 0x27, 0xc1, 0xa8, 0xc0, 0xa8, 0xc1, 0x12, 0x04, 0xe3, 0x0a, 0x89,
-	0x70, 0xb1, 0xe6, 0xe4, 0xa7, 0x7b, 0xba, 0x80, 0x0d, 0xe3, 0x0d, 0x82, 0x70, 0x84, 0x64, 0xb8,
-	0x38, 0x73, 0xf2, 0xd3, 0xfd, 0xd3, 0xd2, 0x8a, 0x53, 0x4b, 0x24, 0x98, 0xc1, 0x32, 0x08, 0x01,
-	0xa5, 0x39, 0x8c, 0x5c, 0x7c, 0xa8, 0x6e, 0x13, 0xe2, 0xe3, 0x62, 0xf2, 0x4c, 0x81, 0x9a, 0xcd,
-	0xe4, 0x99, 0x22, 0x64, 0xc0, 0xc5, 0xe4, 0x5f, 0x00, 0x36, 0x93, 0xcf, 0x48, 0x01, 0xbb, 0x7f,
-	0xf4, 0xfc, 0x0b, 0x52, 0x8b, 0x12, 0x4b, 0x32, 0xf3, 0xf3, 0x82, 0x98, 0xfc, 0x0b, 0x40, 0x0e,
-	0xf1, 0x49, 0x2d, 0x4b, 0xcd, 0x81, 0x5a, 0x07, 0xe1, 0x28, 0x19, 0x71, 0x71, 0xc2, 0x95, 0x09,
-	0x71, 0x71, 0xb1, 0x39, 0x07, 0xb9, 0x3a, 0x86, 0xb8, 0x0a, 0x30, 0x80, 0xd8, 0x2e, 0xae, 0x3e,
-	0xae, 0x21, 0xae, 0x02, 0x8c, 0x42, 0xbc, 0x5c, 0x9c, 0xbe, 0xfe, 0x61, 0xae, 0xf1, 0x2e, 0xfe,
-	0xe1, 0x7e, 0x02, 0x4c, 0x4e, 0x02, 0x27, 0x1e, 0xc9, 0x31, 0x5e, 0x78, 0x24, 0xc7, 0xf8, 0xe0,
-	0x91, 0x1c, 0xe3, 0x8c, 0xc7, 0x72, 0x0c, 0x49, 0x90, 0xf0, 0x37, 0x06, 0x04, 0x00, 0x00, 0xff,
-	0xff, 0x3a, 0x13, 0x93, 0x83, 0x98, 0x01, 0x00, 0x00,
-}

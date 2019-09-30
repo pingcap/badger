@@ -374,7 +374,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 				continue
 			}
 			pruneTbls = append(pruneTbls, tbl)
-			changes = append(changes, makeTableDeleteChange(tbl.ID()))
+			changes = append(changes, newDeleteChange(tbl.ID()))
 		}
 		newTables = append(newTables, lc.tables[right:]...)
 		for i := len(newTables); i < len(lc.tables); i++ {
@@ -452,7 +452,7 @@ func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
 			return nil, err
 		}
 
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
+		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression)
 		if err != nil {
 			return nil, err
 		}
@@ -910,7 +910,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if err != nil {
 			return err
 		}
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
+		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression)
 		if err != nil {
 			log.Infof("ERROR while opening table: %v", err)
 			return err

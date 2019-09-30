@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/y"
 	"github.com/pingcap/errors"
@@ -69,7 +70,8 @@ type levelManifest struct {
 // tableManifest contains information about a specific level
 // in the LSM tree.
 type tableManifest struct {
-	Level uint8
+	Level       uint8
+	Compression options.CompressionType
 }
 
 // manifestFile holds the file pointer (and other info) about the manifest file, which is a log
@@ -100,7 +102,7 @@ const (
 func (m *Manifest) asChanges() []*protos.ManifestChange {
 	changes := make([]*protos.ManifestChange, 0, len(m.Tables))
 	for id, tm := range m.Tables {
-		changes = append(changes, makeTableCreateChange(id, int(tm.Level)))
+		changes = append(changes, newCreateChange(id, int(tm.Level), tm.Compression))
 	}
 	return changes
 }
@@ -382,7 +384,8 @@ func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error
 
 func addNewToManifest(build *Manifest, tc *protos.ManifestChange) {
 	build.Tables[tc.Id] = tableManifest{
-		Level: uint8(tc.Level),
+		Level:       uint8(tc.Level),
+		Compression: options.CompressionType(tc.Compression),
 	}
 	for len(build.Levels) <= int(tc.Level) {
 		build.Levels = append(build.Levels, levelManifest{make(map[uint64]struct{})})
@@ -435,22 +438,24 @@ func applyChangeSet(build *Manifest, changeSet *protos.ManifestChangeSet) error 
 	return nil
 }
 
-func makeTableCreateChange(id uint64, level int) *protos.ManifestChange {
+func newCreateChange(
+	id uint64, level int, c options.CompressionType) *protos.ManifestChange {
 	return &protos.ManifestChange{
-		Id:    id,
-		Op:    protos.ManifestChange_CREATE,
-		Level: uint32(level),
+		Id:          id,
+		Op:          protos.ManifestChange_CREATE,
+		Level:       uint32(level),
+		Compression: uint32(c),
 	}
 }
 
-func makeTableDeleteChange(id uint64) *protos.ManifestChange {
+func newDeleteChange(id uint64) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		Id: id,
 		Op: protos.ManifestChange_DELETE,
 	}
 }
 
-func makeTableMoveDownChange(id uint64, moveToLevel int) *protos.ManifestChange {
+func newMoveDownChange(id uint64, moveToLevel int) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		Id:    id,
 		Op:    protos.ManifestChange_MOVE_DOWN,

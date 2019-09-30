@@ -28,15 +28,24 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/coocood/badger/surf"
+	"github.com/DataDog/zstd"
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
+	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
+	"github.com/golang/snappy"
 	"github.com/pingcap/errors"
 )
 
 const fileSuffix = ".sst"
+
+// TableInterface is useful for testing.
+type TableInterface interface {
+	Smallest() []byte
+	Biggest() []byte
+	DoesNotHave(hash uint64) bool
+}
 
 // Table represents a loaded table file with the info we have about it
 type Table struct {
@@ -62,6 +71,13 @@ type Table struct {
 	bf   *bbloom.Bloom
 	hIdx *hashIndex
 	surf *surf.SuRF
+
+	compression options.CompressionType
+}
+
+// CompressionType returns the compression algorithm used for block compression.
+func (t *Table) CompressionType() options.CompressionType {
+	return t.compression
 }
 
 // Delete delete table's file from disk.
@@ -89,7 +105,7 @@ type block struct {
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error) {
+func OpenTable(fd *os.File, loadingMode options.FileLoadingMode, compression options.CompressionType) (*Table, error) {
 	fileInfo, err := fd.Stat()
 	if err != nil {
 		// It's OK to ignore fd.Close() errs in this function because we have only read
@@ -108,6 +124,7 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 		fd:          fd,
 		id:          id,
 		loadingMode: loadingMode,
+		compression: compression,
 	}
 
 	t.tableSize = int(fileInfo.Size())
@@ -266,29 +283,34 @@ func (t *Table) readIndex() {
 	t.blockEndOffsets = bytesToU32Slice(buf)
 }
 
-func (t *Table) block(idx int) (block, error) {
-	y.Assert(idx >= 0)
+func (t *Table) block(idx int) (*block, error) {
+	y.AssertTruef(idx >= 0, "idx=%d", idx)
 	if idx >= len(t.blockEndOffsets) {
-		return block{}, errors.New("block out of index")
+		return nil, errors.New("block out of index")
 	}
+
 	var startOffset int
 	if idx > 0 {
 		startOffset = int(t.blockEndOffsets[idx-1])
 	}
-	endOffset := int(t.blockEndOffsets[idx])
-	blk := block{
+	blk := &block{
 		offset: startOffset,
 	}
+	endOffset := int(t.blockEndOffsets[idx])
+	dataLen := endOffset - startOffset
 	var err error
-	blk.data, err = t.read(startOffset, endOffset-startOffset)
-	return blk, err
-}
+	if blk.data, err = t.read(blk.offset, dataLen); err != nil {
+		return nil, errors.Wrapf(err,
+			"failed to read from file: %s at offset: %d, len: %d", t.fd.Name(), blk.offset, dataLen)
+	}
 
-/*
-func (t *Table) ApproximateSizeInRange(start, end []byte) int {
-	it := t.NewIteratorNoRef(false)
-	startOff, endOff := t.approximateOffset(it, start), t.approximateOffset(it, end)
-	return endOff - startOff
+	blk.data, err = t.decompressData(blk.data)
+	if err != nil {
+		return nil, errors.Wrapf(err,
+			"failed to decode compressed data in file: %s at offset: %d, len: %d",
+			t.fd.Name(), blk.offset, dataLen)
+	}
+	return blk, nil
 }
 
 func (t *Table) approximateOffset(it *Iterator, key []byte) int {
@@ -303,7 +325,6 @@ func (t *Table) approximateOffset(it *Iterator, key []byte) int {
 	}
 	return 0
 }
-*/
 
 // HasGlobalTs returns table does set global ts.
 func (t *Table) HasGlobalTs() bool {
@@ -412,4 +433,17 @@ func (t *Table) loadToRAM() error {
 		return y.Wrapf(err, "Unable to load file in memory. Table file: %s", t.Filename())
 	}
 	return nil
+}
+
+// decompressData decompresses the given data.
+func (t *Table) decompressData(data []byte) ([]byte, error) {
+	switch t.compression {
+	case options.None:
+		return data, nil
+	case options.Snappy:
+		return snappy.Decode(nil, data)
+	case options.ZSTD:
+		return zstd.Decompress(nil, data)
+	}
+	return nil, errors.New("Unsupported compression type")
 }

@@ -169,7 +169,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)
 	f := buildTestTable(t, "k", 2)
-	t1, err := table.OpenTable(f, options.MemoryMap)
+	t1, err := table.OpenTable(f, options.MemoryMap, opt.TableBuilderOptions.Compression)
 	require.NoError(t, err)
 	defer t1.Delete()
 
@@ -185,14 +185,15 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	g := rm.Acquire()
 	defer g.Done()
 	manifest := createManifest()
-	lc, err := newLevelsController(kv, &manifest, rm, DefaultOptions.TableBuilderOptions)
+	opts := DefaultOptions.TableBuilderOptions
+	lc, err := newLevelsController(kv, &manifest, rm, opts)
 	require.NoError(t, err)
 	done = lc.fillTablesL0(&cd)
 	require.Equal(t, true, done)
 	lc.runCompactDef(0, cd, nil, g)
 
 	f = buildTestTable(t, "l", 2)
-	t2, err := table.OpenTable(f, options.MemoryMap)
+	t2, err := table.OpenTable(f, options.MemoryMap, opts.Compression)
 	require.NoError(t, err)
 	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)
@@ -226,15 +227,15 @@ func TestManifestRewrite(t *testing.T) {
 		LogOffset: 1,
 	}
 	err = mf.addChanges([]*protos.ManifestChange{
-		makeTableCreateChange(0, 0),
+		newCreateChange(0, 0, 0),
 	}, head)
 	require.NoError(t, err)
 	require.NotNil(t, mf.manifest.Head)
 
 	for i := uint64(0); i < uint64(deletionsThreshold*3); i++ {
 		ch := []*protos.ManifestChange{
-			makeTableCreateChange(i+1, 0),
-			makeTableDeleteChange(i),
+			newCreateChange(i+1, 0, 0),
+			newDeleteChange(i),
 		}
 		// Only add head for some change set to make sure head is not overwritten to nil.
 		if i < uint64(deletionsThreshold) {

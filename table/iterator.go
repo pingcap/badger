@@ -42,7 +42,7 @@ type blockIterator struct {
 	entryEndOffsets []uint32
 }
 
-func (itr *blockIterator) setBlock(b block) {
+func (itr *blockIterator) setBlock(b *block) {
 	itr.err = nil
 	itr.idx = 0
 	itr.baseKey = itr.baseKey[:0]

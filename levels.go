@@ -121,7 +121,7 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 			return nil, errors.Wrapf(err, "Opening file: %q", fname)
 		}
 
-		t, err := table.OpenTable(fd, kv.opt.TableLoadingMode)
+		t, err := table.OpenTable(fd, kv.opt.TableLoadingMode, tableManifest.Compression)
 		if err != nil {
 			closeAllTables(tables)
 			return nil, errors.Wrapf(err, "Opening table: %q", fname)
@@ -497,7 +497,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 			return
 		}
 		var tbl *table.Table
-		tbl, err = table.OpenTable(fd, lc.kv.opt.TableLoadingMode)
+		tbl, err = table.OpenTable(fd, lc.kv.opt.TableLoadingMode, lc.opt.Compression)
 		if err != nil {
 			return
 		}
@@ -537,13 +537,14 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 func buildChangeSet(cd *compactDef, newTables []*table.Table) protos.ManifestChangeSet {
 	changes := []*protos.ManifestChange{}
 	for _, table := range newTables {
-		changes = append(changes, makeTableCreateChange(table.ID(), cd.nextLevel.level))
+		changes = append(changes,
+			newCreateChange(table.ID(), cd.nextLevel.level, table.CompressionType()))
 	}
 	for _, table := range cd.top {
-		changes = append(changes, makeTableDeleteChange(table.ID()))
+		changes = append(changes, newDeleteChange(table.ID()))
 	}
 	for _, table := range cd.bot {
-		changes = append(changes, makeTableDeleteChange(table.ID()))
+		changes = append(changes, newDeleteChange(table.ID()))
 	}
 	return protos.ManifestChangeSet{Changes: changes}
 }
@@ -598,49 +599,6 @@ func (cd *compactDef) markTablesCompacting() {
 		tbl.MarkCompacting(true)
 	}
 }
-
-/*
-type rangeWithSize struct {
-	start []byte
-	end   []byte
-	sz    int
-}
-
-func (cd *compactDef) getInputBounds() []rangeWithSize {
-	bounds := make([][]byte, 0, len(cd.bot)+1)
-	for _, tbl := range cd.bot {
-		smallest := y.KeyWithTs(y.ParseKey(tbl.Smallest()), math.MaxUint64)
-		bounds = append(bounds, smallest)
-	}
-	biggest := y.KeyWithTs(y.ParseKey(cd.bot[len(cd.bot)-1].Biggest()), 0)
-	bounds = append(bounds, biggest)
-
-	ranges := make([]rangeWithSize, 0, len(bounds))
-	for i := 0; i < len(bounds)-1; i++ {
-		start, end := bounds[i], bounds[i+1]
-		sz := cd.sizeInRange(cd.top, cd.thisLevel.level, start, end)
-		sz += cd.sizeInRange(cd.bot, cd.nextLevel.level, start, end)
-		ranges = append(ranges, rangeWithSize{start: start, end: end, sz: sz})
-	}
-
-	ranges[0].start = nil
-	ranges[len(ranges)-1].end = nil
-
-	return ranges
-}
-
-func (cd *compactDef) sizeInRange(tbls []*table.Table, level int, start, end []byte) int {
-	var sz int
-	left, right := 0, len(tbls)
-	if level != 0 {
-		left, right = getTablesInRange(tbls, start, end)
-	}
-	for _, tbl := range tbls[left:right] {
-		sz += tbl.ApproximateSizeInRange(start, end)
-	}
-	return sz
-}
-*/
 
 func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 	cd.lockLevels()
@@ -755,96 +713,6 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 	return false
 }
 
-/*
-// determineSubCompactPlan returns the number of sub compactors and the estimated size of each compaction job.
-func (lc *levelsController) determineSubCompactPlan(bounds []rangeWithSize) (int, int) {
-	n := lc.kv.opt.MaxSubCompaction
-	if len(bounds) < n {
-		n = len(bounds)
-	}
-
-	var size int
-	for _, bound := range bounds {
-		size += bound.sz
-	}
-
-	const minFileFillPercent = 4.0 / 5.0
-	maxOutPutFiles := int(math.Ceil(float64(size) / minFileFillPercent / float64(lc.kv.opt.MaxTableSize)))
-	if maxOutPutFiles < n {
-		n = maxOutPutFiles
-	}
-	return n, size / n
-}
-
-func (lc *levelsController) runSubCompacts(l int, cd compactDef, limiter *rate.Limiter) ([]*table.Table, error) {
-	type jobResult struct {
-		tbls []*table.Table
-		err  error
-	}
-
-	inputBounds := cd.getInputBounds()
-	numSubCompact, avgSize := lc.determineSubCompactPlan(inputBounds)
-	if numSubCompact == 1 {
-		return lc.compactBuildTables(l, cd, limiter, nil, nil)
-	}
-
-	results := make([]jobResult, numSubCompact)
-	var wg sync.WaitGroup
-	var currSize, begin, jobNo int
-
-	for i := range inputBounds {
-		currSize += inputBounds[i].sz
-		if currSize >= avgSize || i == len(inputBounds)-1 {
-			start, end := inputBounds[begin].start, inputBounds[i].end
-
-			wg.Add(1)
-			go func(job int) {
-				newTables, err := lc.compactBuildTables(l, cd, limiter, start, end)
-				results[job].tbls = newTables
-				results[job].err = err
-				wg.Done()
-			}(jobNo)
-
-			currSize = 0
-			begin = i + 1
-			jobNo++
-		}
-	}
-
-	log.Infof("Started %d SubCompaction Jobs", jobNo)
-	wg.Wait()
-
-	var numTables int
-	for _, result := range results {
-		if result.err != nil {
-			return nil, result.err
-		}
-		numTables += len(result.tbls)
-	}
-
-	newTables := make([]*table.Table, 0, numTables)
-	for _, result := range results {
-		newTables = append(newTables, result.tbls...)
-	}
-
-	return newTables, nil
-}
-
-func (lc *levelsController) shouldStartSubCompaction(cd compactDef) bool {
-	if lc.kv.opt.MaxSubCompaction <= 1 || len(cd.bot) == 0 {
-		return false
-	}
-	if cd.thisLevel.level == 0 {
-		return true
-	}
-	if cd.thisLevel.level == 1 {
-		// Only speed up large L1 compaction.
-		return len(cd.bot)+len(cd.top) >= 10
-	}
-	return false
-}
-*/
-
 func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Limiter, guard *epoch.Guard) error {
 	timeStart := time.Now()
 
@@ -867,7 +735,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.top
 		changeSet = protos.ManifestChangeSet{Changes: []*protos.ManifestChange{
-			makeTableMoveDownChange(newTables[0].ID(), cd.nextLevel.level),
+			newMoveDownChange(newTables[0].ID(), cd.nextLevel.level),
 		}}
 		topMove = true
 	} else {
@@ -941,7 +809,7 @@ func (lc *levelsController) addLevel0Table(t *table.Table, head *protos.HeadInfo
 	// the proper order. (That means this update happens before that of some compaction which
 	// deletes the table.)
 	err := lc.kv.manifest.addChanges([]*protos.ManifestChange{
-		makeTableCreateChange(t.ID(), 0),
+		newCreateChange(t.ID(), 0, t.CompressionType()),
 	}, head)
 	if err != nil {
 		return err

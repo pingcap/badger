@@ -549,56 +549,71 @@ func TestIterate2Basic(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
-	dir, err := ioutil.TempDir("", "badger")
-	fmt.Printf("Writing to dir %s\n", dir)
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-	n := 10000
-	{
-		kv, _ := Open(getTestOptions(dir))
+	testLoad := func(t *testing.T, opt Options) {
+		dir, err := ioutil.TempDir("", "badger-test")
+		require.NoError(t, err)
+		defer os.RemoveAll(dir)
+		opt.Dir = dir
+		opt.ValueDir = dir
+		n := 10000
+
+		{
+			kv, _ := Open(getTestOptions(dir))
+			for i := 0; i < n; i++ {
+				if (i % 10000) == 0 {
+					fmt.Printf("Putting i=%d\n", i)
+				}
+				k := []byte(fmt.Sprintf("%09d", i))
+				txnSet(t, kv, k, k, 0x00)
+			}
+			kv.Close()
+		}
+
+		kv, err := Open(getTestOptions(dir))
+		require.NoError(t, err)
+		require.Equal(t, uint64(10001), kv.orc.readTs())
 		for i := 0; i < n; i++ {
 			if (i % 10000) == 0 {
-				fmt.Printf("Putting i=%d\n", i)
+				fmt.Printf("Testing i=%d\n", i)
 			}
-			k := []byte(fmt.Sprintf("%09d", i))
-			txnSet(t, kv, k, k, 0x00)
+			k := fmt.Sprintf("%09d", i)
+			require.NoError(t, kv.View(func(txn *Txn) error {
+				item, err := txn.Get([]byte(k))
+				require.NoError(t, err)
+				require.EqualValues(t, k, string(getItemValue(t, item)))
+				return nil
+			}))
 		}
+
 		kv.Close()
-	}
+		summary := kv.lc.getSummary()
 
-	kv, err := Open(getTestOptions(dir))
-	require.NoError(t, err)
-	require.Equal(t, uint64(10001), kv.orc.readTs())
-	for i := 0; i < n; i++ {
-		if (i % 10000) == 0 {
-			fmt.Printf("Testing i=%d\n", i)
+		// Check that files are garbage collected.
+		idMap := getIDMap(dir)
+		for fileID := range idMap {
+			// Check that name is in summary.filenames.
+			require.True(t, summary.fileIDs[fileID], "%d", fileID)
 		}
-		k := fmt.Sprintf("%09d", i)
-		require.NoError(t, kv.View(func(txn *Txn) error {
-			item, err := txn.Get([]byte(k))
-			require.NoError(t, err)
-			require.EqualValues(t, k, string(getItemValue(t, item)))
-			return nil
-		}))
+		require.EqualValues(t, len(idMap), len(summary.fileIDs))
 
+		var fileIDs []uint64
+		for k := range summary.fileIDs { // Map to array.
+			fileIDs = append(fileIDs, k)
+		}
+		sort.Slice(fileIDs, func(i, j int) bool { return fileIDs[i] < fileIDs[j] })
+		fmt.Printf("FileIDs: %v\n", fileIDs)
 	}
-	kv.Close()
-	summary := kv.lc.getSummary()
 
-	// Check that files are garbage collected.
-	idMap := getIDMap(dir)
-	for fileID := range idMap {
-		// Check that name is in summary.filenames.
-		require.True(t, summary.fileIDs[fileID], "%d", fileID)
-	}
-	require.EqualValues(t, len(idMap), len(summary.fileIDs))
-
-	var fileIDs []uint64
-	for k := range summary.fileIDs { // Map to array.
-		fileIDs = append(fileIDs, k)
-	}
-	sort.Slice(fileIDs, func(i, j int) bool { return fileIDs[i] < fileIDs[j] })
-	fmt.Printf("FileIDs: %v\n", fileIDs)
+	t.Run("Without compression", func(t *testing.T) {
+		opt := getTestOptions("")
+		opt.TableBuilderOptions.Compression = options.None
+		testLoad(t, opt)
+	})
+	t.Run("With compression", func(t *testing.T) {
+		opt := getTestOptions("")
+		opt.TableBuilderOptions.Compression = options.ZSTD
+		testLoad(t, opt)
+	})
 }
 
 func TestIterateDeleted(t *testing.T) {
@@ -1144,6 +1159,8 @@ func TestCompactionFilter(t *testing.T) {
 	opts.CompactionFilterFactory = func(targetLevel int, smallest, biggest []byte) CompactionFilter {
 		return &testFilter{}
 	}
+	// This case depend on level's size, so disable compression for now.
+	opts.TableBuilderOptions.Compression = options.None
 	db, err := Open(opts)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1371,14 +1388,7 @@ func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.OpenSyncedFile(filename, true)
 	require.NoError(t, err)
-	builder := table.NewExternalTableBuilder(f, nil, options.TableBuilderOptions{
-		SuRFStartLevel:      8,
-		HashUtilRatio:       0.75,
-		WriteBufferSize:     1024 * 1024,
-		MaxLevels:           7,
-		LevelSizeMultiplier: 10,
-		LogicalBloomFPR:     0.01,
-	})
+	builder := table.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions)
 
 	for i, k := range keys {
 		err := builder.Add(k, y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})

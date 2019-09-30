@@ -29,6 +29,18 @@ const (
 	MemoryMap
 )
 
+// CompressionType specifies how a block should be compressed.
+type CompressionType uint32
+
+const (
+	// None mode indicates that a block is not compressed.
+	None CompressionType = 0
+	// Snappy mode indicates that a block is compressed using Snappy algorithm.
+	Snappy CompressionType = 1
+	// ZSTD mode indicates that a block is compressed using ZSTD algorithm.
+	ZSTD CompressionType = 2
+)
+
 type TableBuilderOptions struct {
 	HashUtilRatio       float32
 	WriteBufferSize     int
@@ -36,6 +48,8 @@ type TableBuilderOptions struct {
 	MaxLevels           int
 	LevelSizeMultiplier int
 	LogicalBloomFPR     float64
+	BlockSize           int
+	Compression         CompressionType
 	SuRFStartLevel      int
 	SuRFOptions         SuRFOptions
 }
