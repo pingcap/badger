@@ -160,6 +160,7 @@ type Txn struct {
 	size         int64
 	count        int64
 	numIterators int32
+	blobCache    map[uint32]*blobFile
 }
 
 type pendingWritesIterator struct {
@@ -433,7 +434,10 @@ func (txn *Txn) Discard() {
 	}
 	txn.discarded = true
 	txn.db.orc.readMark.Done(txn.wmNode)
-
+	for _, blob := range txn.blobCache {
+		blob.decrRef()
+	}
+	txn.blobCache = nil
 	if txn.update {
 		txn.db.orc.decrRef()
 	}

@@ -338,17 +338,16 @@ func ParseFileID(name string) (uint64, bool) {
 	}
 	//	suffix := name[len(fileSuffix):]
 	name = strings.TrimSuffix(name, fileSuffix)
-	id, err := strconv.Atoi(name)
+	id, err := strconv.ParseUint(name, 16, 64)
 	if err != nil {
 		return 0, false
 	}
-	y.Assert(id >= 0)
-	return uint64(id), true
+	return id, true
 }
 
 // IDToFilename does the inverse of ParseFileID
 func IDToFilename(id uint64) string {
-	return fmt.Sprintf("%06d", id) + fileSuffix
+	return fmt.Sprintf("%08x", id) + fileSuffix
 }
 
 // NewFilename should be named TableFilepath -- it combines the dir with the ID to make a table

@@ -279,13 +279,21 @@ func (lc *levelsController) hasOverlapTable(cd compactDef) bool {
 type DiscardStats struct {
 	numSkips     int64
 	skippedBytes int64
+	ptrs         []blobPointer
 }
 
 func (ds *DiscardStats) collect(vs y.ValueStruct) {
 	if vs.Meta&bitValuePointer > 0 {
-		ds.skippedBytes += int64(vs.EncodedSize())
+		var bp blobPointer
+		bp.decode(vs.Value)
+		ds.ptrs = append(ds.ptrs, bp)
+		ds.skippedBytes += int64(bp.length)
 	}
 	ds.numSkips++
+}
+
+func (ds *DiscardStats) String() string {
+	return fmt.Sprintf("numSkips:%d, skippedBytes:%d", ds.numSkips, ds.skippedBytes)
 }
 
 func shouldFinishFile(key, lastKey []byte, guard *Guard, currentSize, maxSize int64) bool {
@@ -514,7 +522,10 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		return
 	}
 	sortTables(newTables)
-	log.Infof("Discard stats: %v", discardStats)
+	log.Infof("Discard stats: %s", discardStats)
+	if len(discardStats.ptrs) > 0 {
+		lc.kv.blobManger.discardCh <- discardStats
+	}
 	assertTablesOrder(newTables)
 	return
 }

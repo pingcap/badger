@@ -91,6 +91,10 @@ func (l *writer) flush() error {
 	return nil
 }
 
+func (l *writer) Offset() int64 {
+	return l.fileOff + l.bufOff
+}
+
 func (l *BufferedWriter) Flush() error {
 	return l.flush()
 }

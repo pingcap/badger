@@ -82,6 +82,8 @@ type DB struct {
 	metrics  *y.MetricsSet
 	lsmSize  int64
 	vlogSize int64
+
+	blobManger blobManager
 }
 
 const (
@@ -279,6 +281,9 @@ func Open(opt Options) (db *DB, err error) {
 
 	// newLevelsController potentially loads files in directory.
 	if db.lc, err = newLevelsController(db, &manifest, opt.TableBuilderOptions); err != nil {
+		return nil, err
+	}
+	if err = db.blobManger.Open(db, opt); err != nil {
 		return nil, err
 	}
 
@@ -721,7 +726,7 @@ func arenaSize(opt Options) int64 {
 }
 
 // WriteLevel0Table flushes memtable. It drops deleteValues.
-func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
+func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File, bb *blobFileBuilder) error {
 	iter := s.NewIterator(false)
 	defer iter.Close()
 	b := table.NewTableBuilder(f, db.limiter, 0, db.opt.TableBuilderOptions)
@@ -730,6 +735,14 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 	for iter.Rewind(); iter.Valid(); iter.Next() {
 		key := iter.Key()
 		value := iter.Value()
+		if bb != nil && len(value.Value) > db.opt.ValueThreshold {
+			bp, err := bb.append(value.Value)
+			if err != nil {
+				return err
+			}
+			value.Meta |= bitValuePointer
+			value.Value = bp
+		}
 		if err := b.Add(key, value); err != nil {
 			return err
 		}
@@ -784,12 +797,18 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if err != nil {
 			return y.Wrap(err)
 		}
-
+		var bb *blobFileBuilder
+		if db.opt.ValueThreshold > 0 {
+			bb, err = newBlobFileBuilder(fileID, db.opt.Dir, db.opt.TableBuilderOptions.WriteBufferSize)
+			if err != nil {
+				return y.Wrap(err)
+			}
+		}
 		// Don't block just to sync the directory entry.
 		dirSyncCh := make(chan error)
 		go func() { dirSyncCh <- syncDir(db.opt.Dir) }()
 
-		err = db.writeLevel0Table(ft.mt, fd)
+		err = db.writeLevel0Table(ft.mt, fd, bb)
 		dirSyncErr := <-dirSyncCh
 		if err != nil {
 			log.Errorf("ERROR while writing to level 0: %v", err)
@@ -798,6 +817,17 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if dirSyncErr != nil {
 			log.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
 			return err
+		}
+		if db.opt.ValueThreshold > 0 {
+			bf, err1 := bb.finish()
+			if err1 != nil {
+				return err1
+			}
+			log.Infof("build L0 blob:%d size:%d", bf.fid, bf.fileSize)
+			err1 = db.blobManger.addFile(bf)
+			if err1 != nil {
+				return err1
+			}
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()

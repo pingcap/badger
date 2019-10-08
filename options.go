@@ -54,6 +54,7 @@ type Options struct {
 	// The following affect all levels of LSM tree.
 	MaxTableSize int64 // Each table (or file) is at most this size.
 	// If value size >= this threshold, only store value offsets in tree.
+	// If set to 0, all values are stored in SST.
 	ValueThreshold int
 	// Maximum number of tables to keep in memory, before stalling.
 	NumMemtables int
