@@ -156,12 +156,8 @@ func TestConcurrentWrite(t *testing.T) {
 		wg.Wait()
 
 		t.Log("Starting iteration")
-
-		opt := IteratorOptions{}
-		opt.Reverse = false
-
 		txn := db.NewTransaction(true)
-		it := txn.NewIterator(opt)
+		it := txn.NewIterator(DefaultIteratorOptions)
 		defer it.Close()
 		var i, j int
 		for it.Rewind(); it.Valid(); it.Next() {
@@ -514,10 +510,8 @@ func TestIterate2Basic(t *testing.T) {
 			txnSet(t, db, bkey(i), bval(i), byte(i%127))
 		}
 
-		opt := IteratorOptions{}
-
 		txn := db.NewTransaction(false)
-		it := txn.NewIterator(opt)
+		it := txn.NewIterator(DefaultIteratorOptions)
 		{
 			var count int
 			rewind := true
@@ -614,9 +608,8 @@ func TestIterateDeleted(t *testing.T) {
 		txnSet(t, db, []byte("Key1"), []byte("Value1"), 0x00)
 		txnSet(t, db, []byte("Key2"), []byte("Value2"), 0x00)
 
-		iterOpt := DefaultIteratorOptions
 		txn := db.NewTransaction(false)
-		idxIt := txn.NewIterator(iterOpt)
+		idxIt := txn.NewIterator(DefaultIteratorOptions)
 		defer idxIt.Close()
 
 		count := 0
@@ -634,8 +627,7 @@ func TestIterateDeleted(t *testing.T) {
 
 		t.Run(fmt.Sprintf("Prefetch=%t", false), func(t *testing.T) {
 			txn := db.NewTransaction(false)
-			iterOpt = DefaultIteratorOptions
-			idxIt = txn.NewIterator(iterOpt)
+			idxIt = txn.NewIterator(DefaultIteratorOptions)
 
 			var estSize int64
 			var idxKeys []string
@@ -745,10 +737,9 @@ func TestSetIfAbsentAsync(t *testing.T) {
 	kv, err = Open(getTestOptions(dir))
 	require.NoError(t, err)
 
-	opt := DefaultIteratorOptions
 	txn := kv.NewTransaction(false)
 	var count int
-	it := txn.NewIterator(opt)
+	it := txn.NewIterator(DefaultIteratorOptions)
 	{
 		t.Log("Starting first basic iteration")
 		for it.Rewind(); it.Valid(); it.Next() {
@@ -963,8 +954,7 @@ func TestWriteDeadlock(t *testing.T) {
 	count = 0
 	fmt.Println("\nWrites done. Iteration and updates starting...")
 	err = db.Update(func(txn *Txn) error {
-		opt := DefaultIteratorOptions
-		it := txn.NewIterator(opt)
+		it := txn.NewIterator(DefaultIteratorOptions)
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
@@ -1745,12 +1735,10 @@ func ExampleTxn_NewIterator() {
 		log.Fatal(err)
 	}
 
-	opt := DefaultIteratorOptions
-
 	// Iterate over 1000 items
 	var count int
 	err = db.View(func(txn *Txn) error {
-		it := txn.NewIterator(opt)
+		it := txn.NewIterator(DefaultIteratorOptions)
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			count++

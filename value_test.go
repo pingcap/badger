@@ -242,12 +242,9 @@ func TestValueGC3(t *testing.T) {
 	require.NoError(t, txn.Commit())
 
 	// Start an iterator to keys in the first value log file
-	itOpt := IteratorOptions{
-		Reverse: false,
-	}
 
 	txn = kv.NewTransaction(true)
-	it := txn.NewIterator(itOpt)
+	it := txn.NewIterator(IteratorOptions{})
 	defer it.Close()
 	// Walk a few keys
 	it.Rewind()
