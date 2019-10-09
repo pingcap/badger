@@ -244,7 +244,7 @@ func TestMergeIteratorDuplicate(t *testing.T) {
 	it1 := newSimpleIterator([]string{"0", "1", "2"}, []string{"0", "1", "2"}, false)
 	it2 := newSimpleIterator([]string{"1"}, []string{"1"}, false)
 	it3 := newSimpleIterator([]string{"2"}, []string{"2"}, false)
-	it := NewMergeIterator([]y.Iterator{ it3, it2, it1 }, false)
+	it := NewMergeIterator([]y.Iterator{it3, it2, it1}, false)
 
 	var cnt int
 	for it.Rewind(); it.Valid(); it.Next() {

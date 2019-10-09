@@ -340,10 +340,9 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 			}
 			// Fulfill from cache.
 			item.meta = e.meta
-			item.val = e.Value
+			item.vptr = e.Value
 			item.userMeta = e.UserMeta
 			item.key = key
-			item.status = prefetched
 			item.version = txn.readTs
 			// We probably don't need to set db on item here.
 			return item, nil

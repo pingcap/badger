@@ -636,7 +636,6 @@ func TestIteratorAllVersionsWithDeleted(t *testing.T) {
 
 		opts := DefaultIteratorOptions
 		opts.AllVersions = true
-		opts.PrefetchValues = false
 
 		// Verify that deleted shows up when AllVersions is set.
 		err = db.View(func(txn *Txn) error {
@@ -677,7 +676,6 @@ func TestIteratorAllVersionsWithDeleted2(t *testing.T) {
 
 		opts := DefaultIteratorOptions
 		opts.AllVersions = true
-		opts.PrefetchValues = false
 
 		// Verify that deleted shows up when AllVersions is set.
 		err := db.View(func(txn *Txn) error {

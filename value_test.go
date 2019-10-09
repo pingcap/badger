@@ -243,9 +243,7 @@ func TestValueGC3(t *testing.T) {
 
 	// Start an iterator to keys in the first value log file
 	itOpt := IteratorOptions{
-		PrefetchValues: false,
-		PrefetchSize:   0,
-		Reverse:        false,
+		Reverse: false,
 	}
 
 	txn = kv.NewTransaction(true)

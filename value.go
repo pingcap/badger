@@ -420,7 +420,6 @@ func (vlog *valueLog) deleteMoveKeysFor(fid uint32) {
 	err := db.View(func(txn *Txn) error {
 		opt := DefaultIteratorOptions
 		opt.internalAccess = true
-		opt.PrefetchValues = false
 		itr := txn.NewIterator(opt)
 		defer itr.Close()
 
@@ -1007,7 +1006,7 @@ func (vlog *valueLog) doRunGC(lf *logFile, discardRatio float64) (err error) {
 
 	// Pick a random start point for the log.
 	skipFirstM := float64(rand.Int63n(fi.Size())) // Pick a random starting location.
-	skipFirstM -= windowSize                          // Avoid hitting EOF by moving back by window.
+	skipFirstM -= windowSize                      // Avoid hitting EOF by moving back by window.
 	skipFirstM /= float64(mi)                     // Convert to MBs.
 	log.Infof("Skip first %5.2f MB of file of size: %d MB", skipFirstM, fi.Size()/mi)
 	var skipped float64

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"sync"
 	"sync/atomic"
 
 	"github.com/coocood/badger/table"
@@ -29,25 +28,15 @@ import (
 	"github.com/dgryski/go-farm"
 )
 
-type prefetchStatus = uint32
-
-const (
-	prefetched prefetchStatus = 1
-	noPrefetch prefetchStatus = 2
-)
-
 // Item is returned during iteration. Both the Key() and Value() output is only valid until
 // iterator.Next() is called.
 type Item struct {
-	status   prefetchStatus
 	err      error
-	wg       sync.WaitGroup
 	db       *DB
 	key      []byte
 	vptr     []byte
 	meta     byte // We need to store meta to know about bitValuePointer.
 	userMeta []byte
-	val      []byte
 	slice    *y.Slice
 	next     *Item
 	version  uint64
@@ -95,23 +84,29 @@ func (item *Item) IsEmpty() bool {
 // instead, or copy it yourself. Value might change once discard or commit is called.
 // Use ValueCopy if you want to do a Set after Get.
 func (item *Item) Value() ([]byte, error) {
-	if item.getStatus() == noPrefetch {
-		if (item.meta & bitValuePointer) == 0 {
-			return item.vptr, nil
-		}
+	if (item.meta & bitValuePointer) == 0 {
+		return item.vptr, nil
+	}
+	for {
 		var vp valuePointer
 		vp.Decode(item.vptr)
-		return item.db.vlog.Read(vp, item.slice)
+		if item.slice == nil {
+			item.slice = new(y.Slice)
+		}
+		val, err := item.db.vlog.Read(vp, item.slice)
+		if err != ErrRetry {
+			return val, err
+		}
+		// The value pointer is pointing to a deleted value log. Look for the move key and read that
+		// instead.
+		key := y.KeyWithTs(item.Key(), item.Version())
+		moveKey := append(badgerMove, key...)
+		vs := item.db.get(moveKey, nil)
+		if vs.Version != item.Version() {
+			return nil, nil
+		}
+		item.vptr = vs.Value
 	}
-	item.wg.Wait()
-	if item.getStatus() == prefetched {
-		return item.val, item.err
-	}
-	return item.yieldItemValue(nil)
-}
-
-func (item *Item) getStatus() uint32 {
-	return atomic.LoadUint32(&item.status)
 }
 
 // ValueCopy returns a copy of the value of the item from the value log, writing it to dst slice.
@@ -121,12 +116,11 @@ func (item *Item) getStatus() uint32 {
 // This function is useful in long running iterate/update transactions to avoid a write deadlock.
 // See Github issue: https://github.com/coocood/badger/issues/315
 func (item *Item) ValueCopy(dst []byte) ([]byte, error) {
-	item.wg.Wait()
-	if item.getStatus() == prefetched {
-		return y.SafeCopy(dst, item.val), item.err
+	buf, err := item.Value()
+	if err != nil {
+		return nil, err
 	}
-	buf, err := item.yieldItemValue(dst)
-	return buf, err
+	return y.SafeCopy(dst, buf), nil
 }
 
 func (item *Item) hasValue() bool {
@@ -140,50 +134,6 @@ func (item *Item) hasValue() bool {
 // IsDeleted returns true if item contains deleted or expired value.
 func (item *Item) IsDeleted() bool {
 	return isDeleted(item.meta)
-}
-
-func (item *Item) yieldItemValue(dst []byte) ([]byte, error) {
-	if !item.hasValue() {
-		return nil, nil
-	}
-
-	if (item.meta & bitValuePointer) == 0 {
-		dst = append(dst, item.vptr...)
-		return dst, nil
-	}
-
-	if item.slice == nil {
-		item.slice = new(y.Slice)
-	}
-
-	var vp valuePointer
-	vp.Decode(item.vptr)
-	result, err := item.db.vlog.Read(vp, item.slice)
-	if err != ErrRetry {
-		return result, err
-	}
-
-	// The value pointer is pointing to a deleted value log. Look for the move key and read that
-	// instead.
-	key := y.KeyWithTs(item.Key(), item.Version())
-	moveKey := append(badgerMove, key...)
-	vs := item.db.get(moveKey, nil)
-	if vs.Version != item.Version() {
-		return nil, nil
-	}
-	item.vptr = vs.Value
-	item.meta |= vs.Meta // This meta would only be about value pointer.
-	return item.yieldItemValue(nil)
-}
-
-func (item *Item) prefetchValue() {
-	val, err := item.yieldItemValue(nil)
-	item.err = err
-	atomic.StoreUint32(&item.status, prefetched)
-	if val == nil {
-		return
-	}
-	item.val = val
 }
 
 // EstimatedSize returns approximate size of the key-value pair.
@@ -209,38 +159,6 @@ func (item *Item) UserMeta() []byte {
 	return item.userMeta
 }
 
-// TODO: Switch this to use linked list container in Go.
-type list struct {
-	head *Item
-	tail *Item
-}
-
-func (l *list) push(i *Item) {
-	i.next = nil
-	if l.tail == nil {
-		l.head = i
-		l.tail = i
-		return
-	}
-	l.tail.next = i
-	l.tail = i
-}
-
-func (l *list) pop() *Item {
-	if l.head == nil {
-		return nil
-	}
-	i := l.head
-	if l.head == l.tail {
-		l.tail = nil
-		l.head = nil
-	} else {
-		l.head = i.next
-	}
-	i.next = nil
-	return i
-}
-
 // IteratorOptions is used to set options when iterating over Badger key-value
 // stores.
 //
@@ -248,12 +166,8 @@ func (l *list) pop() *Item {
 // should work for most applications. Consider using that as a starting point
 // before customizing it for your own needs.
 type IteratorOptions struct {
-	// Indicates whether we should prefetch values during iteration and store them.
-	PrefetchValues bool
-	// How many KV pairs to prefetch while iterating. Valid only if PrefetchValues is true.
-	PrefetchSize int
-	Reverse      bool // Direction of iteration. False is forward, true is backward.
-	AllVersions  bool // Fetch all valid versions of the same key.
+	Reverse     bool // Direction of iteration. False is forward, true is backward.
+	AllVersions bool // Fetch all valid versions of the same key.
 
 	// StartKey and EndKey are used to prune non-overlapping table iterators.
 	// They are not boundary limits.
@@ -357,10 +271,8 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 
 // DefaultIteratorOptions contains default options when iterating over Badger key-value stores.
 var DefaultIteratorOptions = IteratorOptions{
-	PrefetchValues: true,
-	PrefetchSize:   100,
-	Reverse:        false,
-	AllVersions:    false,
+	Reverse:     false,
+	AllVersions: false,
 }
 
 // Iterator helps iterating over the KV pairs in a lexicographically sorted order.
@@ -373,15 +285,12 @@ type Iterator struct {
 	item  *Item
 	itBuf Item
 	vs    y.ValueStruct
-	data  list
-	waste list
 
 	lastKey []byte // Used to skip over multiple versions of the same key.
 }
 
 // NewIterator returns a new iterator. Depending upon the options, either only keys, or both
 // key-value pairs would be fetched. The keys are returned in lexicographically sorted order.
-// Using prefetch is highly recommended if you're doing a long running iteration.
 // Avoid long running iterations in update transactions.
 func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	atomic.AddInt32(&txn.numIterators, 1)
@@ -418,19 +327,8 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	}
 	res.itBuf.db = txn.db
 	res.itBuf.txn = txn
-	if !opt.PrefetchValues {
-		res.itBuf.status = noPrefetch
-		res.itBuf.slice = new(y.Slice)
-	}
+	res.itBuf.slice = new(y.Slice)
 	return res
-}
-
-func (it *Iterator) newItem() *Item {
-	item := it.waste.pop()
-	if item == nil {
-		item = &Item{slice: new(y.Slice), db: it.txn.db, txn: it.txn}
-	}
-	return item
 }
 
 // Item returns pointer to the current key-value pair.
@@ -457,18 +355,6 @@ func (it *Iterator) ValidForPrefix(prefix []byte) bool {
 func (it *Iterator) Close() {
 	it.iitr.Close()
 
-	// It is important to wait for the fill goroutines to finish. Otherwise, we might leave zombie
-	// goroutines behind, which are waiting to acquire file read locks after DB has been closed.
-	waitFor := func(l list) {
-		item := l.pop()
-		for item != nil {
-			item.wg.Wait()
-			item = l.pop()
-		}
-	}
-	waitFor(it.waste)
-	waitFor(it.data)
-
 	// TODO: We could handle this error.
 	_ = it.txn.db.vlog.decrIteratorCount()
 	atomic.AddInt32(&it.txn.numIterators, -1)
@@ -477,34 +363,23 @@ func (it *Iterator) Close() {
 // Next would advance the iterator by one. Always check it.Valid() after a Next()
 // to ensure you have access to a valid it.Item().
 func (it *Iterator) Next() {
-	if !it.opt.Reverse && !it.opt.PrefetchValues {
+	if !it.opt.Reverse {
 		it.iitr.Next()
-		it.parseItemForwardNoPrefetch()
+		it.parseItemForward()
 		return
 	}
-
-	// Reuse current item
-	if it.opt.PrefetchValues {
-		it.item.wg.Wait() // Just cleaner to wait before pushing to avoid doing ref counting.
-	}
-	it.waste.push(it.item)
-
-	// Set next item to current
-	it.item = it.data.pop()
-
-	for it.iitr.Valid() {
-		if it.parseItem() {
-			// parseItem calls one extra next.
-			// This is used to deal with the complexity of reverse iteration.
-			break
-		}
-	}
+	it.parseItemReverse()
+	return
 }
 
-func (it *Iterator) parseItemForwardNoPrefetch() {
+func (it *Iterator) parseItemForward() {
 	iitr := it.iitr
 	for iitr.Valid() {
 		keyWithTS := iitr.Key()
+		if !it.opt.internalAccess && keyWithTS[0] == '!' {
+			iitr.Next()
+			continue
+		}
 		version := y.ParseTs(keyWithTS)
 		if version > it.readTs {
 			iitr.Next()
@@ -531,7 +406,6 @@ func (it *Iterator) parseItemForwardNoPrefetch() {
 		item.meta = it.vs.Meta
 		item.userMeta = it.vs.UserMeta
 		item.vptr = it.vs.Value
-		item.val = nil
 		it.item = item
 		return
 	}
@@ -554,20 +428,16 @@ func isDeleted(meta byte) bool {
 }
 
 func (it *Iterator) setItem(item *Item) {
-	if it.item == nil {
-		it.item = item
-	} else {
-		it.data.push(item)
-	}
+	it.item = item
 }
 
-// parseItem is a complex function because it needs to handle both forward and reverse iteration
+// parseItemReverseOnce handles reverse iteration
 // implementation. We store keys such that their versions are sorted in descending order. This makes
-// forward iteration efficient, but revese iteration complicated. This tradeoff is better because
+// forward iteration efficient, but reverse iteration complicated. This tradeoff is better because
 // forward iteration is more common than reverse.
 //
 // This function advances the iterator.
-func (it *Iterator) parseItem() bool {
+func (it *Iterator) parseItemReverseOnce() bool {
 	mi := it.iitr
 	key := mi.Key()
 
@@ -588,26 +458,11 @@ func (it *Iterator) parseItem() bool {
 		// Return deleted or expired values also, otherwise user can't figure out
 		// whether the key was deleted.
 		it.iitr.FillValue(&it.vs)
-		item := it.newItem()
+		item := &it.itBuf
 		it.fill(item)
 		it.setItem(item)
 		mi.Next()
 		return true
-	}
-
-	// If iterating in forward direction, then just checking the last key against current key would
-	// be sufficient.
-	if !it.opt.Reverse {
-		if y.SameKey(it.lastKey, key) {
-			mi.Next()
-			return false
-		}
-		// Only track in forward direction.
-		// We should update lastKey as soon as we find a different key in our snapshot.
-		// Consider keys: a 5, b 7 (del), b 5. When iterating, lastKey = a.
-		// Then we see b 7, which is deleted. If we don't store lastKey = b, we'll then return b 5,
-		// which is wrong. Therefore, update lastKey here.
-		it.lastKey = y.SafeCopy(it.lastKey, mi.Key())
 	}
 
 FILL:
@@ -618,13 +473,13 @@ FILL:
 		return false
 	}
 
-	item := it.newItem()
+	item := &it.itBuf
 	it.fill(item)
 	// fill item based on current cursor position. All Next calls have returned, so reaching here
 	// means no Next was called.
 
-	mi.Next()                           // Advance but no fill item yet.
-	if !it.opt.Reverse || !mi.Valid() { // Forward direction, or invalid.
+	mi.Next() // Advance but no fill item yet.
+	if !mi.Valid() {
 		it.setItem(item)
 		return true
 	}
@@ -649,32 +504,14 @@ func (it *Iterator) fill(item *Item) {
 	item.version = y.ParseTs(key)
 	item.key = y.SafeCopy(item.key, y.ParseKey(key))
 	item.vptr = y.SafeCopy(item.vptr, it.vs.Value)
-	item.val = nil
-	if it.opt.PrefetchValues {
-		item.wg.Add(1)
-		go func() {
-			// FIXME we are not handling errors here.
-			item.prefetchValue()
-			item.wg.Done()
-		}()
-	}
 }
 
-func (it *Iterator) prefetch() {
-	prefetchSize := 2
-	if it.opt.PrefetchValues && it.opt.PrefetchSize > 1 {
-		prefetchSize = it.opt.PrefetchSize
-	}
-
-	i := it.iitr
-	var count int
+func (it *Iterator) parseItemReverse() {
 	it.item = nil
-	for i.Valid() {
-		if !it.parseItem() {
-			continue
-		}
-		count++
-		if count == prefetchSize {
+	for it.iitr.Valid() {
+		if it.parseItemReverseOnce() {
+			// parseItemReverseOnce calls one extra next.
+			// This is used to deal with the complexity of reverse iteration.
 			break
 		}
 	}
@@ -685,30 +522,21 @@ func (it *Iterator) prefetch() {
 // iterating backwards.
 func (it *Iterator) Seek(key []byte) {
 	it.lastKey = it.lastKey[:0]
-	if !it.opt.Reverse && !it.opt.PrefetchValues {
+	if !it.opt.Reverse {
 		key = y.KeyWithTs(key, it.txn.readTs)
 		it.iitr.Seek(key)
-		it.parseItemForwardNoPrefetch()
+		it.parseItemForward()
 		return
-	}
-	for i := it.data.pop(); i != nil; i = it.data.pop() {
-		i.wg.Wait()
-		it.waste.push(i)
 	}
 
 	if len(key) == 0 {
 		it.iitr.Rewind()
-		it.prefetch()
+		it.parseItemReverse()
 		return
 	}
-
-	if !it.opt.Reverse {
-		key = y.KeyWithTs(key, it.txn.readTs)
-	} else {
-		key = y.KeyWithTs(key, 0)
-	}
+	key = y.KeyWithTs(key, 0)
 	it.iitr.Seek(key)
-	it.prefetch()
+	it.parseItemReverse()
 }
 
 // Rewind would rewind the iterator cursor all the way to zero-th position, which would be the
@@ -716,18 +544,11 @@ func (it *Iterator) Seek(key []byte) {
 // whether the cursor started with a Seek().
 func (it *Iterator) Rewind() {
 	it.lastKey = it.lastKey[:0]
-	if !it.opt.Reverse && !it.opt.PrefetchValues {
+	if !it.opt.Reverse {
 		it.iitr.Rewind()
-		it.parseItemForwardNoPrefetch()
+		it.parseItemForward()
 		return
 	}
-	i := it.data.pop()
-	for i != nil {
-		i.wg.Wait() // Just cleaner to wait before pushing. No ref counting needed.
-		it.waste.push(i)
-		i = it.data.pop()
-	}
-
 	it.iitr.Rewind()
-	it.prefetch()
+	it.parseItemReverse()
 }

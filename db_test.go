@@ -159,8 +159,6 @@ func TestConcurrentWrite(t *testing.T) {
 
 		opt := IteratorOptions{}
 		opt.Reverse = false
-		opt.PrefetchSize = 10
-		opt.PrefetchValues = true
 
 		txn := db.NewTransaction(true)
 		it := txn.NewIterator(opt)
@@ -222,6 +220,7 @@ func TestGet(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, "val3", getItemValue(t, item))
 		require.Equal(t, []byte{0x01}, item.UserMeta())
+		txn.Discard()
 
 		longVal := make([]byte, 1000)
 		txnSet(t, db, []byte("key1"), y.Copy(longVal), 0x00)
@@ -516,8 +515,6 @@ func TestIterate2Basic(t *testing.T) {
 		}
 
 		opt := IteratorOptions{}
-		opt.PrefetchValues = true
-		opt.PrefetchSize = 10
 
 		txn := db.NewTransaction(false)
 		it := txn.NewIterator(opt)
@@ -618,7 +615,6 @@ func TestIterateDeleted(t *testing.T) {
 		txnSet(t, db, []byte("Key2"), []byte("Value2"), 0x00)
 
 		iterOpt := DefaultIteratorOptions
-		iterOpt.PrefetchValues = false
 		txn := db.NewTransaction(false)
 		idxIt := txn.NewIterator(iterOpt)
 		defer idxIt.Close()
@@ -636,29 +632,26 @@ func TestIterateDeleted(t *testing.T) {
 		require.Equal(t, 2, count)
 		require.NoError(t, txn2.Commit())
 
-		for _, prefetch := range [...]bool{true, false} {
-			t.Run(fmt.Sprintf("Prefetch=%t", prefetch), func(t *testing.T) {
-				txn := db.NewTransaction(false)
-				iterOpt = DefaultIteratorOptions
-				iterOpt.PrefetchValues = prefetch
-				idxIt = txn.NewIterator(iterOpt)
+		t.Run(fmt.Sprintf("Prefetch=%t", false), func(t *testing.T) {
+			txn := db.NewTransaction(false)
+			iterOpt = DefaultIteratorOptions
+			idxIt = txn.NewIterator(iterOpt)
 
-				var estSize int64
-				var idxKeys []string
-				for idxIt.Seek(prefix); idxIt.Valid(); idxIt.Next() {
-					item := idxIt.Item()
-					key := item.Key()
-					estSize += item.EstimatedSize()
-					if !bytes.HasPrefix(key, prefix) {
-						break
-					}
-					idxKeys = append(idxKeys, string(key))
-					t.Logf("%+v\n", idxIt.Item())
+			var estSize int64
+			var idxKeys []string
+			for idxIt.Seek(prefix); idxIt.Valid(); idxIt.Next() {
+				item := idxIt.Item()
+				key := item.Key()
+				estSize += item.EstimatedSize()
+				if !bytes.HasPrefix(key, prefix) {
+					break
 				}
-				require.Equal(t, 0, len(idxKeys))
-				require.Equal(t, int64(0), estSize)
-			})
-		}
+				idxKeys = append(idxKeys, string(key))
+				t.Logf("%+v\n", idxIt.Item())
+			}
+			require.Equal(t, 0, len(idxKeys))
+			require.Equal(t, int64(0), estSize)
+		})
 	})
 }
 
@@ -723,50 +716,6 @@ func TestBigKeyValuePairs(t *testing.T) {
 			require.Equal(t, ErrKeyNotFound, err)
 			return nil
 		}))
-	})
-}
-
-func TestIteratorPrefetchSize(t *testing.T) {
-	runBadgerTest(t, nil, func(t *testing.T, db *DB) {
-
-		bkey := func(i int) []byte {
-			return []byte(fmt.Sprintf("%09d", i))
-		}
-		bval := func(i int) []byte {
-			return []byte(fmt.Sprintf("%025d", i))
-		}
-
-		n := 100
-		for i := 0; i < n; i++ {
-			// if (i % 10) == 0 {
-			// 	t.Logf("Put i=%d\n", i)
-			// }
-			txnSet(t, db, bkey(i), bval(i), byte(i%127))
-		}
-
-		getIteratorCount := func(prefetchSize int) int {
-			opt := IteratorOptions{}
-			opt.PrefetchValues = true
-			opt.PrefetchSize = prefetchSize
-
-			var count int
-			txn := db.NewTransaction(false)
-			it := txn.NewIterator(opt)
-			{
-				t.Log("Starting first basic iteration")
-				for it.Rewind(); it.Valid(); it.Next() {
-					count++
-				}
-				require.EqualValues(t, n, count)
-			}
-			return count
-		}
-
-		var sizes = []int{-10, 0, 1, 10}
-		for _, size := range sizes {
-			c := getIteratorCount(size)
-			require.Equal(t, 100, c)
-		}
 	})
 }
 
@@ -1015,7 +964,6 @@ func TestWriteDeadlock(t *testing.T) {
 	fmt.Println("\nWrites done. Iteration and updates starting...")
 	err = db.Update(func(txn *Txn) error {
 		opt := DefaultIteratorOptions
-		opt.PrefetchValues = false
 		it := txn.NewIterator(opt)
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
@@ -1798,7 +1746,6 @@ func ExampleTxn_NewIterator() {
 	}
 
 	opt := DefaultIteratorOptions
-	opt.PrefetchSize = 10
 
 	// Iterate over 1000 items
 	var count int
