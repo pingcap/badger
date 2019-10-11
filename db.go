@@ -50,7 +50,6 @@ type closers struct {
 	compactors *y.Closer
 	memtable   *y.Closer
 	writes     *y.Closer
-	valueGC    *y.Closer
 }
 
 // DB provides the various functions required to interact with Badger.
@@ -69,7 +68,8 @@ type DB struct {
 	manifest  *manifestFile
 	lc        *levelsController
 	vlog      valueLog
-	vptr      valuePointer // less than or equal to a pointer to the last vlog value put into mt
+	logOff    logOffset // less than or equal to a pointer to the last vlog value put into mt
+	syncedFid uint32    // The log fid that has been flushed to SST, older log files are safe to be deleted.
 	writeCh   chan *request
 	flushChan chan *flushTask // For flushing memtables.
 	ingestCh  chan *ingestTask
@@ -90,7 +90,7 @@ const (
 	kvWriteChCapacity = 1000
 )
 
-func replayFunction(out *DB) func(Entry, valuePointer) error {
+func replayFunction(out *DB) func(Entry) error {
 	type txnEntry struct {
 		nk []byte
 		v  y.ValueStruct
@@ -105,7 +105,7 @@ func replayFunction(out *DB) func(Entry, valuePointer) error {
 	}
 
 	first := true
-	return func(e Entry, vp valuePointer) error { // Function for replaying.
+	return func(e Entry) error { // Function for replaying.
 		if first {
 			log.Infof("First key=%s\n", e.Key)
 		}
@@ -117,20 +117,12 @@ func replayFunction(out *DB) func(Entry, valuePointer) error {
 
 		nk := make([]byte, len(e.Key))
 		copy(nk, e.Key)
-		var nv []byte
-		meta := e.meta
-		if out.shouldWriteValueToLSM(&e) {
-			nv = make([]byte, len(e.Value))
-			copy(nv, e.Value)
-		} else {
-			nv = make([]byte, vptrSize)
-			vp.Encode(nv)
-			meta = meta | bitValuePointer
-		}
+		nv := make([]byte, len(e.Value))
+		copy(nv, e.Value)
 
 		v := y.ValueStruct{
 			Value:    nv,
-			Meta:     meta,
+			Meta:     e.meta,
 			UserMeta: e.UserMeta,
 		}
 
@@ -297,7 +289,7 @@ func Open(opt Options) (db *DB, err error) {
 		db.lc.startCompact(db.closers.compactors)
 
 		db.closers.memtable.AddRunning(1)
-		go db.flushMemtable(db.closers.memtable) // Need levels controller to be up.
+		go db.runFlushMemTable(db.closers.memtable) // Need levels controller to be up.
 	}
 
 	if err = db.vlog.Open(db, opt); err != nil {
@@ -308,9 +300,9 @@ func Open(opt Options) (db *DB, err error) {
 	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
 	vs := db.get(headKey, nil)
 	db.orc.curRead = vs.Version
-	var vptr valuePointer
+	var logOff logOffset
 	if len(vs.Value) > 0 {
-		vptr.Decode(vs.Value)
+		logOff.Decode(vs.Value)
 	}
 
 	// lastUsedCasCounter will either be the value stored in !badger!head, or some subsequently
@@ -322,7 +314,7 @@ func Open(opt Options) (db *DB, err error) {
 
 	replayCloser := startWriteWorker(db)
 
-	if err = db.vlog.Replay(vptr, replayFunction(db)); err != nil {
+	if err = db.vlog.Replay(logOff, replayFunction(db)); err != nil {
 		return db, err
 	}
 
@@ -334,9 +326,6 @@ func Open(opt Options) (db *DB, err error) {
 
 	db.writeCh = make(chan *request, kvWriteChCapacity)
 	db.closers.writes = startWriteWorker(db)
-
-	db.closers.valueGC = y.NewCloser(1)
-	go db.vlog.waitOnGC(db.closers.valueGC)
 
 	valueDirLockGuard = nil
 	dirLockGuard = nil
@@ -419,8 +408,6 @@ func (db *DB) checkExternalTables(tbls []*table.Table) error {
 // cause panic.
 func (db *DB) Close() (err error) {
 	log.Infof("Closing database")
-	// Stop value GC first.
-	db.closers.valueGC.SignalAndWait()
 
 	// Stop writes next.
 	db.closers.writes.SignalAndWait()
@@ -443,7 +430,7 @@ func (db *DB) Close() (err error) {
 				defer db.Unlock()
 				y.Assert(db.mt != nil)
 				select {
-				case db.flushChan <- newFlushTask(db.mt, db.vptr):
+				case db.flushChan <- newFlushTask(db.mt, db.logOff):
 					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
 					db.mt = nil                    // Will segfault if we try writing!
 					log.Infof("pushed to flush chan\n")
@@ -461,7 +448,7 @@ func (db *DB) Close() (err error) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	db.flushChan <- newFlushTask(nil, valuePointer{}) // Tell flusher to quit.
+	db.flushChan <- newFlushTask(nil, logOffset{}) // Tell flusher to quit.
 
 	if db.closers.memtable != nil {
 		db.closers.memtable.SignalAndWait()
@@ -619,21 +606,10 @@ func (db *DB) multiGet(pairs []keyValuePair, refs RefMap) {
 	db.lc.multiGet(pairs, refs)
 }
 
-func (db *DB) updateOffset(ptrs []valuePointer) {
-	var ptr valuePointer
-	for i := len(ptrs) - 1; i >= 0; i-- {
-		ptr = ptrs[i]
-		if !ptr.IsZero() {
-			break
-		}
-	}
-	if ptr.IsZero() {
-		return
-	}
-
+func (db *DB) updateOffset(off logOffset) {
 	db.Lock()
-	y.Assert(!ptr.Less(db.vptr))
-	db.vptr = ptr
+	y.Assert(!off.Less(db.logOff))
+	db.logOff = off
 	db.Unlock()
 }
 
@@ -643,14 +619,10 @@ var requestPool = sync.Pool{
 	},
 }
 
-func (db *DB) shouldWriteValueToLSM(e *Entry) bool {
-	return len(e.Value) < db.opt.ValueThreshold
-}
-
 func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 	var count, size int64
 	for _, e := range entries {
-		size += int64(e.estimateSize(db.opt.ValueThreshold))
+		size += int64(e.estimateSize())
 		count++
 	}
 	if count >= db.opt.maxBatchCount || size >= db.opt.maxBatchSize {
@@ -714,15 +686,9 @@ func (db *DB) ensureRoomForWrite() error {
 
 func (db *DB) flushMemTable() (*sync.WaitGroup, error) {
 	newMemTable := <-db.memTableCh
-	// Ensure value log is synced to disk so this memtable's contents wouldn't be lost.
-	err := db.vlog.sync()
-	if err != nil {
-		return nil, err
-	}
-
 	for {
 		db.Lock()
-		ft := newFlushTask(db.mt, db.vptr)
+		ft := newFlushTask(db.mt, db.logOff)
 		select {
 		case db.flushChan <- ft:
 			log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
@@ -773,20 +739,20 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 }
 
 type flushTask struct {
-	mt   *table.MemTable
-	vptr valuePointer
-	wg   sync.WaitGroup
+	mt  *table.MemTable
+	off logOffset
+	wg  sync.WaitGroup
 }
 
-func newFlushTask(mt *table.MemTable, vptr valuePointer) *flushTask {
-	ft := &flushTask{mt: mt, vptr: vptr}
+func newFlushTask(mt *table.MemTable, off logOffset) *flushTask {
+	ft := &flushTask{mt: mt, off: off}
 	ft.wg.Add(1)
 	return ft
 }
 
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
 // Otherwise, we would have no goroutine which can flush memtables.
-func (db *DB) flushMemtable(c *y.Closer) error {
+func (db *DB) runFlushMemTable(c *y.Closer) error {
 	defer c.Done()
 
 	for ft := range db.flushChan {
@@ -796,14 +762,12 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 
 		if !ft.mt.Empty() {
 			// Store badger head even if vptr is zero, need it for readTs
-			log.Infof("Storing offset: %+v\n", ft.vptr)
-			offset := make([]byte, vptrSize)
-			ft.vptr.Encode(offset)
+			log.Infof("Storing offset: %+v\n", ft.off)
 
 			// Pick the max commit ts, so in case of crash, our read ts would be higher than all the
 			// commits.
 			headTs := y.KeyWithTs(head, db.orc.commitTs())
-			ft.mt.PutToSkl(headTs, y.ValueStruct{Value: offset})
+			ft.mt.PutToSkl(headTs, y.ValueStruct{Value: ft.off.Encode()})
 		}
 
 		fileID := db.lc.reserveFileID()
@@ -819,7 +783,6 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 
 		err = db.writeLevel0Table(ft.mt, fd)
 		dirSyncErr := <-dirSyncCh
-
 		if err != nil {
 			log.Errorf("ERROR while writing to level 0: %v", err)
 			return err
@@ -828,6 +791,7 @@ func (db *DB) flushMemtable(c *y.Closer) error {
 			log.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
 			return err
 		}
+		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
 		fd, err = os.OpenFile(fileName, os.O_RDWR, 0666)
 		if err != nil {
@@ -917,53 +881,6 @@ func (db *DB) updateSize(c *y.Closer) {
 	}
 }
 
-// RunValueLogGC triggers a value log garbage collection.
-//
-// It picks value log files to perform GC based on statistics that are collected
-// duing the session, when DB.PurgeOlderVersions() and DB.PurgeVersions() is
-// called. If no such statistics are available, then log files are picked in
-// random order. The process stops as soon as the first log file is encountered
-// which does not result in garbage collection.
-//
-// When a log file is picked, it is first sampled If the sample shows that we
-// can discard at least discardRatio space of that file, it would be rewritten.
-//
-// If a call to RunValueLogGC results in no rewrites, then an ErrNoRewrite is
-// thrown indicating that the call resulted in no file rewrites.
-//
-// We recommend setting discardRatio to 0.5, thus indicating that a file be
-// rewritten if half the space can be discarded.  This results in a lifetime
-// value log write amplification of 2 (1 from original write + 0.5 rewrite +
-// 0.25 + 0.125 + ... = 2). Setting it to higher value would result in fewer
-// space reclaims, while setting it to a lower value would result in more space
-// reclaims at the cost of increased activity on the LSM tree. discardRatio
-// must be in the range (0.0, 1.0), both endpoints excluded, otherwise an
-// ErrInvalidRequest is returned.
-//
-// Only one GC is allowed at a time. If another value log GC is running, or DB
-// has been closed, this would return an ErrRejected.
-//
-// Note: Every time GC is run, it would produce a spike of activity on the LSM
-// tree.
-func (db *DB) RunValueLogGC(discardRatio float64) error {
-	if discardRatio >= 1.0 || discardRatio <= 0.0 {
-		return ErrInvalidRequest
-	}
-
-	// Find head on disk
-	headKey := y.KeyWithTs(head, math.MaxUint64)
-	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
-	vs := db.lc.get(headKey, farm.Fingerprint64(head), nil)
-
-	var head valuePointer
-	if len(vs.Value) > 0 {
-		head.Decode(vs.Value)
-	}
-
-	// Pick a log file and run GC
-	return db.vlog.runGC(discardRatio, head)
-}
-
 // Size returns the size of lsm and value log files in bytes. It can be used to decide how often to
 // call RunValueLogGC.
 func (db *DB) Size() (lsm int64, vlog int64) {
@@ -991,7 +908,7 @@ func (db *DB) IterateVLog(offset uint64, fn func(e Entry)) error {
 		if fid != startFid {
 			vOffset = 0
 		}
-		endOffset, err := db.vlog.iterate(lf, vOffset, func(e Entry, vp valuePointer) error {
+		endOffset, err := db.vlog.iterate(lf, vOffset, func(e Entry) error {
 			if e.meta&bitTxn > 0 {
 				fn(e)
 			}

@@ -17,6 +17,7 @@
 package badger
 
 import (
+	"os"
 	"runtime"
 	"time"
 
@@ -24,19 +25,18 @@ import (
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 	"github.com/ngaut/log"
-	"github.com/pingcap/errors"
 )
 
 type writeWorker struct {
 	*DB
-	writeLSMCh chan []*request
+	writeLSMCh chan postLogTask
 	mergeLSMCh chan *table.MemTable
-	flushCh    chan flushLogTask
+	flushCh    chan postLogTask
 }
 
-type flushLogTask struct {
-	writer *fileutil.BufferedWriter
-	reqs   []*request
+type postLogTask struct {
+	logFile *os.File
+	reqs    []*request
 }
 
 func startWriteWorker(db *DB) *y.Closer {
@@ -47,9 +47,9 @@ func startWriteWorker(db *DB) *y.Closer {
 	closer := y.NewCloser(numWorkers)
 	w := &writeWorker{
 		DB:         db,
-		writeLSMCh: make(chan []*request, 1),
+		writeLSMCh: make(chan postLogTask, 1),
 		mergeLSMCh: make(chan *table.MemTable, 1),
-		flushCh:    make(chan flushLogTask),
+		flushCh:    make(chan postLogTask),
 	}
 	if db.opt.SyncWrites {
 		go w.runFlusher(closer)
@@ -66,13 +66,13 @@ func (w *writeWorker) runFlusher(lc *y.Closer) {
 		select {
 		case t := <-w.flushCh:
 			start := time.Now()
-			err := t.writer.Sync()
+			err := fileutil.Fdatasync(t.logFile)
 			w.metrics.VlogSyncDuration.Observe(time.Since(start).Seconds())
 			if err != nil {
 				w.done(t.reqs, err)
 				continue
 			}
-			w.writeLSMCh <- t.reqs
+			w.writeLSMCh <- t
 		case <-lc.HasBeenClosed():
 			return
 		}
@@ -113,13 +113,14 @@ func (w *writeWorker) writeVLog(reqs []*request) error {
 		w.done(reqs, err)
 		return err
 	}
+	t := postLogTask{
+		logFile: w.vlog.currentLogFile().fd,
+		reqs:    reqs,
+	}
 	if w.opt.SyncWrites {
-		w.flushCh <- flushLogTask{
-			writer: w.vlog.curWriter,
-			reqs:   reqs,
-		}
+		w.flushCh <- t
 	} else {
-		w.writeLSMCh <- reqs
+		w.writeLSMCh <- t
 	}
 	return nil
 }
@@ -128,13 +129,13 @@ func (w *writeWorker) runWriteLSM(lc *y.Closer) {
 	defer lc.Done()
 	runtime.LockOSThread()
 	for {
-		reqs, ok := <-w.writeLSMCh
+		t, ok := <-w.writeLSMCh
 		if !ok {
 			close(w.mergeLSMCh)
 			return
 		}
 		start := time.Now()
-		w.writeLSM(reqs)
+		w.writeLSM(t.reqs)
 		w.metrics.WriteLSMDuration.Observe(time.Since(start).Seconds())
 	}
 }
@@ -160,7 +161,10 @@ func (w *writeWorker) closeWriteVLog() {
 		if err := w.vlog.curWriter.Sync(); err != nil {
 			w.done(reqs, err)
 		} else {
-			w.writeLSMCh <- reqs
+			w.writeLSMCh <- postLogTask{
+				logFile: w.vlog.currentLogFile().fd,
+				reqs:    reqs,
+			}
 		}
 	}
 	close(w.writeLSMCh)
@@ -177,11 +181,11 @@ func (w *writeWorker) writeLSM(reqs []*request) {
 			continue
 		}
 		count += len(b.Entries)
-		if err := w.writeToLSM(b.Entries, b.Ptrs); err != nil {
+		if err := w.writeToLSM(b.Entries); err != nil {
 			w.done(reqs, err)
 			return
 		}
-		w.updateOffset(b.Ptrs)
+		w.updateOffset(b.off)
 	}
 
 	w.done(reqs, nil)
@@ -199,47 +203,25 @@ func (w *writeWorker) done(reqs []*request, err error) {
 	}
 }
 
-func (w *writeWorker) writeToLSM(entries []*Entry, ptrs []valuePointer) error {
-	if len(ptrs) != len(entries) {
-		return errors.Errorf("Ptrs and Entries don't match: %v, %v", entries, ptrs)
-	}
-
+func (w *writeWorker) writeToLSM(entries []*Entry) error {
 	if err := w.ensureRoomForWrite(); err != nil {
 		return err
 	}
 
 	es := make([]table.Entry, 0, len(entries)-1)
-	for i, entry := range entries {
+	for _, entry := range entries {
 		if entry.meta&bitFinTxn != 0 {
 			continue
 		}
-		if w.shouldWriteValueToLSM(entry) { // Will include deletion / tombstone case.
-			es = append(es, table.Entry{
-				Key: entry.Key,
-				Value: y.ValueStruct{
-					Value:    entry.Value,
-					Meta:     entry.meta,
-					UserMeta: entry.UserMeta,
-					Version:  y.ParseTs(entry.Key),
-				},
-			})
-		} else {
-			var offsetBuf []byte
-			if len(entry.Value) < vptrSize {
-				offsetBuf = make([]byte, vptrSize)
-			} else {
-				offsetBuf = entry.Value[:vptrSize]
-			}
-			es = append(es, table.Entry{
-				Key: entry.Key,
-				Value: y.ValueStruct{
-					Value:    ptrs[i].Encode(offsetBuf),
-					Meta:     entry.meta | bitValuePointer,
-					UserMeta: entry.UserMeta,
-					Version:  y.ParseTs(entry.Key),
-				},
-			})
-		}
+		es = append(es, table.Entry{
+			Key: entry.Key,
+			Value: y.ValueStruct{
+				Value:    entry.Value,
+				Meta:     entry.meta,
+				UserMeta: entry.UserMeta,
+				Version:  y.ParseTs(entry.Key),
+			},
+		})
 	}
 	w.mt.PutToPendingList(es)
 	w.mt.IncrRef()

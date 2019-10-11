@@ -84,29 +84,7 @@ func (item *Item) IsEmpty() bool {
 // instead, or copy it yourself. Value might change once discard or commit is called.
 // Use ValueCopy if you want to do a Set after Get.
 func (item *Item) Value() ([]byte, error) {
-	if (item.meta & bitValuePointer) == 0 {
-		return item.vptr, nil
-	}
-	for {
-		var vp valuePointer
-		vp.Decode(item.vptr)
-		if item.slice == nil {
-			item.slice = new(y.Slice)
-		}
-		val, err := item.db.vlog.Read(vp, item.slice)
-		if err != ErrRetry {
-			return val, err
-		}
-		// The value pointer is pointing to a deleted value log. Look for the move key and read that
-		// instead.
-		key := y.KeyWithTs(item.Key(), item.Version())
-		moveKey := append(badgerMove, key...)
-		vs := item.db.get(moveKey, nil)
-		if vs.Version != item.Version() {
-			return nil, nil
-		}
-		item.vptr = vs.Value
-	}
+	return item.vptr, nil
 }
 
 // ValueCopy returns a copy of the value of the item from the value log, writing it to dst slice.
@@ -145,12 +123,7 @@ func (item *Item) EstimatedSize() int64 {
 	if !item.hasValue() {
 		return 0
 	}
-	if (item.meta & bitValuePointer) == 0 {
-		return int64(len(item.key) + len(item.vptr))
-	}
-	var vp valuePointer
-	vp.Decode(item.vptr)
-	return int64(vp.Len) // includes key length.
+	return int64(len(item.key) + len(item.vptr))
 }
 
 // UserMeta returns the userMeta set by the user. Typically, this byte, optionally set by the user
@@ -307,8 +280,6 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	if len(opt.EndKey) > 0 {
 		opt.endKeyWithTS = y.KeyWithTs(opt.EndKey, math.MaxUint64)
 	}
-
-	txn.db.vlog.incrIteratorCount()
 	var iters []y.Iterator
 	if itr := txn.newPendingWritesIterator(opt.Reverse); opt.OverlapPending(itr) {
 		iters = append(iters, itr)
@@ -354,9 +325,6 @@ func (it *Iterator) ValidForPrefix(prefix []byte) bool {
 // Close would close the iterator. It is important to call this when you're done with iteration.
 func (it *Iterator) Close() {
 	it.iitr.Close()
-
-	// TODO: We could handle this error.
-	_ = it.txn.db.vlog.decrIteratorCount()
 	atomic.AddInt32(&it.txn.numIterators, -1)
 }
 

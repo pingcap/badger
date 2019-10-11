@@ -291,7 +291,7 @@ func TestForceCompactL0(t *testing.T) {
 	}
 	n := 80
 	m := 45 // Increasing would cause ErrTxnTooBig
-	sz := 32 << 10
+	sz := 128
 	v := make([]byte, sz)
 	for i := 0; i < n; i += 2 {
 		version := uint64(i)
@@ -940,7 +940,7 @@ func TestWriteDeadlock(t *testing.T) {
 	}
 
 	var count int
-	val := make([]byte, 10000)
+	val := make([]byte, 1000)
 	require.NoError(t, db.Update(func(txn *Txn) error {
 		for i := 0; i < 1500; i++ {
 			key := fmt.Sprintf("%d", i)
@@ -1075,7 +1075,6 @@ func TestLSMOnly(t *testing.T) {
 
 		txnSet(t, db, []byte(fmt.Sprintf("key%d", i)), value, 0x00)
 	}
-	require.NoError(t, db.RunValueLogGC(0.2))
 }
 
 func TestMinReadTs(t *testing.T) {
@@ -1275,6 +1274,7 @@ func TestIterateVLog(t *testing.T) {
 	opts.MaxTableSize = 1 << 20
 	opts.ValueLogFileSize = 1 << 20
 	opts.ValueThreshold = 1000
+	opts.ValueLogMaxNumFiles = 1000
 	db, err := Open(opts)
 	require.NoError(t, err)
 	defer db.Close()

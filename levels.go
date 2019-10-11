@@ -278,17 +278,12 @@ func (lc *levelsController) hasOverlapTable(cd compactDef) bool {
 }
 
 type DiscardStats struct {
-	// discard spaces for each files
-	discardSpaces map[uint32]int64 // file ID and summary of discard length
-	numSkips      int64
-	skippedBytes  int64
+	numSkips     int64
+	skippedBytes int64
 }
 
 func (ds *DiscardStats) collect(vs y.ValueStruct) {
 	if vs.Meta&bitValuePointer > 0 {
-		var vp valuePointer
-		vp.Decode(vs.Value)
-		ds.discardSpaces[vp.Fid] += int64(vp.Len)
 		ds.skippedBytes += int64(vs.EncodedSize())
 	}
 	ds.numSkips++
@@ -355,7 +350,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
 	// value log file should be GCed.
-	discardStats := &DiscardStats{discardSpaces: make(map[uint32]int64)}
+	discardStats := &DiscardStats{}
 
 	// Create iterators across all the tables involved first.
 	var iters []y.Iterator
@@ -520,7 +515,6 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		return
 	}
 	sortTables(newTables)
-	lc.kv.vlog.updateGCStats(discardStats.discardSpaces)
 	log.Infof("Discard stats: %v", discardStats)
 	assertTablesOrder(newTables)
 	return

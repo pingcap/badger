@@ -9,42 +9,6 @@ import (
 	"github.com/coocood/badger/y"
 )
 
-type valuePointer struct {
-	Fid    uint32
-	Len    uint32
-	Offset uint32
-}
-
-func (p valuePointer) Less(o valuePointer) bool {
-	if p.Fid != o.Fid {
-		return p.Fid < o.Fid
-	}
-	if p.Offset != o.Offset {
-		return p.Offset < o.Offset
-	}
-	return p.Len < o.Len
-}
-
-func (p valuePointer) IsZero() bool {
-	return p.Fid == 0 && p.Offset == 0 && p.Len == 0
-}
-
-const vptrSize = 12
-
-// Encode encodes Pointer into byte buffer.
-func (p valuePointer) Encode(b []byte) []byte {
-	binary.BigEndian.PutUint32(b[:4], p.Fid)
-	binary.BigEndian.PutUint32(b[4:8], p.Len)
-	binary.BigEndian.PutUint32(b[8:12], p.Offset)
-	return b[:vptrSize]
-}
-
-func (p *valuePointer) Decode(b []byte) {
-	p.Fid = binary.BigEndian.Uint32(b[:4])
-	p.Len = binary.BigEndian.Uint32(b[4:8])
-	p.Offset = binary.BigEndian.Uint32(b[8:12])
-}
-
 // header is used in value log as a header before Entry.
 type header struct {
 	klen uint32
@@ -95,11 +59,8 @@ type Entry struct {
 	offset uint32
 }
 
-func (e *Entry) estimateSize(threshold int) int {
-	if len(e.Value) < threshold {
-		return len(e.Key) + len(e.Value) + len(e.UserMeta) + 2 // Meta, UserMeta
-	}
-	return len(e.Key) + len(e.UserMeta) + 12 + 2 // 12 for ValuePointer, 2 for metas.
+func (e *Entry) estimateSize() int {
+	return len(e.Key) + len(e.Value) + len(e.UserMeta) + 2 // Meta, UserMeta
 }
 
 // Encodes e to buf. Returns number of bytes written.

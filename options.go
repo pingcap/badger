@@ -75,6 +75,9 @@ type Options struct {
 	// determined by the smaller of its file size and max entries.
 	ValueLogMaxEntries uint32
 
+	// Max number of value log files to keep before safely remove.
+	ValueLogMaxNumFiles int
+
 	// Number of compaction workers to run concurrently.
 	NumCompactors int
 
@@ -156,8 +159,9 @@ var DefaultOptions = Options{
 	NumLevelZeroTablesStall: 10,
 	NumMemtables:            5,
 	SyncWrites:              true,
-	ValueLogFileSize:        1 << 30,
+	ValueLogFileSize:        256 << 20,
 	ValueLogMaxEntries:      1000000,
+	ValueLogMaxNumFiles:     1,
 	ValueThreshold:          32,
 	Truncate:                false,
 	TableBuilderOptions: options.TableBuilderOptions{
