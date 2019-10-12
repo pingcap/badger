@@ -344,8 +344,8 @@ func Open(opt Options) (db *DB, err error) {
 	return db, nil
 }
 
-// NewTableBuilder returns a new sst builder.
-func (db *DB) NewTableBuilder(f *os.File, limiter *rate.Limiter) *table.Builder {
+// NewExternalTableBuilder returns a new sst builder.
+func (db *DB) NewExternalTableBuilder(f *os.File, limiter *rate.Limiter) *table.Builder {
 	return table.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions)
 }
 
