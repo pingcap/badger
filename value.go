@@ -472,6 +472,7 @@ func (lo logOffset) Encode() []byte {
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint32(buf, lo.fid)
 	binary.LittleEndian.PutUint32(buf[4:], lo.offset)
+	return buf
 }
 
 func (lo *logOffset) Decode(buf []byte) {
