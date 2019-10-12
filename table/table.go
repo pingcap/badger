@@ -146,14 +146,16 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 	defer it.Close()
 	it.Rewind()
 	if it.Valid() {
-		t.smallest = it.Key()
+		// key with max ts is the binary smallest key.
+		t.smallest = y.KeyWithTs(it.RawKey(), math.MaxUint64)
 	}
 
 	it2 := t.NewIterator(true)
 	defer it2.Close()
 	it2.Rewind()
 	if it2.Valid() {
-		t.biggest = it2.Key()
+		// key with 0 ts is the binary biggest key.
+		t.biggest = y.KeyWithTs(it2.RawKey(), 0)
 	}
 	return t, nil
 }
@@ -306,8 +308,6 @@ func (t *Table) SetGlobalTs(ts uint64) error {
 		return err
 	}
 	t.globalTs = encodeTs
-	t.smallest = y.KeyWithTs(t.smallest, ts)
-	t.biggest = y.KeyWithTs(t.biggest, ts)
 	return nil
 }
 

@@ -18,6 +18,7 @@ package badger
 
 import (
 	"bytes"
+	"github.com/coocood/badger/protos"
 	"io"
 	"math"
 	"os"
@@ -39,10 +40,7 @@ import (
 )
 
 var (
-	badgerPrefix = []byte("!badger!")     // Prefix for internal keys used by badger.
-	head         = []byte("!badger!head") // For storing value offset for replay.
-	txnKey       = []byte("!badger!txn")  // For indicating end of entries in txn.
-	badgerMove   = []byte("!badger!move") // For key-value pairs which got moved during GC.
+	txnKey = []byte("!badger!txn") // For indicating end of entries in txn.
 )
 
 type closers struct {
@@ -296,13 +294,12 @@ func Open(opt Options) (db *DB, err error) {
 		return nil, err
 	}
 
-	headKey := y.KeyWithTs(head, math.MaxUint64)
-	// Need to pass with timestamp, lsm get removes the last 8 bytes and compares key
-	vs := db.get(headKey, nil)
-	db.orc.curRead = vs.Version
 	var logOff logOffset
-	if len(vs.Value) > 0 {
-		logOff.Decode(vs.Value)
+	head := manifest.Head
+	if head != nil {
+		db.orc.curRead = head.Version
+		logOff.fid = head.LogID
+		logOff.offset = head.LogOffset
 	}
 
 	// lastUsedCasCounter will either be the value stored in !badger!head, or some subsequently
@@ -768,15 +765,17 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if ft.mt == nil {
 			return nil
 		}
-
+		var headInfo *protos.HeadInfo
 		if !ft.mt.Empty() {
+			headInfo = &protos.HeadInfo{
+				// Pick the max commit ts, so in case of crash, our read ts would be higher than all the
+				// commits.
+				Version:   db.orc.commitTs(),
+				LogID:     ft.off.fid,
+				LogOffset: ft.off.offset,
+			}
 			// Store badger head even if vptr is zero, need it for readTs
 			log.Infof("Storing offset: %+v\n", ft.off)
-
-			// Pick the max commit ts, so in case of crash, our read ts would be higher than all the
-			// commits.
-			headTs := y.KeyWithTs(head, db.orc.commitTs())
-			ft.mt.PutToSkl(headTs, y.ValueStruct{Value: ft.off.Encode()})
 		}
 
 		fileID := db.lc.reserveFileID()
@@ -812,7 +811,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 			return err
 		}
 		// We own a ref on tbl.
-		err = db.lc.addLevel0Table(tbl) // This will incrRef (if we don't error, sure)
+		err = db.lc.addLevel0Table(tbl, headInfo) // This will incrRef (if we don't error, sure)
 		tbl.DecrRef()                   // Releases our ref.
 		if err != nil {
 			return err

@@ -254,9 +254,13 @@ func (b *Builder) Finish() error {
 	if err := b.w.Append(b.buf); err != nil {
 		return err
 	}
-
+	ts := uint64(math.MaxUint64)
+	if b.isExternal {
+		// External builder doesn't append ts to the keys, the output sst should has a non-MaxUint64 global ts.
+		ts = math.MaxUint64 - 1
+	}
 	var tsBuf [8]byte
-	binary.BigEndian.PutUint64(tsBuf[:], math.MaxUint64)
+	binary.BigEndian.PutUint64(tsBuf[:], ts)
 	if err := b.w.Append(tsBuf[:]); err != nil {
 		return err
 	}

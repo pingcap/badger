@@ -848,7 +848,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 	}
 
 	// We write to the manifest _before_ we delete files (and after we created files)
-	if err := lc.kv.manifest.addChanges(changeSet.Changes); err != nil {
+	if err := lc.kv.manifest.addChanges(changeSet.Changes, nil); err != nil {
 		return err
 	}
 
@@ -907,14 +907,14 @@ func (lc *levelsController) doCompact(p compactionPriority) (bool, error) {
 	return true, nil
 }
 
-func (lc *levelsController) addLevel0Table(t *table.Table) error {
+func (lc *levelsController) addLevel0Table(t *table.Table, head *protos.HeadInfo) error {
 	// We update the manifest _before_ the table becomes part of a levelHandler, because at that
 	// point it could get used in some compaction.  This ensures the manifest file gets updated in
 	// the proper order. (That means this update happens before that of some compaction which
 	// deletes the table.)
 	err := lc.kv.manifest.addChanges([]*protos.ManifestChange{
 		makeTableCreateChange(t.ID(), 0),
-	})
+	}, head)
 	if err != nil {
 		return err
 	}

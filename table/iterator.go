@@ -363,6 +363,14 @@ func (itr *Iterator) Key() []byte {
 	return itr.bi.key
 }
 
+func (itr *Iterator) RawKey() []byte {
+	if itr.t.HasGlobalTs() {
+		return itr.bi.key
+	} else {
+		return y.ParseKey(itr.bi.key)
+	}
+}
+
 // Value follows the y.Iterator interface
 func (itr *Iterator) Value() (ret y.ValueStruct) {
 	ret.Decode(itr.bi.val)

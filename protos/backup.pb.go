@@ -11,6 +11,7 @@
 	It has these top-level messages:
 		KVPair
 		ManifestChangeSet
+		HeadInfo
 		ManifestChange
 */
 package protos

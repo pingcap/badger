@@ -125,7 +125,7 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints [][]byte) error {
 	}
 
 	change := makeTableCreateChange(tbl.ID(), targetLevel)
-	if err := w.manifest.addChanges([]*protos.ManifestChange{change}); err != nil {
+	if err := w.manifest.addChanges([]*protos.ManifestChange{change}, nil); err != nil {
 		return err
 	}
 	w.lc.levels[targetLevel].addTable(tbl)
@@ -152,7 +152,7 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 		changes = append(changes, makeTableDeleteChange(t.ID()))
 	}
 
-	if err := w.manifest.addChanges(changes); err != nil {
+	if err := w.manifest.addChanges(changes, nil); err != nil {
 		return err
 	}
 	return cd.nextLevel.replaceTables(newTables, cd.skippedTbls)

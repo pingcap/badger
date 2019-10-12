@@ -48,6 +48,8 @@ type Manifest struct {
 	// whether it'd be useful to rewrite the manifest.
 	Creations int
 	Deletions int
+
+	Head *protos.HeadInfo
 }
 
 func createManifest() Manifest {
@@ -180,8 +182,8 @@ func (mf *manifestFile) close() error {
 // we replay the MANIFEST file, we'll either replay all the changes or none of them.  (The truth of
 // this depends on the filesystem -- some might append garbage data if a system crash happens at
 // the wrong time.)
-func (mf *manifestFile) addChanges(changesParam []*protos.ManifestChange) error {
-	changes := protos.ManifestChangeSet{Changes: changesParam}
+func (mf *manifestFile) addChanges(changesParam []*protos.ManifestChange, head *protos.HeadInfo) error {
+	changes := protos.ManifestChangeSet{Changes: changesParam, Head: head}
 	buf, err := changes.Marshal()
 	if err != nil {
 		return err
@@ -235,7 +237,7 @@ func helpRewrite(dir string, m *Manifest) (*os.File, int, error) {
 
 	netCreations := len(m.Tables)
 	changes := m.asChanges()
-	set := protos.ManifestChangeSet{Changes: changes}
+	set := protos.ManifestChangeSet{Changes: changes, Head: m.Head}
 
 	changeBuf, err := set.Marshal()
 	if err != nil {
@@ -426,6 +428,9 @@ func applyChangeSet(build *Manifest, changeSet *protos.ManifestChangeSet) error 
 		if err := applyManifestChange(build, change); err != nil {
 			return err
 		}
+	}
+	if changeSet.Head != nil {
+		build.Head = changeSet.Head
 	}
 	return nil
 }

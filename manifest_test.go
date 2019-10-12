@@ -216,19 +216,35 @@ func TestManifestRewrite(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, m.Creations)
 	require.Equal(t, 0, m.Deletions)
-
+	head := &protos.HeadInfo{
+		Version:   1,
+		LogID:     1,
+		LogOffset: 1,
+	}
 	err = mf.addChanges([]*protos.ManifestChange{
 		makeTableCreateChange(0, 0),
-	})
+	}, head)
 	require.NoError(t, err)
+	require.NotNil(t, mf.manifest.Head)
 
 	for i := uint64(0); i < uint64(deletionsThreshold*3); i++ {
 		ch := []*protos.ManifestChange{
 			makeTableCreateChange(i+1, 0),
 			makeTableDeleteChange(i),
 		}
-		err := mf.addChanges(ch)
-		require.NoError(t, err)
+		// Only add head for some change set to make sure head is not overwritten to nil.
+		if i < uint64(deletionsThreshold) {
+			head = &protos.HeadInfo{
+				Version:   i,
+				LogID:     uint32(i),
+				LogOffset: uint32(i),
+			}
+			err := mf.addChanges(ch, head)
+			require.NoError(t, err)
+		} else {
+			err := mf.addChanges(ch, nil)
+			require.NoError(t, err)
+		}
 	}
 	err = mf.close()
 	require.NoError(t, err)
@@ -238,4 +254,6 @@ func TestManifestRewrite(t *testing.T) {
 	require.Equal(t, map[uint64]tableManifest{
 		uint64(deletionsThreshold * 3): {Level: 0},
 	}, m.Tables)
+	require.NotNil(t, m.Head)
+	require.Equal(t, *m.Head, *head)
 }

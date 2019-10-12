@@ -52,7 +52,7 @@ func TestValueBasic(t *testing.T) {
 		meta:  bitTxn,
 	}
 	eFin := &Entry{
-		Key:  y.KeyWithTs(head, 100),
+		Key:  y.KeyWithTs(txnKey, 100),
 		meta: bitFinTxn,
 	}
 	offset := log.getMaxPtr()
