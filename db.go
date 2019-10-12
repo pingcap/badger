@@ -344,6 +344,11 @@ func Open(opt Options) (db *DB, err error) {
 	return db, nil
 }
 
+// NewTableBuilder returns a new sst builder.
+func (db *DB) NewTableBuilder(f *os.File, limiter *rate.Limiter) *table.Builder {
+	return table.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions)
+}
+
 // ErrExternalTableOverlap returned by IngestExternalFiles when files overlaps.
 var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
 
@@ -377,7 +382,7 @@ func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
 			return nil, err
 		}
 
-		fd, err := os.OpenFile(fd.Name(), os.O_RDWR, 0666)
+		fd, err := os.OpenFile(filename, os.O_RDWR, 0666)
 		if err != nil {
 			return nil, err
 		}
@@ -389,6 +394,10 @@ func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
 
 		tbls[i] = tbl
 	}
+
+	sort.Slice(tbls, func(i, j int) bool {
+		return bytes.Compare(tbls[i].Smallest(), tbls[j].Smallest()) < 0
+	})
 
 	return tbls, syncDir(db.lc.kv.opt.Dir)
 }
