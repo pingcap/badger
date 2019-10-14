@@ -142,14 +142,8 @@ func sortTables(tables []*table.Table) {
 
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
-func (s *levelHandler) replaceTables(newTables []*table.Table, skippedTbls []*table.Table) error {
-	// Need to re-search the range of tables in this level to be replaced as other goroutines might
-	// be changing it as well.  (They can't touch our tables, but if they add/remove other tables,
-	// the indices get shifted around.)
-	if len(newTables) == 0 {
-		return nil
-	}
-
+func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef) error {
+	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
 	assertTablesOrder(newTables)
 
 	s.Lock() // We s.Unlock() below.
@@ -159,25 +153,20 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, skippedTbls []*ta
 		s.totalSize += tbl.Size()
 		tbl.IncrRef()
 	}
-
-	kr := keyRange{
-		left:  newTables[0].Smallest(),
-		right: newTables[len(newTables)-1].Biggest(),
-	}
-	left, right := s.overlappingTables(levelHandlerRLocked{}, kr)
+	left, right := s.overlappingTables(levelHandlerRLocked{}, cd.nextRange)
 	toDecr := make([]*table.Table, 0, right-left)
 	// Update totalSize and reference counts.
 	for i := left; i < right; i++ {
 		tbl := s.tables[i]
-		if !isSkippedTable(tbl, skippedTbls) {
+		if containsTable(cd.bot, tbl) {
 			s.totalSize -= tbl.Size()
 			toDecr = append(toDecr, tbl)
 		}
 	}
-	tables := make([]*table.Table, 0, left+len(newTables)+len(skippedTbls)+(len(s.tables)-right))
+	tables := make([]*table.Table, 0, left+len(newTables)+len(cd.skippedTbls)+(len(s.tables)-right))
 	tables = append(tables, s.tables[:left]...)
 	tables = append(tables, newTables...)
-	tables = append(tables, skippedTbls...)
+	tables = append(tables, cd.skippedTbls...)
 	tables = append(tables, s.tables[right:]...)
 	sortTables(tables)
 	assertTablesOrder(tables)
@@ -186,9 +175,9 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, skippedTbls []*ta
 	return decrRefs(toDecr)
 }
 
-func isSkippedTable(tbl *table.Table, skips []*table.Table) bool {
-	for _, skip := range skips {
-		if tbl == skip {
+func containsTable(tables []*table.Table, tbl *table.Table) bool {
+	for _, t := range tables {
+		if tbl == t {
 			return true
 		}
 	}

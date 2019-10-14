@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"math"
 	"sync"
 
 	"github.com/coocood/badger/table"
@@ -75,8 +74,8 @@ func getKeyRange(tables []*table.Table) keyRange {
 		}
 	}
 	return keyRange{
-		left:  y.KeyWithTs(y.ParseKey(smallest), math.MaxUint64),
-		right: y.KeyWithTs(y.ParseKey(biggest), 0),
+		left:  smallest,
+		right: biggest,
 	}
 }
 

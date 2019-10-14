@@ -1,7 +1,6 @@
 package badger
 
 import (
-	"math"
 	"sync"
 
 	"github.com/coocood/badger/protos"
@@ -65,7 +64,7 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 	it := w.mt.NewIterator(false)
 	defer it.Close()
 	for _, t := range task.tbls {
-		it.Seek(y.KeyWithTs(t.Smallest(), math.MaxUint64))
+		it.Seek(t.Smallest())
 		if it.Valid() && y.CompareKeysWithVer(it.Key(), y.KeyWithTs(t.Biggest(), 0)) <= 0 {
 			if wg, err = w.flushMemTable(); err != nil {
 				return
@@ -136,6 +135,7 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 	cd := compactDef{
 		nextLevel: w.lc.levels[level],
 		top:       []*table.Table{tbl},
+		nextRange: getKeyRange(overlappingTables),
 	}
 	w.lc.fillBottomTables(&cd, overlappingTables)
 	newTables, err := w.lc.compactBuildTables(level-1, cd, w.limiter, splitHints)
@@ -155,7 +155,7 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 	if err := w.manifest.addChanges(changes, nil); err != nil {
 		return err
 	}
-	return cd.nextLevel.replaceTables(newTables, cd.skippedTbls)
+	return cd.nextLevel.replaceTables(newTables, &cd)
 }
 
 func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {

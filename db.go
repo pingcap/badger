@@ -812,7 +812,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		// We own a ref on tbl.
 		err = db.lc.addLevel0Table(tbl, headInfo) // This will incrRef (if we don't error, sure)
-		tbl.DecrRef()                   // Releases our ref.
+		tbl.DecrRef()                             // Releases our ref.
 		if err != nil {
 			return err
 		}

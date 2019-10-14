@@ -19,7 +19,6 @@ package badger
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -696,10 +695,8 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 	for _, t := range tbls {
 		cd.thisSize = t.Size()
 		cd.thisRange = keyRange{
-			// We pick all the versions of the smallest and the biggest key.
-			left: y.KeyWithTs(y.ParseKey(t.Smallest()), math.MaxUint64),
-			// Note that version zero would be the rightmost key.
-			right: y.KeyWithTs(y.ParseKey(t.Biggest()), 0),
+			left:  t.Smallest(),
+			right: t.Biggest(),
 		}
 		if lc.cstatus.overlapsWith(cd.thisLevel.level, cd.thisRange) {
 			continue
@@ -854,7 +851,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 
 	// See comment earlier in this function about the ordering of these ops, and the order in which
 	// we access levels when reading.
-	if err := nextLevel.replaceTables(newTables, cd.skippedTbls); err != nil {
+	if err := nextLevel.replaceTables(newTables, &cd); err != nil {
 		return err
 	}
 	if err := thisLevel.deleteTables(cd.top); err != nil {
