@@ -30,8 +30,20 @@ import (
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
+	"github.com/dgraph-io/ristretto"
 	"github.com/stretchr/testify/require"
 )
+
+func testCache() *ristretto.Cache {
+	c, err := ristretto.NewCache(&ristretto.Config{
+		NumCounters: 1000000 * 10,
+		MaxCost:     1000000,
+		BufferItems: 64,
+		Metrics:     true,
+	})
+	y.Check(err)
+	return c
+}
 
 func TestManifestBasic(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
@@ -123,7 +135,7 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
 
-	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
+	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
 	f, err := y.OpenSyncedFile(filename, false)
 	if t != nil {
 		require.NoError(t, err)
@@ -169,7 +181,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)
 	f := buildTestTable(t, "k", 2)
-	t1, err := table.OpenTable(f, options.MemoryMap, opt.TableBuilderOptions.Compression)
+	t1, err := table.OpenTable(f, options.MemoryMap, opt.TableBuilderOptions.Compression, testCache())
 	require.NoError(t, err)
 	defer t1.Delete()
 
@@ -193,7 +205,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lc.runCompactDef(0, cd, nil, g)
 
 	f = buildTestTable(t, "l", 2)
-	t2, err := table.OpenTable(f, options.MemoryMap, opts.Compression)
+	t2, err := table.OpenTable(f, options.MemoryMap, opts.Compression, testCache())
 	require.NoError(t, err)
 	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)

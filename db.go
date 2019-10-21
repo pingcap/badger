@@ -30,10 +30,10 @@ import (
 
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/protos"
-
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
+	"github.com/dgraph-io/ristretto"
 	"github.com/dgryski/go-farm"
 	"github.com/ncw/directio"
 	"github.com/ngaut/log"
@@ -81,6 +81,8 @@ type DB struct {
 	minReadTsTracker safeTsTracker
 
 	limiter *rate.Limiter
+
+	blockCache *ristretto.Cache
 
 	metrics  *y.MetricsSet
 	lsmSize  int64
@@ -245,6 +247,18 @@ func Open(opt Options) (db *DB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 
+	config := ristretto.Config{
+		// Use 5% of cache memory for storing counters.
+		NumCounters: int64(float64(opt.MaxCacheSize) * 0.05 * 2),
+		MaxCost:     int64(float64(opt.MaxCacheSize) * 0.95),
+		BufferItems: 64,
+		// Enable metrics once https://github.com/dgraph-io/ristretto/issues/92 is resolved.
+		Metrics: false,
+	}
+	cache, err := ristretto.NewCache(&config)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create cache")
+	}
 	db = &DB{
 		imm:           make([]*table.MemTable, 0, opt.NumMemtables),
 		flushChan:     make(chan *flushTask, opt.NumMemtables),
@@ -257,6 +271,7 @@ func Open(opt Options) (db *DB, err error) {
 		valueDirGuard: valueDirLockGuard,
 		orc:           orc,
 		metrics:       y.NewMetricSet(opt.Dir),
+		blockCache:    cache,
 	}
 	db.vlog.metrics = db.metrics
 
@@ -452,7 +467,7 @@ func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
 			return nil, err
 		}
 
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression)
+		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression, db.blockCache)
 		if err != nil {
 			return nil, err
 		}
@@ -485,6 +500,14 @@ func (db *DB) checkExternalTables(tbls []*table.Table) error {
 		}
 	}
 
+	return nil
+}
+
+// CacheMetrics returns the metrics for the underlying cache.
+func (db *DB) CacheMetrics() *ristretto.Metrics {
+	// Do not enable ristretto metrics in badger until issue
+	// https://github.com/dgraph-io/ristretto/issues/92 is resolved.
+	// return db.blockCache.Metrics()
 	return nil
 }
 
@@ -565,6 +588,7 @@ func (db *DB) Close() (err error) {
 	}
 	log.Infof("Waiting for closer")
 	db.closers.updateSize.SignalAndWait()
+	db.blockCache.Close()
 
 	if db.dirLockGuard != nil {
 		if guardErr := db.dirLockGuard.release(); err == nil {
@@ -910,7 +934,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if err != nil {
 			return err
 		}
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression)
+		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression, db.blockCache)
 		if err != nil {
 			log.Infof("ERROR while opening table: %v", err)
 			return err

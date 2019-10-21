@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/DataDog/zstd"
 	"github.com/coocood/badger/fileutil"
@@ -34,11 +35,13 @@ import (
 	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
+	"github.com/dgraph-io/ristretto"
 	"github.com/golang/snappy"
 	"github.com/pingcap/errors"
 )
 
 const fileSuffix = ".sst"
+const intSize = int(unsafe.Sizeof(int(0)))
 
 // Table represents a loaded table file with the info we have about it
 type Table struct {
@@ -66,6 +69,8 @@ type Table struct {
 	surf *surf.SuRF
 
 	compression options.CompressionType
+
+	cache *ristretto.Cache
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -94,11 +99,15 @@ type block struct {
 	data   []byte
 }
 
+func (b *block) size() int64 {
+	return int64(intSize + len(b.data))
+}
+
 // OpenTable assumes file has only one table and opens it.  Takes ownership of fd upon function
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(fd *os.File, loadingMode options.FileLoadingMode, compression options.CompressionType) (*Table, error) {
+func OpenTable(fd *os.File, loadingMode options.FileLoadingMode, compression options.CompressionType, cache *ristretto.Cache) (*Table, error) {
 	fileInfo, err := fd.Stat()
 	if err != nil {
 		// It's OK to ignore fd.Close() errs in this function because we have only read
@@ -118,6 +127,7 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode, compression opt
 		id:          id,
 		loadingMode: loadingMode,
 		compression: compression,
+		cache:       cache,
 	}
 
 	t.tableSize = int(fileInfo.Size())
@@ -286,6 +296,13 @@ func (t *Table) block(idx int) (block, error) {
 	if idx > 0 {
 		startOffset = int(t.blockEndOffsets[idx-1])
 	}
+	if t.cache != nil {
+		key := t.blockCacheKey(idx)
+		blk, ok := t.cache.Get(key)
+		if ok && blk != nil {
+			return blk.(block), nil
+		}
+	}
 	blk := block{
 		offset: startOffset,
 	}
@@ -302,6 +319,10 @@ func (t *Table) block(idx int) (block, error) {
 		return block{}, errors.Wrapf(err,
 			"failed to decode compressed data in file: %s at offset: %d, len: %d",
 			t.fd.Name(), blk.offset, dataLen)
+	}
+	if t.cache != nil {
+		key := t.blockCacheKey(idx)
+		t.cache.Set(key, blk, blk.size())
 	}
 	return blk, nil
 }
@@ -348,6 +369,12 @@ func (t *Table) MarkCompacting(flag bool) {
 
 func (t *Table) IsCompacting() bool {
 	return atomic.LoadInt32(&t.compacting) == 1
+}
+
+func (t *Table) blockCacheKey(idx int) uint64 {
+	y.Assert(t.ID() < math.MaxUint32)
+	y.Assert(idx < math.MaxUint32)
+	return (t.ID() << 32) | uint64(idx)
 }
 
 // Size is its file size in bytes

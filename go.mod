@@ -10,8 +10,8 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.0 // indirect
 	github.com/coocood/bbloom v0.0.0-20190830030839-58deb6228d64
 	github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2
-	github.com/dgraph-io/badger v1.6.0
-	github.com/dgraph-io/ristretto v0.0.0-20190916120426-cd2835491e0e
+	github.com/dgraph-io/badger v1.6.0 // indirect
+	github.com/dgraph-io/ristretto v0.0.0-20191010170704-2ba187ef9534
 	github.com/dgryski/go-farm v0.0.0-20190423205320-6a90982ecee2
 	github.com/dustin/go-humanize v1.0.0
 	github.com/gogo/protobuf v1.2.1 // indirect
@@ -30,6 +30,7 @@ require (
 	github.com/spf13/cobra v0.0.5
 	github.com/stretchr/objx v0.2.0 // indirect
 	github.com/stretchr/testify v1.3.0
+	golang.org/x/net v0.0.0-20190620200207-3b0461eec859
 	golang.org/x/sys v0.0.0-20190626221950-04f50cda93cb
 	golang.org/x/time v0.0.0-20181108054448-85acf8d2951c
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
