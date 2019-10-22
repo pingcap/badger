@@ -100,8 +100,8 @@ func (bf *blobFile) loadDiscards() error {
 }
 
 func (bf *blobFile) read(bp blobPointer, s *y.Slice) (buf []byte, err error) {
-	buf = s.Resize(int(bp.length))
 	physicalOff := int64(bf.getPhysicalOffset(bp.logicalAddr))
+	buf = s.Resize(int(bp.length))
 	_, err = bf.fd.ReadAt(buf, physicalOff) // skip the 4 bytes length.
 	return buf, err
 }
@@ -289,15 +289,18 @@ func (bm *blobManager) Open(kv *DB, opt Options) error {
 	return nil
 }
 
-func (bm *blobManager) read(ptr []byte, s *y.Slice, cache map[uint32]*blobFile) ([]byte, error) {
+func (bm *blobManager) read(ptr []byte, s *y.Slice, cache map[uint32]*blobCache) ([]byte, error) {
 	var bp blobPointer
 	bp.decode(ptr)
-	bf, ok := cache[bp.fid]
+	bc, ok := cache[bp.fid]
 	if !ok {
-		bf = bm.getFile(bp.fid)
-		cache[bf.fid] = bf
+		bf := bm.getFile(bp.fid)
+		bc = &blobCache{
+			file: bf,
+		}
+		cache[bf.fid] = bc
 	}
-	return bf.read(bp, s)
+	return bc.read(bp, s)
 }
 
 func (bm *blobManager) getFile(fid uint32) *blobFile {
@@ -309,6 +312,9 @@ func (bm *blobManager) getFile(fid uint32) *blobFile {
 		if ok {
 			file = bm.physicalFiles[physicalID]
 		}
+	}
+	if file == nil {
+		log.Error("failed to get file ", fid)
 	}
 	file.incrRef()
 	bm.filesLock.RUnlock()
@@ -662,4 +668,39 @@ func (h *blobGCHandler) buildDiscardPhysicalOffsets(file *blobFile, blobBytes []
 		}
 	}
 	return discards, blobBytesOff
+}
+
+type blobCache struct {
+	file         *blobFile
+	cacheData    []byte
+	cacheOffset  uint32
+	lastPhysical uint32
+}
+
+const cacheSize = 64 * 1024
+
+func (bc *blobCache) read(bp blobPointer, slice *y.Slice) ([]byte, error) {
+	physicalOffset := bc.file.getPhysicalOffset(bp.logicalAddr)
+	lastPhysical := bc.lastPhysical
+	bc.lastPhysical = physicalOffset
+	if lastPhysical == 0 || bp.length > cacheSize/2 {
+		return bc.file.read(bp, slice)
+	}
+	if physicalOffset >= bc.cacheOffset && physicalOffset+bp.length < bc.cacheOffset+uint32(len(bc.cacheData)) {
+		off := physicalOffset - bc.cacheOffset
+		return bc.cacheData[off : off+bp.length], nil
+	}
+	if bc.cacheData == nil {
+		bc.cacheData = make([]byte, cacheSize)
+	}
+	readLen := uint32(len(bc.cacheData))
+	if readLen > bc.file.fileSize-physicalOffset {
+		readLen = bc.file.fileSize - physicalOffset
+	}
+	_, err := bc.file.fd.ReadAt(bc.cacheData[:readLen], int64(physicalOffset))
+	if err != nil {
+		return nil, err
+	}
+	bc.cacheOffset = physicalOffset
+	return bc.cacheData[:bp.length], nil
 }

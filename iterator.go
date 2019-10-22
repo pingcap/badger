@@ -89,7 +89,7 @@ func (item *Item) Value() ([]byte, error) {
 			item.slice = new(y.Slice)
 		}
 		if item.txn.blobCache == nil {
-			item.txn.blobCache = map[uint32]*blobFile{}
+			item.txn.blobCache = map[uint32]*blobCache{}
 		}
 		return item.db.blobManger.read(item.vptr, item.slice, item.txn.blobCache)
 	}
