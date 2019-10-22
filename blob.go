@@ -617,7 +617,7 @@ func (h *blobGCHandler) extractValidEntries(validEntries []validEntry, file *blo
 	for _, mappingEntry := range file.mappingEntries {
 		physicalToLogical[mappingEntry.physicalOffset] = mappingEntry.logicalAddr
 	}
-	discardedPhysicalOffsets, endOff := h.buildDiscardPhysicalOffets(file, blobBytes)
+	discardedPhysicalOffsets, endOff := h.buildDiscardPhysicalOffsets(file, blobBytes)
 	cursor := file.mappingSize
 	for cursor < endOff {
 		valLen := binary.LittleEndian.Uint32(blobBytes[cursor:])
@@ -643,7 +643,7 @@ func (h *blobGCHandler) extractValidEntries(validEntries []validEntry, file *blo
 	return validEntries
 }
 
-func (h *blobGCHandler) buildDiscardPhysicalOffets(file *blobFile, blobBytes []byte) (discards map[uint32]struct{}, endOff uint32) {
+func (h *blobGCHandler) buildDiscardPhysicalOffsets(file *blobFile, blobBytes []byte) (discards map[uint32]struct{}, endOff uint32) {
 	discards = make(map[uint32]struct{})
 	blobBytesOff := uint32(len(blobBytes))
 	for {
