@@ -799,7 +799,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		var bb *blobFileBuilder
 		if db.opt.ValueThreshold > 0 {
-			bb, err = newBlobFileBuilder(fileID, db.opt.Dir, db.opt.TableBuilderOptions.WriteBufferSize)
+			bb, err = newBlobFileBuilder(db.blobManger.allocFileID(), db.opt.Dir, db.opt.TableBuilderOptions.WriteBufferSize)
 			if err != nil {
 				return y.Wrap(err)
 			}

@@ -74,24 +74,24 @@ func TestBlobGC(t *testing.T) {
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
 
-	db, err := Open(opts)
-	require.NoError(t, err)
+	var db *DB
 	expectedMap := make(map[string]string)
-	for i := 0; i < 1000; i++ {
-		err = db.Update(func(txn *Txn) error {
-			key := []byte(fmt.Sprintf("key%d", rand.Intn(100)))
-			val := make([]byte, 128)
-			_, _ = rand.Read(val)
-			expectedMap[string(key)] = fmt.Sprintf("%x", val)
-			return txn.Set(key, val)
-		})
-		require.Nil(t, err)
+	for c := 0; c < 10; c++ {
+		db, err = Open(opts)
+		require.NoError(t, err)
+		for i := 0; i < 100; i++ {
+			err = db.Update(func(txn *Txn) error {
+				key := []byte(fmt.Sprintf("key%d", rand.Intn(100)))
+				val := make([]byte, 128)
+				_, _ = rand.Read(val)
+				expectedMap[string(key)] = fmt.Sprintf("%x", val)
+				return txn.Set(key, val)
+			})
+			require.Nil(t, err)
+		}
+		validateValue(t, db, expectedMap)
+		require.Nil(t, db.Close())
 	}
-	validateValue(t, db, expectedMap)
-	require.Nil(t, db.Close())
-	db, err = Open(opts)
-	require.Nil(t, err)
-	validateValue(t, db, expectedMap)
 }
 
 func validateValue(t *testing.T, db *DB, expectedMap map[string]string) {

@@ -113,6 +113,7 @@ func (l *DirectWriter) Finish() error {
 	if err != nil {
 		return err
 	}
+	l.fileOff = finalLength
 	err = l.fd.Truncate(finalLength)
 	if err != nil {
 		return err

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -66,6 +67,13 @@ type blobFile struct {
 
 	// only accessed by gcHandler
 	totalDiscard uint32
+}
+
+func (bf *blobFile) getID() uint32 {
+	if bf == nil {
+		return math.MaxUint32
+	}
+	return bf.fid
 }
 
 func (bf *blobFile) loadOffsetMap() error {
@@ -137,7 +145,7 @@ type blobFileBuilder struct {
 	writer *fileutil.DirectWriter
 }
 
-func newBlobFileBuilder(fid uint64, dir string, writeBufferSize int) (*blobFileBuilder, error) {
+func newBlobFileBuilder(fid uint32, dir string, writeBufferSize int) (*blobFileBuilder, error) {
 	fileName := newBlobFileName(fid, dir)
 	file, err := directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
@@ -207,7 +215,7 @@ func newBlobFile(path string, fid, fileSize uint32) (*blobFile, error) {
 	}, nil
 }
 
-func newBlobFileName(id uint64, dir string) string {
+func newBlobFileName(id uint32, dir string) string {
 	return filepath.Join(dir, fmt.Sprintf("%08x", id)+blobFileSuffix)
 }
 
@@ -219,6 +227,7 @@ type blobManager struct {
 	dirPath           string
 	kv                *DB
 	discardCh         chan<- *DiscardStats
+	maxFileID         uint32
 }
 
 func (bm *blobManager) Open(kv *DB, opt Options) error {
@@ -289,6 +298,10 @@ func (bm *blobManager) Open(kv *DB, opt Options) error {
 	return nil
 }
 
+func (bm *blobManager) allocFileID() uint32 {
+	return atomic.AddUint32(&bm.maxFileID, 1)
+}
+
 func (bm *blobManager) read(ptr []byte, s *y.Slice, cache map[uint32]*blobCache) ([]byte, error) {
 	var bp blobPointer
 	bp.decode(ptr)
@@ -340,12 +353,16 @@ func (bm *blobManager) addFile(file *blobFile) error {
 }
 
 func (bm *blobManager) addGCFile(oldFiles []*blobFile, newFile *blobFile, logicalFiles map[uint32]struct{}) error {
-	log.Infof("addGCFile old files %d, new file id %d, logical files %d", len(oldFiles), newFile.fid, len(logicalFiles))
+	oldFids := make([]uint32, len(oldFiles))
+	for i, v := range oldFiles {
+		oldFids[i] = v.fid
+	}
+	log.Infof("addGCFile old files %v, new file id %d, logical files %v", oldFids, newFile.getID(), logicalFiles)
 	buf := make([]byte, len(oldFiles)*8)
 	for i, oldFile := range oldFiles {
 		offset := i * 8
 		binary.LittleEndian.PutUint32(buf[offset:], oldFile.fid)
-		binary.LittleEndian.PutUint32(buf[offset+4:], newFile.fid)
+		binary.LittleEndian.PutUint32(buf[offset+4:], newFile.getID())
 	}
 	_, err := bm.changeLog.Write(buf)
 	if err != nil {
@@ -356,12 +373,18 @@ func (bm *blobManager) addGCFile(oldFiles []*blobFile, newFile *blobFile, logica
 		return err
 	}
 	bm.filesLock.Lock()
-	bm.physicalFiles[newFile.fid] = newFile
+	if newFile != nil {
+		bm.physicalFiles[newFile.fid] = newFile
+		for logicalFid := range logicalFiles {
+			bm.logicalToPhysical[logicalFid] = newFile.fid
+		}
+	} else {
+		for logicalFid := range logicalFiles {
+			delete(bm.logicalToPhysical, logicalFid)
+		}
+	}
 	for _, old := range oldFiles {
 		delete(bm.physicalFiles, old.fid)
-	}
-	for logicalFid := range logicalFiles {
-		bm.logicalToPhysical[logicalFid] = newFile.fid
 	}
 	bm.filesLock.Unlock()
 	for _, old := range oldFiles {
@@ -378,41 +401,58 @@ type fidNode struct {
 func (bm *blobManager) loadChangeLogs() (validFids map[uint32]struct{}, err error) {
 	changeLogFileName := filepath.Join(bm.dirPath, "blob_change.log")
 	data, err := ioutil.ReadFile(changeLogFileName)
-	logicalMap := map[uint32]*fidNode{} // maps logical fid to a physical fid.
-	toFidNode := new(fidNode)
-	validFids = map[uint32]struct{}{}
-	if err == nil {
-		log.Infof("load blob change logs file, size %d", len(data))
-		for i := 0; i < len(data); i += 8 {
-			fromFid := binary.LittleEndian.Uint32(data[i:])
-			toFid := binary.LittleEndian.Uint32(data[i+4:])
-			if toFid != toFidNode.fid {
-				toFidNode = &fidNode{fid: toFid}
-			}
-			if oldNode, ok := logicalMap[fromFid]; ok {
-				for oldNode.next != nil {
-					oldNode = oldNode.next
-				}
-				oldNode.next = toFidNode
-			} else {
-				logicalMap[fromFid] = toFidNode
-			}
-		}
-	} else if !os.IsNotExist(err) {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	bm.logicalToPhysical = make(map[uint32]uint32, len(logicalMap))
-	for logicalFid, fidNode := range logicalMap {
-		for fidNode.next != nil {
-			fidNode = fidNode.next
-		}
-		if logicalFid != fidNode.fid {
-			bm.logicalToPhysical[logicalFid] = fidNode.fid
-		}
-		validFids[fidNode.fid] = struct{}{}
-	}
+	validFids = bm.buildLogicalToPhysical(data)
 	bm.changeLog, err = os.OpenFile(changeLogFileName, os.O_CREATE|os.O_RDWR, 0666)
-	return validFids, err
+	if err != nil {
+		return nil, err
+	}
+	_, err = bm.changeLog.Seek(0, 2)
+	if err != nil {
+		return nil, err
+	}
+	return validFids, nil
+}
+
+func (bm *blobManager) buildLogicalToPhysical(data []byte) (validFids map[uint32]struct{}) {
+	changeLogMap := map[uint32]uint32{} // maps old fid to a new fid.
+	logicalFids := map[uint32]struct{}{}
+	for i := 0; i < len(data); i += 8 {
+		fromFid := binary.LittleEndian.Uint32(data[i:])
+		toFid := binary.LittleEndian.Uint32(data[i+4:])
+		changeLogMap[fromFid] = toFid
+		if fromFid == toFid {
+			logicalFids[fromFid] = struct{}{}
+		}
+	}
+	bm.logicalToPhysical = map[uint32]uint32{}
+	validFids = map[uint32]struct{}{}
+	for fid := range logicalFids {
+		toFid := getToFid(changeLogMap, fid)
+		if toFid != math.MaxUint32 {
+			bm.logicalToPhysical[fid] = toFid
+			validFids[toFid] = struct{}{}
+			if bm.maxFileID < toFid {
+				bm.maxFileID = toFid
+			}
+		}
+	}
+	return
+}
+
+func getToFid(logicalMap map[uint32]uint32, toFid uint32) uint32 {
+	for {
+		nextToFid, ok := logicalMap[toFid]
+		if !ok {
+			return toFid
+		}
+		if nextToFid == toFid {
+			return toFid
+		}
+		toFid = nextToFid
+	}
 }
 
 type blobGCHandler struct {
@@ -530,11 +570,17 @@ func (h *blobGCHandler) doGCIfNeeded() error {
 		}
 		validEntries = h.extractValidEntries(validEntries, blobFile, blobBytes)
 	}
+	if len(validEntries) == 0 {
+		for _, oldFile := range oldFiles {
+			delete(h.physicalCache, oldFile.fid)
+		}
+		return h.bm.addGCFile(oldFiles, nil, nil)
+	}
 	sort.Slice(validEntries, func(i, j int) bool {
 		return validEntries[i].logicalAddr.Less(validEntries[j].logicalAddr)
 	})
 	newFid := uint32(h.bm.kv.lc.reserveFileID())
-	fileName := newBlobFileName(uint64(newFid), h.bm.kv.opt.Dir)
+	fileName := newBlobFileName(newFid, h.bm.kv.opt.Dir)
 	file, err := directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		return err
