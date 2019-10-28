@@ -96,6 +96,16 @@ func (item *Item) Value() ([]byte, error) {
 	return item.vptr, nil
 }
 
+// ValueSize returns the size of the value without the cost of retrieving the value.
+func (item *Item) ValueSize() int {
+	if item.meta&bitValuePointer > 0 {
+		var bp blobPointer
+		bp.decode(item.vptr)
+		return int(bp.length)
+	}
+	return len(item.vptr)
+}
+
 // ValueCopy returns a copy of the value of the item from the value log, writing it to dst slice.
 // If nil is passed, or capacity of dst isn't sufficient, a new slice would be allocated and
 // returned. Tip: It might make sense to reuse the returned slice as dst argument for the next call.

@@ -61,6 +61,8 @@ func getItemValue(t *testing.T, item *Item) (val []byte) {
 	if v == nil {
 		return nil
 	}
+	vSize := item.ValueSize()
+	require.Equal(t, vSize, len(v))
 	another, err := item.ValueCopy(nil)
 	require.NoError(t, err)
 	require.Equal(t, v, another)
