@@ -80,7 +80,7 @@ func (s *Arena) putNode(height int) uint32 {
 // size of val. We could also store this size inside arena but the encoding and
 // decoding will incur some overhead.
 func (s *Arena) putVal(v y.ValueStruct) uint32 {
-	l := uint32(v.EncodedSize())
+	l := v.EncodedSize()
 	n := atomic.AddUint32(&s.n, l)
 	y.Assert(int(n) <= len(s.buf))
 	m := n - l
@@ -114,13 +114,13 @@ func (s *Arena) getKey(offset uint32, size uint16) []byte {
 
 // getVal returns byte slice at offset. The given size should be just the value
 // size and should NOT include the meta bytes.
-func (s *Arena) getVal(offset uint32, size uint16) (ret y.ValueStruct) {
-	ret.Decode(s.buf[offset : offset+uint32(size)])
+func (s *Arena) getVal(offset uint32, size uint32) (ret y.ValueStruct) {
+	ret.Decode(s.buf[offset : offset+size])
 	return
 }
 
-func (s *Arena) fillVal(vs *y.ValueStruct, offset uint32, size uint16) {
-	vs.Decode(s.buf[offset : offset+uint32(size)])
+func (s *Arena) fillVal(vs *y.ValueStruct, offset uint32, size uint32) {
+	vs.Decode(s.buf[offset : offset+size])
 }
 
 // getNodeOffset returns the offset of node in the arena. If the node pointer is

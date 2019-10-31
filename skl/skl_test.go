@@ -390,6 +390,15 @@ func TestPutWithHint(t *testing.T) {
 	require.True(t, cntGot == cnt)
 }
 
+func TestPutLargeValue(t *testing.T) {
+	l := NewSkiplist(arenaSize)
+	key := randomKey()
+	val := make([]byte, 128 * 1024)
+	l.Put(key, y.ValueStruct{Value: val})
+	result := l.Get(key)
+	require.Equal(t, val, result.Value)
+}
+
 func randomKey() []byte {
 	b := make([]byte, 8)
 	key := rand.Uint32()

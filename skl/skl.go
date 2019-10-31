@@ -116,12 +116,12 @@ func newNode(arena *Arena, key []byte, v y.ValueStruct, height int) *node {
 	return node
 }
 
-func encodeValue(valOffset uint32, valSize uint16) uint64 {
+func encodeValue(valOffset uint32, valSize uint32) uint64 {
 	return uint64(valSize)<<32 | uint64(valOffset)
 }
 
-func decodeValue(value uint64) (valOffset uint32, valSize uint16) {
-	return uint32(value), uint16(value >> 32)
+func decodeValue(value uint64) (valOffset uint32, valSize uint32) {
+	return uint32(value), uint32(value >> 32)
 }
 
 // NewSkiplist makes a new empty skiplist, with a given arena size
@@ -136,7 +136,7 @@ func NewSkiplist(arenaSize int64) *Skiplist {
 	}
 }
 
-func (n *node) getValueOffset() (uint32, uint16) {
+func (n *node) getValueOffset() (uint32, uint32) {
 	value := atomic.LoadUint64(&n.value)
 	return decodeValue(value)
 }
