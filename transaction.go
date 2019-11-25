@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
 	"github.com/pingcap/errors"
@@ -38,8 +39,6 @@ type oracle struct {
 	sync.Mutex
 	writeLock  sync.Mutex
 	nextCommit uint64
-
-	readMark *y.FastWaterMark
 
 	// commits stores a key fingerprint and latest commit counter for it.
 	// refCount is used to clear out commits map to avoid a memory blowup.
@@ -143,7 +142,6 @@ func (o *oracle) doneCommit(cts uint64) {
 
 // Txn represents a Badger transaction.
 type Txn struct {
-	wmNode   *y.WaterMarkNode
 	readTs   uint64
 	commitTs uint64
 
@@ -155,7 +153,7 @@ type Txn struct {
 
 	db        *DB
 	discarded bool
-	refs      RefMap
+	guard     *epoch.Guard
 
 	size         int64
 	count        int64
@@ -355,7 +353,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	}
 
 	seek := y.KeyWithTs(key, txn.readTs)
-	vs := txn.db.get(seek, txn.refs)
+	vs := txn.db.get(seek)
 	if !vs.Valid() {
 		return nil, ErrKeyNotFound
 	}
@@ -397,7 +395,7 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 		keyValuePairs[i].hash = farm.Fingerprint64(key)
 		keyValuePairs[i].key = y.KeyWithTs(key, txn.readTs)
 	}
-	txn.db.multiGet(keyValuePairs, txn.refs)
+	txn.db.multiGet(keyValuePairs)
 	items = make([]*Item, len(keys))
 	for i, pair := range keyValuePairs {
 		if pair.found && !isDeleted(pair.val.Meta) {
@@ -427,20 +425,12 @@ func (txn *Txn) Discard() {
 	if atomic.LoadInt32(&txn.numIterators) > 0 {
 		panic("Unclosed iterator at time of Txn.Discard.")
 	}
-	for t := range txn.refs {
-		if err := t.DecrRef(); err != nil {
-			panic(err)
-		}
-	}
 	txn.discarded = true
-	txn.db.orc.readMark.Done(txn.wmNode)
-	for _, bc := range txn.blobCache {
-		bc.file.decrRef()
-	}
 	txn.blobCache = nil
 	if txn.update {
 		txn.db.orc.decrRef()
 	}
+	txn.guard.Done()
 }
 
 // Commit commits the transaction, following these steps:
@@ -532,16 +522,15 @@ func (db *DB) NewTransaction(update bool) *Txn {
 		// DB is read-only, force read-only transaction.
 		update = false
 	}
-	readTS := db.orc.readTs()
+	readTs := db.orc.readTs()
 	txn := &Txn{
 		update: update,
 		db:     db,
 		count:  1,                       // One extra entry for BitFin.
 		size:   int64(len(txnKey) + 10), // Some buffer for the extra entry.
-		refs:   RefMap{},
+		readTs: readTs,
+		guard:  db.resourceMgr.AcquireWithPayload(readTs),
 	}
-	txn.wmNode = db.orc.readMark.Begin(readTS)
-	txn.readTs = txn.wmNode.ReadTS
 	if update {
 		txn.pendingWrites = make(map[string]*Entry)
 		txn.db.orc.addRef()

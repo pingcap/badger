@@ -21,6 +21,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 	"github.com/pingcap/errors"
@@ -42,18 +43,6 @@ type levelHandler struct {
 	maxTotalSize int64
 	db           *DB
 	metrics      *y.LevelMetricsSet
-}
-
-type RefMap = map[*table.Table]struct{}
-
-func addTableToRefMap(refs RefMap, t *table.Table) {
-	if refs == nil {
-		return
-	}
-	if _, ok := refs[t]; !ok {
-		refs[t] = struct{}{}
-		t.IncrRef()
-	}
 }
 
 func (s *levelHandler) getTotalSize() int64 {
@@ -86,7 +75,7 @@ func (s *levelHandler) initTables(tables []*table.Table) {
 }
 
 // deleteTables remove tables idx0, ..., idx1-1.
-func (s *levelHandler) deleteTables(toDel []*table.Table) error {
+func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, isMove bool) error {
 	s.Lock() // s.Unlock() below
 
 	toDelMap := make(map[uint64]struct{})
@@ -110,10 +99,16 @@ func (s *levelHandler) deleteTables(toDel []*table.Table) error {
 	if s.level != 0 {
 		assertTablesOrder(newTables)
 	}
+	s.Unlock()
 
-	s.Unlock() // Unlock s _before_ we DecrRef our tables, which can be slow.
-
-	return decrRefs(toDel)
+	if !isMove {
+		del := make([]epoch.Resource, len(toDel))
+		for i := range toDel {
+			del[i] = toDel[i]
+		}
+		guard.Delete(del)
+	}
+	return nil
 }
 
 func assertTablesOrder(tables []*table.Table) {
@@ -142,7 +137,7 @@ func sortTables(tables []*table.Table) {
 
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
-func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef) error {
+func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, guard *epoch.Guard) error {
 	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
 	assertTablesOrder(newTables)
 
@@ -151,16 +146,15 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef) e
 	// Increase totalSize first.
 	for _, tbl := range newTables {
 		s.totalSize += tbl.Size()
-		tbl.IncrRef()
 	}
 	left, right := s.overlappingTables(levelHandlerRLocked{}, cd.nextRange)
-	toDecr := make([]*table.Table, 0, right-left)
+	toDelete := make([]epoch.Resource, 0, right-left)
 	// Update totalSize and reference counts.
 	for i := left; i < right; i++ {
 		tbl := s.tables[i]
 		if containsTable(cd.bot, tbl) {
 			s.totalSize -= tbl.Size()
-			toDecr = append(toDecr, tbl)
+			toDelete = append(toDelete, tbl)
 		}
 	}
 	tables := make([]*table.Table, 0, left+len(newTables)+len(cd.skippedTbls)+(len(s.tables)-right))
@@ -171,8 +165,9 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef) e
 	sortTables(tables)
 	assertTablesOrder(tables)
 	s.tables = tables
-	s.Unlock() // s.Unlock before we DecrRef tables -- that can be slow.
-	return decrRefs(toDecr)
+	s.Unlock()
+	guard.Delete(toDelete)
+	return nil
 }
 
 func containsTable(tables []*table.Table, tbl *table.Table) bool {
@@ -182,25 +177,6 @@ func containsTable(tables []*table.Table, tbl *table.Table) bool {
 		}
 	}
 	return false
-}
-
-func decrRefs(tables []*table.Table) error {
-	for _, table := range tables {
-		if table == nil {
-			continue
-		}
-		if err := table.DecrRef(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func forceDecrRefs(tables []*table.Table) {
-	err := decrRefs(tables)
-	if err != nil {
-		panic(err)
-	}
 }
 
 func newLevelHandler(db *DB, level int) *levelHandler {
@@ -224,7 +200,6 @@ func (s *levelHandler) tryAddLevel0Table(t *table.Table) bool {
 	}
 
 	s.tables = append(s.tables, t)
-	t.IncrRef()
 	s.totalSize += t.Size()
 
 	return true
@@ -269,50 +244,49 @@ func (s *levelHandler) close() error {
 	return errors.Wrap(err, "levelHandler.close")
 }
 
-// refTablesForKey acquires a read-lock to access s.tables. It returns a list of tables.
-func (s *levelHandler) refTablesForKey(key []byte) []*table.Table {
+// getTablesForKey acquires a read-lock to access s.tables. It returns a list of tables.
+func (s *levelHandler) getTablesForKey(key []byte) []*table.Table {
 	s.RLock()
 	defer s.RUnlock()
 
 	if s.level == 0 {
-		return s.refLevel0Tables()
+		return s.getLevel0Tables()
 	}
-	tbl := s.refLevelNTable(key)
+	tbl := s.getLevelNTable(key)
 	if tbl == nil {
 		return nil
 	}
 	return []*table.Table{tbl}
 }
 
-// refTablesForKeys returns tables for pairs.
+// getTablesForKeys returns tables for pairs.
 // level0 returns all tables.
 // level1+ returns tables for every key.
-func (s *levelHandler) refTablesForKeys(pairs []keyValuePair) []*table.Table {
+func (s *levelHandler) getTablesForKeys(pairs []keyValuePair) []*table.Table {
 	s.RLock()
 	defer s.RUnlock()
 	if s.level == 0 {
-		return s.refLevel0Tables()
+		return s.getLevel0Tables()
 	}
 	out := make([]*table.Table, len(pairs))
 	for i, pair := range pairs {
-		out[i] = s.refLevelNTable(pair.key)
+		out[i] = s.getLevelNTable(pair.key)
 	}
 	return out
 }
 
-func (s *levelHandler) refLevel0Tables() []*table.Table {
+func (s *levelHandler) getLevel0Tables() []*table.Table {
 	// For level 0, we need to check every table. Remember to make a copy as s.tables may change
 	// once we exit this function, and we don't want to lock s.tables while seeking in tables.
 	// CAUTION: Reverse the tables.
 	out := make([]*table.Table, 0, len(s.tables))
 	for i := len(s.tables) - 1; i >= 0; i-- {
 		out = append(out, s.tables[i])
-		s.tables[i].IncrRef()
 	}
 	return out
 }
 
-func (s *levelHandler) refLevelNTable(key []byte) *table.Table {
+func (s *levelHandler) getLevelNTable(key []byte) *table.Table {
 	// For level >= 1, we can do a binary search as key range does not overlap.
 	idx := sort.Search(len(s.tables), func(i int) bool {
 		return y.CompareKeysWithVer(s.tables[i].Biggest(), key) >= 0
@@ -322,22 +296,19 @@ func (s *levelHandler) refLevelNTable(key []byte) *table.Table {
 		return nil
 	}
 	tbl := s.tables[idx]
-	tbl.IncrRef()
 	return tbl
 }
 
 // get returns value for a given key or the key after that. If not found, return nil.
-func (s *levelHandler) get(key []byte, keyHash uint64, refs RefMap) y.ValueStruct {
-	tables := s.refTablesForKey(key)
-	defer forceDecrRefs(tables)
-	return s.getInTables(key, keyHash, tables, refs)
+func (s *levelHandler) get(key []byte, keyHash uint64) y.ValueStruct {
+	tables := s.getTablesForKey(key)
+	return s.getInTables(key, keyHash, tables)
 }
 
-func (s *levelHandler) getInTables(key []byte, keyHash uint64, tables []*table.Table, refs RefMap) y.ValueStruct {
+func (s *levelHandler) getInTables(key []byte, keyHash uint64, tables []*table.Table) y.ValueStruct {
 	for _, table := range tables {
 		result := s.getInTable(key, keyHash, table)
 		if result.Valid() {
-			addTableToRefMap(refs, table)
 			return result
 		}
 	}
@@ -351,7 +322,7 @@ func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table
 	}
 	resultKey, resultVs, ok := table.PointGet(key, keyHash)
 	if !ok {
-		it := table.NewIteratorNoRef(false)
+		it := table.NewIterator(false)
 		it.Seek(key)
 		if !it.Valid() {
 			s.metrics.NumLSMBloomFalsePositive.Inc()
@@ -371,17 +342,16 @@ func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table
 	return
 }
 
-func (s *levelHandler) multiGet(pairs []keyValuePair, refs RefMap) {
-	tables := s.refTablesForKeys(pairs)
-	defer forceDecrRefs(tables)
+func (s *levelHandler) multiGet(pairs []keyValuePair) {
+	tables := s.getTablesForKeys(pairs)
 	if s.level == 0 {
-		s.multiGetLevel0(pairs, tables, refs)
+		s.multiGetLevel0(pairs, tables)
 	} else {
-		s.multiGetLevelN(pairs, tables, refs)
+		s.multiGetLevelN(pairs, tables)
 	}
 }
 
-func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table, refs RefMap) {
+func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table) {
 	for _, table := range tables {
 		for i := range pairs {
 			pair := &pairs[i]
@@ -395,13 +365,12 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 			if val.Valid() {
 				pair.val = val
 				pair.found = true
-				addTableToRefMap(refs, table)
 			}
 		}
 	}
 }
 
-func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table, refs RefMap) {
+func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table) {
 	for i := range pairs {
 		pair := &pairs[i]
 		if pair.found {
@@ -415,7 +384,6 @@ func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Tabl
 		if val.Valid() {
 			pair.val = val
 			pair.found = true
-			addTableToRefMap(refs, table)
 		}
 	}
 }

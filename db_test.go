@@ -334,7 +334,7 @@ func TestGetMore(t *testing.T) {
 			txn := db.NewTransaction(false)
 			item, err := txn.Get(data(i))
 			if err != nil {
-				t.Error(err)
+				t.Errorf("key %v", data(i))
 			}
 			require.EqualValues(t, string(data(i)), string(getItemValue(t, item)))
 			txn.Discard()
@@ -363,7 +363,7 @@ func TestGetMore(t *testing.T) {
 			got := string(getItemValue(t, item))
 			if expectedValue != got {
 
-				vs := db.get(y.KeyWithTs(k, math.MaxUint64), nil)
+				vs := db.get(y.KeyWithTs(k, math.MaxUint64))
 				fmt.Printf("wanted=%q Item: %s\n", k, item)
 				fmt.Printf("on re-run, got version: %+v\n", vs)
 
@@ -1086,9 +1086,9 @@ func TestMinReadTs(t *testing.T) {
 				return txn.Set([]byte("x"), []byte("y"))
 			}))
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Second)
 		require.Equal(t, uint64(10), db.orc.readTs())
-		min := db.orc.readMark.MinReadTS()
+		min := db.getCompactSafeTs()
 		require.Equal(t, uint64(9), min)
 
 		readTxn := db.NewTransaction(false)
@@ -1098,23 +1098,24 @@ func TestMinReadTs(t *testing.T) {
 			}))
 		}
 		require.Equal(t, uint64(20), db.orc.readTs())
-		time.Sleep(time.Millisecond)
-		require.Equal(t, min, db.orc.readMark.MinReadTS())
+		time.Sleep(time.Second)
+		require.Equal(t, min, db.getCompactSafeTs())
 		readTxn.Discard()
-		time.Sleep(time.Millisecond)
-		require.Equal(t, uint64(10), db.orc.readMark.MinReadTS())
-		// The minReadTS can only be increase by newer txn done.
-		readTxn = db.NewTransaction(false)
-		readTxn.Discard()
-		require.Equal(t, uint64(20), db.orc.readMark.MinReadTS())
+		time.Sleep(time.Second)
+		require.Equal(t, uint64(19), db.getCompactSafeTs())
+		// // The minReadTS can only be increase by newer txn done.
+		// readTxn = db.NewTransaction(false)
+		// readTxn.Discard()
+		// time.Sleep(time.Second)
+		// require.Equal(t, uint64(20), db.getCompactSafeTs())
 
 		for i := 0; i < 10; i++ {
 			db.View(func(txn *Txn) error {
 				return nil
 			})
 		}
-		time.Sleep(time.Millisecond)
-		require.Equal(t, uint64(20), db.orc.readMark.MinReadTS())
+		time.Sleep(time.Second)
+		require.Equal(t, uint64(20), db.getCompactSafeTs())
 	})
 }
 

@@ -24,12 +24,9 @@ func NewMemTable(arenaSize int64) *MemTable {
 	return &MemTable{skl: skl.NewSkiplist(arenaSize)}
 }
 
-func (mt *MemTable) IncrRef() {
-	mt.skl.IncrRef()
-}
-
-func (mt *MemTable) DecrRef() {
-	mt.skl.DecrRef()
+func (mt *MemTable) Delete() error {
+	mt.skl.Delete()
+	return nil
 }
 
 func (mt *MemTable) Empty() bool {

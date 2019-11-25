@@ -149,11 +149,6 @@ type Iterator struct {
 
 // NewIterator returns a new iterator of the Table
 func (t *Table) NewIterator(reversed bool) *Iterator {
-	t.IncrRef() // Important.
-	return t.NewIteratorNoRef(reversed)
-}
-
-func (t *Table) NewIteratorNoRef(reversed bool) *Iterator {
 	it := &Iterator{t: t, reversed: reversed}
 	binary.BigEndian.PutUint64(it.bi.globalTs[:], t.globalTs)
 	return it
@@ -161,7 +156,7 @@ func (t *Table) NewIteratorNoRef(reversed bool) *Iterator {
 
 // Close closes the iterator (and it must be called).
 func (itr *Iterator) Close() error {
-	return itr.t.DecrRef()
+	return nil
 }
 
 func (itr *Iterator) reset() {
@@ -421,9 +416,6 @@ type ConcatIterator struct {
 
 // NewConcatIterator creates a new concatenated iterator
 func NewConcatIterator(tbls []*Table, reversed bool) *ConcatIterator {
-	for _, t := range tbls {
-		t.IncrRef()
-	}
 	return &ConcatIterator{
 		reversed: reversed,
 		iters:    make([]*Iterator, len(tbls)),
@@ -439,7 +431,7 @@ func (s *ConcatIterator) setIdx(idx int) {
 	} else {
 		if s.iters[s.idx] == nil {
 			// We already increased table refs, so init without IncrRef here
-			ti := s.tables[s.idx].NewIteratorNoRef(s.reversed)
+			ti := s.tables[s.idx].NewIterator(s.reversed)
 			ti.next()
 			s.iters[s.idx] = ti
 		}
@@ -528,8 +520,5 @@ func (s *ConcatIterator) Next() {
 
 // Close implements y.Interface.
 func (s *ConcatIterator) Close() error {
-	for _, t := range s.tables {
-		t.DecrRef()
-	}
 	return nil
 }

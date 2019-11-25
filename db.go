@@ -18,7 +18,6 @@ package badger
 
 import (
 	"bytes"
-	"github.com/coocood/badger/protos"
 	"io"
 	"math"
 	"os"
@@ -28,6 +27,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/coocood/badger/epoch"
+	"github.com/coocood/badger/protos"
 
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
@@ -75,7 +77,8 @@ type DB struct {
 	// mem table buffer to avoid expensive allocating big chunk of memory
 	memTableCh chan *table.MemTable
 
-	orc *oracle
+	orc              *oracle
+	minReadTsTracker safeTsTracker
 
 	limiter *rate.Limiter
 
@@ -84,6 +87,8 @@ type DB struct {
 	vlogSize int64
 
 	blobManger blobManager
+
+	resourceMgr *epoch.ResourceManager
 }
 
 const (
@@ -237,7 +242,6 @@ func Open(opt Options) (db *DB, err error) {
 		isManaged:  opt.managedTxns,
 		nextCommit: 1,
 		commits:    make(map[uint64]uint64),
-		readMark:   y.NewFastWaterMark(),
 	}
 
 	db = &DB{
@@ -279,8 +283,10 @@ func Open(opt Options) (db *DB, err error) {
 	go db.updateSize(db.closers.updateSize)
 	db.mt = <-db.memTableCh
 
+	db.resourceMgr = epoch.NewResourceManager(&db.minReadTsTracker)
+
 	// newLevelsController potentially loads files in directory.
-	if db.lc, err = newLevelsController(db, &manifest, opt.TableBuilderOptions); err != nil {
+	if db.lc, err = newLevelsController(db, &manifest, db.resourceMgr, opt.TableBuilderOptions); err != nil {
 		return nil, err
 	}
 	if err = db.blobManger.Open(db, opt); err != nil {
@@ -476,8 +482,10 @@ func (db *DB) Close() (err error) {
 		thisLevel: db.lc.levels[0],
 		nextLevel: db.lc.levels[1],
 	}
+	guard := db.resourceMgr.Acquire()
+	defer guard.Done()
 	if db.lc.fillTablesL0(&cd) {
-		if err := db.lc.runCompactDef(0, cd, nil); err != nil {
+		if err := db.lc.runCompactDef(0, cd, nil, guard); err != nil {
 			log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
 		}
 	} else {
@@ -544,13 +552,11 @@ func (db *DB) getMemTables() []*table.MemTable {
 	defer db.RUnlock()
 	// Get mutable memtable.
 	tables[0] = db.mt
-	tables[0].IncrRef()
 
 	// Get immutable memtables.
 	last := len(db.imm) - 1
 	for i := range db.imm {
 		immt := db.imm[last-i]
-		immt.IncrRef()
 		tables = append(tables, immt)
 	}
 	return tables
@@ -564,13 +570,8 @@ func (db *DB) getMemTables() []*table.MemTable {
 // tables and find the max version among them.  To maintain this invariant, we also need to ensure
 // that all versions of a key are always present in the same table from level 1, because compaction
 // can push any table down.
-func (db *DB) get(key []byte, refs RefMap) y.ValueStruct {
+func (db *DB) get(key []byte) y.ValueStruct {
 	tables := db.getMemTables() // Lock should be released.
-	defer func() {
-		for _, tbl := range tables {
-			tbl.DecrRef()
-		}
-	}()
 
 	db.metrics.NumGets.Inc()
 	for _, table := range tables {
@@ -581,16 +582,11 @@ func (db *DB) get(key []byte, refs RefMap) y.ValueStruct {
 		}
 	}
 	keyHash := farm.Fingerprint64(y.ParseKey(key))
-	return db.lc.get(key, keyHash, refs)
+	return db.lc.get(key, keyHash)
 }
 
-func (db *DB) multiGet(pairs []keyValuePair, refs RefMap) {
+func (db *DB) multiGet(pairs []keyValuePair) {
 	tables := db.getMemTables() // Lock should be released.
-	defer func() {
-		for _, tbl := range tables {
-			tbl.DecrRef()
-		}
-	}()
 
 	var foundCount, mtGets int
 	for _, table := range tables {
@@ -614,7 +610,7 @@ func (db *DB) multiGet(pairs []keyValuePair, refs RefMap) {
 	if foundCount == len(pairs) {
 		return
 	}
-	db.lc.multiGet(pairs, refs)
+	db.lc.multiGet(pairs)
 }
 
 func (db *DB) updateOffset(off logOffset) {
@@ -778,6 +774,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if ft.mt == nil {
 			return nil
 		}
+		guard := db.resourceMgr.Acquire()
 		var headInfo *protos.HeadInfo
 		if !ft.mt.Empty() {
 			headInfo = &protos.HeadInfo{
@@ -840,9 +837,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 			log.Infof("ERROR while opening table: %v", err)
 			return err
 		}
-		// We own a ref on tbl.
-		err = db.lc.addLevel0Table(tbl, headInfo) // This will incrRef (if we don't error, sure)
-		tbl.DecrRef()                             // Releases our ref.
+		err = db.lc.addLevel0Table(tbl, headInfo)
 		if err != nil {
 			return err
 		}
@@ -851,8 +846,9 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		db.Lock()
 		y.Assert(ft.mt == db.imm[0]) //For now, single threaded.
 		db.imm = db.imm[1:]
-		ft.mt.DecrRef() // Return memory.
+		guard.Delete([]epoch.Resource{ft.mt})
 		db.Unlock()
+		guard.Done()
 		ft.wg.Done()
 	}
 	return nil
@@ -963,4 +959,50 @@ func (db *DB) IterateVLog(offset uint64, fn func(e Entry)) error {
 		}
 	}
 	return nil
+}
+
+func (db *DB) getCompactSafeTs() uint64 {
+	return atomic.LoadUint64(&db.minReadTsTracker.safeTs)
+}
+
+type safeTsTracker struct {
+	safeTs uint64
+
+	maxInactive uint64
+	minActive   uint64
+}
+
+func (t *safeTsTracker) Begin() {
+	// t.maxInactive = 0
+	t.minActive = math.MaxUint64
+}
+
+func (t *safeTsTracker) Inspect(payload interface{}, isActive bool) {
+	ts, ok := payload.(uint64)
+	if !ok {
+		return
+	}
+
+	if isActive {
+		if ts < t.minActive {
+			t.minActive = ts
+		}
+	} else {
+		if ts > t.maxInactive {
+			t.maxInactive = ts
+		}
+	}
+}
+
+func (t *safeTsTracker) End() {
+	var safe uint64
+	if t.minActive == math.MaxUint64 {
+		safe = t.maxInactive
+	} else {
+		safe = t.minActive - 1
+	}
+
+	if safe > t.safeTs {
+		atomic.StoreUint64(&t.safeTs, safe)
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/y"
 	"github.com/ncw/directio"
@@ -59,7 +60,6 @@ type blobFile struct {
 	path           string
 	fid            uint32
 	fd             *os.File
-	ref            int32
 	fileSize       uint32
 	mappingSize    uint32
 	mmap           []byte
@@ -125,18 +125,12 @@ func (bf *blobFile) getPhysicalOffset(addr logicalAddr) uint32 {
 	return bf.mappingEntries[n].physicalOffset
 }
 
-func (bf *blobFile) incrRef() {
-	atomic.AddInt32(&bf.ref, 1)
-}
-
-func (bf *blobFile) decrRef() {
-	if atomic.AddInt32(&bf.ref, -1) == 0 {
-		if bf.mmap != nil {
-			y.Munmap(bf.mmap)
-		}
-		bf.fd.Close()
-		os.Remove(bf.path)
+func (bf *blobFile) Delete() error {
+	if bf.mmap != nil {
+		y.Munmap(bf.mmap)
 	}
+	bf.fd.Close()
+	return os.Remove(bf.path)
 }
 
 type blobFileBuilder struct {
@@ -211,7 +205,6 @@ func newBlobFile(path string, fid, fileSize uint32) (*blobFile, error) {
 		fid:      fid,
 		fd:       file,
 		fileSize: fileSize,
-		ref:      1,
 	}, nil
 }
 
@@ -329,7 +322,6 @@ func (bm *blobManager) getFile(fid uint32) *blobFile {
 	if file == nil {
 		log.Error("failed to get file ", fid)
 	}
-	file.incrRef()
 	bm.filesLock.RUnlock()
 	return file
 }
@@ -352,7 +344,7 @@ func (bm *blobManager) addFile(file *blobFile) error {
 	return nil
 }
 
-func (bm *blobManager) addGCFile(oldFiles []*blobFile, newFile *blobFile, logicalFiles map[uint32]struct{}) error {
+func (bm *blobManager) addGCFile(oldFiles []*blobFile, newFile *blobFile, logicalFiles map[uint32]struct{}, guard *epoch.Guard) error {
 	oldFids := make([]uint32, len(oldFiles))
 	for i, v := range oldFiles {
 		oldFids[i] = v.fid
@@ -387,9 +379,11 @@ func (bm *blobManager) addGCFile(oldFiles []*blobFile, newFile *blobFile, logica
 		delete(bm.physicalFiles, old.fid)
 	}
 	bm.filesLock.Unlock()
-	for _, old := range oldFiles {
-		old.decrRef()
+	del := make([]epoch.Resource, len(oldFids))
+	for i := range oldFiles {
+		del[i] = oldFiles[i]
 	}
+	guard.Delete(del)
 	return nil
 }
 
@@ -496,8 +490,6 @@ func (h *blobGCHandler) getPhysicalFile(physicalFid uint32) *blobFile {
 	file := h.physicalCache[physicalFid]
 	if file == nil {
 		file = h.bm.getFile(physicalFid)
-		// We don't need to keep a reference for the blob file because blobGCHandler handles the deletion.
-		file.decrRef()
 		h.physicalCache[physicalFid] = file
 	}
 	return file
@@ -545,6 +537,9 @@ var (
 )
 
 func (h *blobGCHandler) doGCIfNeeded() error {
+	guard := h.bm.kv.resourceMgr.Acquire()
+	defer guard.Done()
+
 	if len(h.gcCandidate) == 0 {
 		return nil
 	}
@@ -574,7 +569,7 @@ func (h *blobGCHandler) doGCIfNeeded() error {
 		for _, oldFile := range oldFiles {
 			delete(h.physicalCache, oldFile.fid)
 		}
-		return h.bm.addGCFile(oldFiles, nil, nil)
+		return h.bm.addGCFile(oldFiles, nil, nil, guard)
 	}
 	sort.Slice(validEntries, func(i, j int) bool {
 		return validEntries[i].logicalAddr.Less(validEntries[j].logicalAddr)
@@ -644,7 +639,7 @@ func (h *blobGCHandler) doGCIfNeeded() error {
 	for logicalFid := range logicalFids {
 		h.logicalToPhysical[logicalFid] = newFid
 	}
-	return h.bm.addGCFile(oldFiles, blobFile, logicalFids)
+	return h.bm.addGCFile(oldFiles, blobFile, logicalFids, guard)
 }
 
 type logicalAddr struct {

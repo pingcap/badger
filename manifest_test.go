@@ -25,6 +25,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
@@ -170,7 +171,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	f := buildTestTable(t, "k", 2)
 	t1, err := table.OpenTable(f, options.MemoryMap)
 	require.NoError(t, err)
-	defer t1.DecrRef()
+	defer t1.Delete()
 
 	done := lh0.tryAddLevel0Table(t1)
 	require.Equal(t, true, done)
@@ -180,17 +181,20 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 		nextLevel: lh1,
 	}
 
+	rm := epoch.NewResourceManager(epoch.NoOpInspector{})
+	g := rm.Acquire()
+	defer g.Done()
 	manifest := createManifest()
-	lc, err := newLevelsController(kv, &manifest, DefaultOptions.TableBuilderOptions)
+	lc, err := newLevelsController(kv, &manifest, rm, DefaultOptions.TableBuilderOptions)
 	require.NoError(t, err)
 	done = lc.fillTablesL0(&cd)
 	require.Equal(t, true, done)
-	lc.runCompactDef(0, cd, nil)
+	lc.runCompactDef(0, cd, nil, g)
 
 	f = buildTestTable(t, "l", 2)
 	t2, err := table.OpenTable(f, options.MemoryMap)
 	require.NoError(t, err)
-	defer t2.DecrRef()
+	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)
 	require.Equal(t, true, done)
 
@@ -199,7 +203,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 		nextLevel: lh1,
 	}
 	lc.fillTablesL0(&cd)
-	lc.runCompactDef(0, cd, nil)
+	lc.runCompactDef(0, cd, nil, g)
 }
 
 func TestManifestRewrite(t *testing.T) {

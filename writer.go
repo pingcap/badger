@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
@@ -30,8 +31,13 @@ import (
 type writeWorker struct {
 	*DB
 	writeLSMCh chan postLogTask
-	mergeLSMCh chan *table.MemTable
+	mergeLSMCh chan mergeLSMTask
 	flushCh    chan postLogTask
+}
+
+type mergeLSMTask struct {
+	mt    *table.MemTable
+	guard *epoch.Guard
 }
 
 type postLogTask struct {
@@ -48,7 +54,7 @@ func startWriteWorker(db *DB) *y.Closer {
 	w := &writeWorker{
 		DB:         db,
 		writeLSMCh: make(chan postLogTask, 1),
-		mergeLSMCh: make(chan *table.MemTable, 1),
+		mergeLSMCh: make(chan mergeLSMTask, 1),
 		flushCh:    make(chan postLogTask),
 	}
 	if db.opt.SyncWrites {
@@ -142,9 +148,9 @@ func (w *writeWorker) runWriteLSM(lc *y.Closer) {
 
 func (w *writeWorker) runMergeLSM(lc *y.Closer) {
 	defer lc.Done()
-	for mt := range w.mergeLSMCh {
-		mt.MergeListToSkl()
-		mt.DecrRef()
+	for task := range w.mergeLSMCh {
+		task.mt.MergeListToSkl()
+		task.guard.Done()
 	}
 }
 
@@ -223,8 +229,11 @@ func (w *writeWorker) writeToLSM(entries []*Entry) error {
 			},
 		})
 	}
+	guard := w.resourceMgr.Acquire()
 	w.mt.PutToPendingList(es)
-	w.mt.IncrRef()
-	w.mergeLSMCh <- w.mt
+	w.mergeLSMCh <- mergeLSMTask{
+		mt:    w.mt,
+		guard: guard,
+	}
 	return nil
 }

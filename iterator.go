@@ -288,11 +288,6 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	atomic.AddInt32(&txn.numIterators, 1)
 
 	tables := txn.db.getMemTables()
-	defer func() {
-		for _, tbl := range tables {
-			tbl.DecrRef()
-		}
-	}()
 	if len(opt.StartKey) > 0 {
 		opt.startKeyWithTS = y.KeyWithTs(opt.StartKey, math.MaxUint64)
 	}

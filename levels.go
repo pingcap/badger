@@ -24,6 +24,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
@@ -38,8 +39,9 @@ type levelsController struct {
 	nextFileID uint64 // Atomic
 
 	// The following are initialized once and const.
-	levels []*levelHandler
-	kv     *DB
+	resourceMgr *epoch.ResourceManager
+	levels      []*levelHandler
+	kv          *DB
 
 	cstatus compactStatus
 
@@ -76,12 +78,13 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 	return nil
 }
 
-func newLevelsController(kv *DB, mf *Manifest, opt options.TableBuilderOptions) (*levelsController, error) {
+func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt options.TableBuilderOptions) (*levelsController, error) {
 	y.Assert(kv.opt.NumLevelZeroTablesStall > kv.opt.NumLevelZeroTables)
 	s := &levelsController{
-		kv:     kv,
-		levels: make([]*levelHandler, kv.opt.TableBuilderOptions.MaxLevels),
-		opt:    opt,
+		kv:          kv,
+		levels:      make([]*levelHandler, kv.opt.TableBuilderOptions.MaxLevels),
+		opt:         opt,
+		resourceMgr: mgr,
 	}
 	s.cstatus.levels = make([]*levelCompactStatus, kv.opt.TableBuilderOptions.MaxLevels)
 
@@ -195,14 +198,16 @@ func (lc *levelsController) runWorker(c *y.Closer) {
 		select {
 		// Can add a done channel or other stuff.
 		case <-ticker.C:
+			guard := lc.resourceMgr.Acquire()
 			prios := lc.pickCompactLevels()
 			for _, p := range prios {
 				// TODO: Handle error.
-				didCompact, _ := lc.doCompact(p)
+				didCompact, _ := lc.doCompact(p, guard)
 				if didCompact {
 					break
 				}
 			}
+			guard.Done()
 		case <-c.HasBeenClosed():
 			return
 		}
@@ -378,7 +383,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	// Pick up the currently pending transactions' min readTs, so we can discard versions below this
 	// readTs. We should never discard any versions starting from above this timestamp, because that
 	// would affect the snapshot view guarantee provided by transactions.
-	minReadTs := lc.kv.orc.readMark.MinReadTS()
+	safeTs := lc.kv.getCompactSafeTs()
 
 	var filter CompactionFilter
 	var guards []Guard
@@ -450,11 +455,12 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 
 			// Only consider the versions which are below the minReadTs, otherwise, we might end up discarding the
 			// only valid version for a running transaction.
-			if version <= minReadTs {
+			if version <= safeTs {
 				// key is the latest readable version of this key, so we simply discard all the rest of the versions.
 				skipKey = y.SafeCopy(skipKey, key)
 
 				if isDeleted(vs.Meta) {
+					log.Errorf("discard key %v at %d", key, version)
 					// If this key range has overlap with lower levels, then keep the deletion
 					// marker with the latest version, discarding the rest. We have set skipKey,
 					// so the following key versions would be skipped. Otherwise discard the deletion marker.
@@ -498,7 +504,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 			return
 		}
 		if len(tbl.Smallest()) == 0 {
-			tbl.DecrRef()
+			tbl.Delete()
 		} else {
 			newTables = append(newTables, tbl)
 		}
@@ -665,7 +671,7 @@ func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables [
 		// we can skip it during compaction to reduce write amplification.
 		var added bool
 		for _, topTbl := range cd.top {
-			iter := topTbl.NewIteratorNoRef(false)
+			iter := topTbl.NewIterator(false)
 			iter.Seek(t.Smallest())
 			if iter.Valid() && y.CompareKeysWithVer(iter.Key(), t.Biggest()) <= 0 {
 				cd.bot = append(cd.bot, t)
@@ -831,7 +837,7 @@ func (lc *levelsController) shouldStartSubCompaction(cd compactDef) bool {
 }
 */
 
-func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Limiter) error {
+func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Limiter, guard *epoch.Guard) error {
 	timeStart := time.Now()
 
 	thisLevel := cd.thisLevel
@@ -839,16 +845,17 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 
 	var newTables []*table.Table
 	var changeSet protos.ManifestChangeSet
+	var topMove bool
 	if l > 0 && len(cd.bot) == 0 && len(cd.skippedTbls) == 0 {
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.top
 		changeSet = protos.ManifestChangeSet{Changes: []*protos.ManifestChange{
 			makeTableMoveDownChange(newTables[0].ID(), cd.nextLevel.level),
 		}}
+		topMove = true
 	} else {
 		var err error
 		newTables, err = lc.compactBuildTables(l, cd, limiter, nil)
-		defer forceDecrRefs(newTables)
 		if err != nil {
 			return err
 		}
@@ -862,10 +869,10 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 
 	// See comment earlier in this function about the ordering of these ops, and the order in which
 	// we access levels when reading.
-	if err := nextLevel.replaceTables(newTables, &cd); err != nil {
+	if err := nextLevel.replaceTables(newTables, &cd, guard); err != nil {
 		return err
 	}
-	if err := thisLevel.deleteTables(cd.top); err != nil {
+	if err := thisLevel.deleteTables(cd.top, guard, topMove); err != nil {
 		return err
 	}
 
@@ -878,7 +885,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 }
 
 // doCompact picks some table on level l and compacts it away to the next level.
-func (lc *levelsController) doCompact(p compactionPriority) (bool, error) {
+func (lc *levelsController) doCompact(p compactionPriority, guard *epoch.Guard) (bool, error) {
 	l := p.level
 	y.Assert(l+1 < lc.kv.opt.TableBuilderOptions.MaxLevels) // Sanity check.
 
@@ -905,7 +912,7 @@ func (lc *levelsController) doCompact(p compactionPriority) (bool, error) {
 	defer lc.cstatus.delete(cd) // Remove the ranges from compaction status.
 
 	log.Infof("Running compaction: %d", cd.thisLevel.level)
-	if err := lc.runCompactDef(l, cd, lc.kv.limiter); err != nil {
+	if err := lc.runCompactDef(l, cd, lc.kv.limiter, guard); err != nil {
 		// This compaction couldn't be done successfully.
 		log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
 		return false, err
@@ -970,7 +977,7 @@ func (s *levelsController) close() error {
 }
 
 // get returns the found value if any. If not found, we return nil.
-func (s *levelsController) get(key []byte, keyHash uint64, refs RefMap) y.ValueStruct {
+func (s *levelsController) get(key []byte, keyHash uint64) y.ValueStruct {
 	// It's important that we iterate the levels from 0 on upward.  The reason is, if we iterated
 	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
 	// read level L's tables post-compaction and level L+1's tables pre-compaction.  (If we do
@@ -979,7 +986,7 @@ func (s *levelsController) get(key []byte, keyHash uint64, refs RefMap) y.ValueS
 	start := time.Now()
 	defer s.kv.metrics.LSMGetDuration.Observe(time.Since(start).Seconds())
 	for _, h := range s.levels {
-		vs := h.get(key, keyHash, refs) // Calls h.RLock() and h.RUnlock().
+		vs := h.get(key, keyHash) // Calls h.RLock() and h.RUnlock().
 		if vs.Valid() {
 			return vs
 		}
@@ -987,10 +994,10 @@ func (s *levelsController) get(key []byte, keyHash uint64, refs RefMap) y.ValueS
 	return y.ValueStruct{}
 }
 
-func (s *levelsController) multiGet(pairs []keyValuePair, refs RefMap) {
+func (s *levelsController) multiGet(pairs []keyValuePair) {
 	start := time.Now()
 	for _, h := range s.levels {
-		h.multiGet(pairs, refs)
+		h.multiGet(pairs)
 	}
 	s.kv.metrics.LSMMultiGetDuration.Observe(time.Since(start).Seconds())
 }

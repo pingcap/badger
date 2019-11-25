@@ -26,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
@@ -49,8 +48,6 @@ type Table struct {
 	baseKeys        []byte
 	baseKeysEndOffs []uint32
 
-	ref int32 // For file garbage collection.  Atomic.
-
 	loadingMode options.FileLoadingMode
 	mmap        []byte // Memory mapped.
 
@@ -62,35 +59,20 @@ type Table struct {
 	hIdx hashIndex
 }
 
-// IncrRef increments the refcount (having to do with whether the file should be deleted)
-func (t *Table) IncrRef() {
-	atomic.AddInt32(&t.ref, 1)
-}
-
-// DecrRef decrements the refcount and possibly deletes the table
-func (t *Table) DecrRef() error {
-	newRef := atomic.AddInt32(&t.ref, -1)
-	if newRef == 0 {
-		// We can safely delete this file, because for all the current files, we always have
-		// at least one reference pointing to them.
-
-		// It's necessary to delete windows files
-		if t.loadingMode == options.MemoryMap {
-			y.Munmap(t.mmap)
-		}
-		if err := t.fd.Truncate(0); err != nil {
-			// This is very important to let the FS know that the file is deleted.
-			return err
-		}
-		filename := t.fd.Name()
-		if err := t.fd.Close(); err != nil {
-			return err
-		}
-		if err := os.Remove(filename); err != nil {
-			return err
-		}
+// Delete delete table's file from disk.
+func (t *Table) Delete() error {
+	if t.loadingMode == options.MemoryMap {
+		y.Munmap(t.mmap)
 	}
-	return nil
+	if err := t.fd.Truncate(0); err != nil {
+		// This is very important to let the FS know that the file is deleted.
+		return err
+	}
+	filename := t.fd.Name()
+	if err := t.fd.Close(); err != nil {
+		return err
+	}
+	return os.Remove(filename)
 }
 
 type block struct {
@@ -119,7 +101,6 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 	}
 	t := &Table{
 		fd:          fd,
-		ref:         1, // Caller is given one reference.
 		id:          id,
 		loadingMode: loadingMode,
 	}
@@ -182,7 +163,7 @@ func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, boo
 		return nil, y.ValueStruct{}, true
 	}
 
-	it := t.NewIteratorNoRef(false)
+	it := t.NewIterator(false)
 	it.seekFromOffset(int(blkIdx), int(offset), key)
 
 	if !it.Valid() || !y.SameKey(key, it.Key()) {
