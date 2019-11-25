@@ -30,13 +30,20 @@ const (
 )
 
 type TableBuilderOptions struct {
-	EnableHashIndex     bool
 	HashUtilRatio       float32
 	WriteBufferSize     int
 	BytesPerSecond      int
 	MaxLevels           int
 	LevelSizeMultiplier int
 	LogicalBloomFPR     float64
+	SuRFStartLevel      int
+	SuRFOptions         SuRFOptions
+}
+
+type SuRFOptions struct {
+	HashSuffixLen  int
+	RealSuffixLen  int
+	BitsPerKeyHint int
 }
 
 type ValueLogWriterOptions struct {

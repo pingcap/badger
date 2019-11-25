@@ -38,7 +38,11 @@ func key(prefix string, i int) string {
 }
 
 var defaultBuilderOpt = options.TableBuilderOptions{
-	EnableHashIndex:     true,
+	SuRFStartLevel: 0,
+	SuRFOptions: options.SuRFOptions{
+		BitsPerKeyHint: 40,
+		RealSuffixLen:  10,
+	},
 	HashUtilRatio:       0.75,
 	WriteBufferSize:     1024 * 1024,
 	MaxLevels:           7,
@@ -376,12 +380,13 @@ func TestIterateFromEnd(t *testing.T) {
 			ti.reset()
 			ti.seek(y.KeyWithTs([]byte("zzzzzz"), 0)) // Seek to end, an invalid element.
 			require.False(t, ti.Valid())
+			ti.seekToLast()
 			for i := n - 1; i >= 0; i-- {
-				ti.prev()
 				require.True(t, ti.Valid())
 				v := ti.Value()
 				require.EqualValues(t, fmt.Sprintf("%d", i), string(v.Value))
 				require.EqualValues(t, 'A', v.Meta)
+				ti.prev()
 			}
 			ti.prev()
 			require.False(t, ti.Valid())
@@ -784,7 +789,6 @@ func BenchmarkBuildTable(b *testing.B) {
 			f, err := y.OpenSyncedFile(filename, false)
 			y.Check(err)
 			opt := defaultBuilderOpt
-			opt.EnableHashIndex = false
 			for bn := 0; bn < b.N; bn++ {
 				builder := NewTableBuilder(f, nil, 0, opt)
 				for i := 0; i < n; i++ {

@@ -315,9 +315,6 @@ func (s *levelHandler) getInTables(key []byte, keyHash uint64, tables []*table.T
 
 func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table) (result y.ValueStruct) {
 	s.metrics.NumLSMGets.Inc()
-	if table.DoesNotHave(keyHash) {
-		return
-	}
 	resultKey, resultVs, ok := table.PointGet(key, keyHash)
 	if !ok {
 		it := table.NewIterator(false)

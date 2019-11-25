@@ -1376,7 +1376,7 @@ func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
 	f, err := y.OpenSyncedFile(filename, true)
 	require.NoError(t, err)
 	builder := table.NewExternalTableBuilder(f, nil, options.TableBuilderOptions{
-		EnableHashIndex:     true,
+		SuRFStartLevel:      8,
 		HashUtilRatio:       0.75,
 		WriteBufferSize:     1024 * 1024,
 		MaxLevels:           7,

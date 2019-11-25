@@ -17,6 +17,7 @@
 package table
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
 	"os"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
+	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
 	"github.com/dgryski/go-farm"
@@ -72,10 +74,16 @@ type Builder struct {
 	// The offsets are relative to the start of the block.
 	entryEndOffsets []uint32
 
+	prevKey []byte
+
 	hashEntries []hashEntry
 	bloomFpr    float64
 	isExternal  bool
 	opt         options.TableBuilderOptions
+	useSuRF     bool
+
+	surfKeys [][]byte
+	surfVals [][]byte
 }
 
 // NewTableBuilder makes a new TableBuilder.
@@ -92,6 +100,7 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    fprBase / levelFactor,
 		opt:         opt,
+		useSuRF:     level >= opt.SuRFStartLevel,
 	}
 }
 
@@ -124,6 +133,9 @@ func (b *Builder) resetBuffers() {
 	b.blockEndOffsets = b.blockEndOffsets[:0]
 	b.entryEndOffsets = b.entryEndOffsets[:0]
 	b.hashEntries = b.hashEntries[:0]
+	b.surfKeys = nil
+	b.surfVals = nil
+	b.prevKey = b.prevKey[:0]
 }
 
 // Close closes the TableBuilder.
@@ -142,17 +154,36 @@ func (b Builder) keyDiff(newKey []byte) []byte {
 	return newKey
 }
 
+func (b *Builder) addIndex(key []byte) {
+	keyNoTs := key
+	if !b.isExternal {
+		keyNoTs = y.ParseKey(key)
+	}
+
+	cmp := bytes.Compare(keyNoTs, b.prevKey)
+	y.Assert(cmp >= 0)
+	if cmp == 0 {
+		return
+	}
+	b.prevKey = y.SafeCopy(b.prevKey, keyNoTs)
+
+	keyHash := farm.Fingerprint64(keyNoTs)
+	// It is impossible that a single table contains 16 million keys.
+	y.Assert(len(b.baseKeysEndOffs) < maxBlockCnt)
+
+	pos := entryPosition{uint16(len(b.baseKeysEndOffs)), uint8(b.counter)}
+	if b.useSuRF {
+		b.surfKeys = append(b.surfKeys, y.SafeCopy(nil, keyNoTs))
+		b.surfVals = append(b.surfVals, pos.encode())
+	} else {
+		b.hashEntries = append(b.hashEntries, hashEntry{pos, keyHash})
+	}
+}
+
 func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	// Add key to bloom filter.
 	if len(key) > 0 {
-		keyNoTs := key
-		if !b.isExternal {
-			keyNoTs = y.ParseKey(key)
-		}
-		keyHash := farm.Fingerprint64(keyNoTs)
-		// It is impossible that a single table contains 16 million keys.
-		y.Assert(len(b.baseKeysEndOffs) < maxBlockCnt)
-		b.hashEntries = append(b.hashEntries, hashEntry{keyHash, uint16(len(b.baseKeysEndOffs)), uint8(b.counter)})
+		b.addIndex(key)
 	}
 
 	// diffKey stores the difference of key with blockBaseKey.
@@ -223,7 +254,7 @@ func (b *Builder) ReachedCapacity(capacity int64) bool {
 // EstimateSize returns the size of the SST to build.
 func (b *Builder) EstimateSize() int {
 	size := b.writtenLen + len(b.buf) + 4*len(b.blockEndOffsets) + len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs)
-	if b.opt.EnableHashIndex {
+	if !b.useSuRF {
 		size += 3 * int(float32(len(b.hashEntries))/b.opt.HashUtilRatio)
 	}
 	return size
@@ -238,15 +269,20 @@ func (b *Builder) Finish() error {
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.baseKeysEndOffs)))...)
 
 	// Write bloom filter.
-	bloomFilter := bbloom.New(float64(len(b.hashEntries)), b.bloomFpr)
-	for _, he := range b.hashEntries {
-		bloomFilter.Add(he.hash)
+	if !b.useSuRF {
+		bloomFilter := bbloom.New(float64(len(b.hashEntries)), b.bloomFpr)
+		for _, he := range b.hashEntries {
+			bloomFilter.Add(he.hash)
+		}
+		bfData := bloomFilter.BinaryMarshal()
+		b.buf = append(b.buf, bfData...)
+		b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
+	} else {
+		b.buf = append(b.buf, u32ToBytes(0)...)
 	}
-	bfData := bloomFilter.BinaryMarshal()
-	b.buf = append(b.buf, bfData...)
-	b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
 
-	if b.opt.EnableHashIndex {
+	// Write Hash Index.
+	if !b.useSuRF {
 		b.buf = buildHashIndex(b.buf, b.hashEntries, b.opt.HashUtilRatio)
 	} else {
 		b.buf = append(b.buf, u32ToBytes(0)...)
@@ -254,6 +290,25 @@ func (b *Builder) Finish() error {
 	if err := b.w.Append(b.buf); err != nil {
 		return err
 	}
+
+	// Write SuRF.
+	if b.useSuRF && len(b.surfKeys) > 0 {
+		hl := uint32(b.opt.SuRFOptions.HashSuffixLen)
+		rl := uint32(b.opt.SuRFOptions.RealSuffixLen)
+		sb := surf.NewBuilder(3, hl, rl)
+		sf := sb.Build(b.surfKeys, b.surfVals, b.opt.SuRFOptions.BitsPerKeyHint)
+		if err := sf.WriteTo(b.w); err != nil {
+			return err
+		}
+		if err := b.w.Append(u32ToBytes(uint32(sf.MarshalSize()))); err != nil {
+			return err
+		}
+	} else {
+		if err := b.w.Append(u32ToBytes(0)); err != nil {
+			return err
+		}
+	}
+
 	ts := uint64(math.MaxUint64)
 	if b.isExternal {
 		// External builder doesn't append ts to the keys, the output sst should has a non-MaxUint64 global ts.

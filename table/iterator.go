@@ -22,6 +22,7 @@ import (
 	"io"
 	"sort"
 
+	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 )
 
@@ -138,6 +139,7 @@ func (itr *blockIterator) prev() {
 // Iterator is an iterator for a Table.
 type Iterator struct {
 	t    *Table
+	surf *surf.Iterator
 	bpos int
 	bi   blockIterator
 	err  error
@@ -151,6 +153,9 @@ type Iterator struct {
 func (t *Table) NewIterator(reversed bool) *Iterator {
 	it := &Iterator{t: t, reversed: reversed}
 	binary.BigEndian.PutUint64(it.bi.globalTs[:], t.globalTs)
+	if t.surf != nil {
+		it.surf = t.surf.NewIterator()
+	}
 	return it
 }
 
@@ -223,6 +228,7 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 		return
 	}
 	itr.bi.seek(key)
+	itr.err = itr.bi.err
 }
 
 func (itr *Iterator) seekBlock(key []byte) int {
@@ -279,7 +285,24 @@ func (itr *Iterator) seekFrom(key []byte) {
 
 // seek will reset iterator and seek to >= key.
 func (itr *Iterator) seek(key []byte) {
-	itr.seekFrom(key)
+	itr.err = nil
+	itr.reset()
+
+	if itr.surf == nil {
+		itr.seekFrom(key)
+		return
+	}
+
+	sit := itr.surf
+	sit.Seek(y.ParseKey(key))
+	if !sit.Valid() {
+		itr.err = io.EOF
+		return
+	}
+
+	var pos entryPosition
+	pos.decode(sit.Value())
+	itr.seekFromOffset(int(pos.blockIdx), int(pos.offset), key)
 }
 
 // seekForPrev will reset iterator and seek to <= key.

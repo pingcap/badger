@@ -158,7 +158,8 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 	if err := w.manifest.addChanges(changes, nil); err != nil {
 		return err
 	}
-	return cd.nextLevel.replaceTables(newTables, &cd, guard)
+	cd.nextLevel.replaceTables(newTables, &cd, guard)
+	return nil
 }
 
 func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {

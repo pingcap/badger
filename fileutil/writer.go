@@ -53,6 +53,10 @@ func (l *writer) Reset(fd *os.File) {
 	l.bufOff = 0
 }
 
+func (l *writer) Write(p []byte) (n int, err error) {
+	return len(p), l.Append(p)
+}
+
 func (l *writer) Append(val []byte) error {
 	for {
 		n := copy(l.writeBuf[l.bufOff:], val)

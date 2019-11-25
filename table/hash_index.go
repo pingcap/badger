@@ -11,13 +11,28 @@ const (
 )
 
 type hashEntry struct {
+	entryPosition
 	hash uint64
+}
 
+type entryPosition struct {
 	// blockIdx is the index of block which contains this key.
 	blockIdx uint16
 
 	// offset is the index of this key in block.
 	offset uint8
+}
+
+func (e *entryPosition) encode() []byte {
+	b := make([]byte, 3)
+	binary.LittleEndian.PutUint16(b, e.blockIdx)
+	b[2] = e.offset
+	return b
+}
+
+func (e *entryPosition) decode(b []byte) {
+	e.blockIdx = binary.LittleEndian.Uint16(b)
+	e.offset = b[2]
 }
 
 func buildHashIndex(buf []byte, hashEntries []hashEntry, hashUtilRatio float32) []byte {

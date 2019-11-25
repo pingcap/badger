@@ -166,13 +166,18 @@ var DefaultOptions = Options{
 	ValueThreshold:          32,
 	Truncate:                false,
 	TableBuilderOptions: options.TableBuilderOptions{
-		EnableHashIndex:     false,
+		SuRFStartLevel:      8,
 		HashUtilRatio:       0.75,
 		WriteBufferSize:     2 * 1024 * 1024,
 		BytesPerSecond:      -1,
 		MaxLevels:           7,
 		LevelSizeMultiplier: 10,
 		LogicalBloomFPR:     0.01,
+		SuRFOptions: options.SuRFOptions{
+			HashSuffixLen:  4,
+			RealSuffixLen:  0,
+			BitsPerKeyHint: 28,
+		},
 	},
 	ValueLogWriteOptions: options.ValueLogWriterOptions{
 		WriteBufferSize: 2 * 1024 * 1024,

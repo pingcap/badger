@@ -681,9 +681,7 @@ func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables [
 		// we can skip it during compaction to reduce write amplification.
 		var added bool
 		for _, topTbl := range cd.top {
-			iter := topTbl.NewIterator(false)
-			iter.Seek(t.Smallest())
-			if iter.Valid() && y.CompareKeysWithVer(iter.Key(), t.Biggest()) <= 0 {
+			if topTbl.HasOverlap(t.Smallest(), t.Biggest(), true) {
 				cd.bot = append(cd.bot, t)
 				added = true
 				break
