@@ -7,12 +7,6 @@ import (
 
 type guardList struct {
 	head unsafe.Pointer
-
-	it struct {
-		loc     *unsafe.Pointer
-		curr    *Guard
-		delCurr bool
-	}
 }
 
 func (l *guardList) add(g *Guard) {
@@ -26,22 +20,21 @@ func (l *guardList) add(g *Guard) {
 }
 
 func (l *guardList) iterate(f func(*Guard) bool) {
-	it := &l.it
-	it.loc = &l.head
-	it.curr = (*Guard)(atomic.LoadPointer(&l.head))
+	loc := &l.head
+	curr := (*Guard)(atomic.LoadPointer(&l.head))
 
-	for it.curr != nil {
-		delete := f(it.curr)
+	for curr != nil {
+		delete := f(curr)
 
-		next := it.curr.next
+		next := curr.next
 		// if current node is the head of list when start iteration
 		// we cannot delete it from list, because the `it.list.head` may
 		// point to a new node, if `it.loc` is updated we will lost the newly added nodes.
-		if delete && it.loc != &l.head {
-			*it.loc = next
+		if delete && loc != &l.head {
+			*loc = next
 		} else {
-			it.loc = &it.curr.next
+			loc = &curr.next
 		}
-		it.curr = (*Guard)(next)
+		curr = (*Guard)(next)
 	}
 }
