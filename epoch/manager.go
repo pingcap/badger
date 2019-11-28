@@ -26,16 +26,32 @@ type Guard struct {
 	next unsafe.Pointer
 }
 
-func (h *Guard) Delete(resources []Resource) {
-	globalEpoch := h.mgr.currentEpoch.load()
-	h.deletions = append(h.deletions, deletion{
+func (g *Guard) Delete(resources []Resource) {
+	globalEpoch := g.mgr.currentEpoch.load()
+	g.deletions = append(g.deletions, deletion{
 		epoch:     globalEpoch,
 		resources: resources,
 	})
 }
 
-func (h *Guard) Done() {
-	h.localEpoch.store(h.localEpoch.load().deactivate())
+func (g *Guard) Done() {
+	g.localEpoch.store(g.localEpoch.load().deactivate())
+}
+
+func (g *Guard) collect(globalEpoch epoch) bool {
+	ds := g.deletions[:0]
+	for _, d := range g.deletions {
+		if globalEpoch.sub(d.epoch) < 2 {
+			ds = append(ds, d)
+			continue
+		}
+		for _, r := range d.resources {
+			r.Delete()
+		}
+		d.resources = nil
+	}
+	g.deletions = ds
+	return len(ds) == 0
 }
 
 type Resource interface {
@@ -46,6 +62,7 @@ type ResourceManager struct {
 	currentEpoch atomicEpoch
 
 	// TODO: cache line size for non x86
+	// cachePad make currentEpoch stay in a separate cache line.
 	cachePad  [64]byte
 	guards    guardList
 	inspector GuardsInspector
@@ -65,8 +82,8 @@ func (rm *ResourceManager) AcquireWithPayload(payload interface{}) *Guard {
 		mgr:     rm,
 		payload: payload,
 	}
-	rm.guards.add(g)
 	g.localEpoch.store(rm.currentEpoch.load().activate())
+	rm.guards.add(g)
 	return g
 }
 
@@ -82,49 +99,26 @@ func (rm *ResourceManager) collectLoop() {
 }
 
 func (rm *ResourceManager) collect() {
-	it := rm.guards.newIterator()
 	canAdvance := true
 	globalEpoch := rm.currentEpoch.load()
-	remain := 0
 
 	rm.inspector.Begin()
-	for it.rewind(); it.valid(); it.next() {
-		remain++
-		guard := it.guard()
+	rm.guards.iterate(func(guard *Guard) bool {
 		localEpoch := guard.localEpoch.load()
-		if localEpoch == 0 {
-			// ignore newly added guard
-			continue
-		}
 
 		isActive := localEpoch.isActive()
 		rm.inspector.Inspect(guard.payload, isActive)
 
 		if isActive {
 			canAdvance = canAdvance && localEpoch.sub(globalEpoch) == 0
-			continue
+			return false
 		}
 
-		ds := guard.deletions[:0]
-		for _, d := range guard.deletions {
-			if globalEpoch.sub(d.epoch) < 2 {
-				ds = append(ds, d)
-				continue
-			}
-			for _, r := range d.resources {
-				r.Delete()
-			}
-			d.resources = nil
-		}
-		guard.deletions = ds
-		if len(guard.deletions) == 0 {
-			it.delete()
-			remain--
-		}
-	}
+		return guard.collect(globalEpoch)
+	})
 	rm.inspector.End()
 
-	if canAdvance && remain != 0 {
+	if canAdvance {
 		rm.currentEpoch.store(globalEpoch.successor())
 	}
 }
