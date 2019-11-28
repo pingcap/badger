@@ -2,7 +2,6 @@ package table
 
 import (
 	"github.com/coocood/badger/y"
-	"github.com/pingcap/errors"
 )
 
 // MergeTowIterator is a specialized MergeIterator that only merge tow iterators.
@@ -150,15 +149,6 @@ func (mt *MergeIterator) FillValue(vs *y.ValueStruct) {
 	}
 }
 
-// Close implements y.Iterator
-func (mt *MergeIterator) Close() error {
-	err1 := mt.smaller.iter.Close()
-	err2 := mt.bigger.iter.Close()
-	if err1 != nil {
-		return errors.Wrap(err1, "MergeIterator")
-	}
-	return errors.Wrap(err2, "MergeIterator")
-}
 
 // NewMergeIterator creates a merge iterator
 func NewMergeIterator(iters []y.Iterator, reverse bool) y.Iterator {
@@ -199,8 +189,4 @@ func (e *EmptyIterator) FillValue(vs *y.ValueStruct) {}
 
 func (e *EmptyIterator) Valid() bool {
 	return false
-}
-
-func (e *EmptyIterator) Close() error {
-	return nil
 }

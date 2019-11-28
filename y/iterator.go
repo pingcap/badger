@@ -76,7 +76,4 @@ type Iterator interface {
 	Value() ValueStruct
 	FillValue(vs *ValueStruct)
 	Valid() bool
-
-	// All iterators should be closed so that file garbage collection works.
-	Close() error
 }

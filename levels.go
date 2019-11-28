@@ -376,7 +376,6 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	// Next level has level>=1 and we can use ConcatIterator as key ranges do not overlap.
 	iters = append(iters, table.NewConcatIterator(botTables, false))
 	it := table.NewMergeIterator(iters, false)
-	defer it.Close() // Important to close the iterator to do ref counting.
 
 	it.Rewind()
 

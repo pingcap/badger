@@ -36,8 +36,6 @@ var (
 	closeCount int
 )
 
-func (s *SimpleIterator) Close() error { closeCount++; return nil }
-
 func (s *SimpleIterator) Next() {
 	if !s.reversed {
 		s.idx++
@@ -112,12 +110,6 @@ func getAll(it y.Iterator) ([]string, []string) {
 	return keys, vals
 }
 
-func closeAndCheck(t *testing.T, it y.Iterator, expected int) {
-	closeCount = 0
-	it.Close()
-	require.EqualValues(t, expected, closeCount)
-}
-
 func TestSimpleIterator(t *testing.T) {
 	keys := []string{"1", "2", "3"}
 	vals := []string{"v1", "v2", "v3"}
@@ -126,8 +118,6 @@ func TestSimpleIterator(t *testing.T) {
 	k, v := getAll(it)
 	require.EqualValues(t, keys, k)
 	require.EqualValues(t, vals, v)
-
-	closeAndCheck(t, it, 1)
 }
 
 func reversed(a []string) []string {
@@ -147,7 +137,6 @@ func TestMergeSingle(t *testing.T) {
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, keys, k)
 	require.EqualValues(t, vals, v)
-	closeAndCheck(t, mergeIt, 1)
 }
 
 func TestMergeSingleReversed(t *testing.T) {
@@ -159,7 +148,6 @@ func TestMergeSingleReversed(t *testing.T) {
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, reversed(keys), k)
 	require.EqualValues(t, reversed(vals), v)
-	closeAndCheck(t, mergeIt, 1)
 }
 
 func TestMergeMore(t *testing.T) {
@@ -175,7 +163,6 @@ func TestMergeMore(t *testing.T) {
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, expectedKeys, k)
 	require.EqualValues(t, expectedVals, v)
-	closeAndCheck(t, mergeIt, 4)
 }
 
 // Ensure MergeIterator satisfies the Iterator interface
@@ -189,7 +176,6 @@ func TestMergeIteratorNested(t *testing.T) {
 	k, v := getAll(mergeIt2)
 	require.EqualValues(t, keys, k)
 	require.EqualValues(t, vals, v)
-	closeAndCheck(t, mergeIt2, 1)
 }
 
 func TestMergeIteratorSeek(t *testing.T) {
@@ -202,7 +188,6 @@ func TestMergeIteratorSeek(t *testing.T) {
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, []string{"5", "7", "9"}, k)
 	require.EqualValues(t, []string{"b5", "a7", "d9"}, v)
-	closeAndCheck(t, mergeIt, 4)
 }
 
 func TestMergeIteratorSeekReversed(t *testing.T) {
@@ -215,7 +200,6 @@ func TestMergeIteratorSeekReversed(t *testing.T) {
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, []string{"5", "3", "2", "1"}, k)
 	require.EqualValues(t, []string{"b5", "a3", "b2", "a1"}, v)
-	closeAndCheck(t, mergeIt, 4)
 }
 
 func TestMergeIteratorSeekInvalid(t *testing.T) {
@@ -226,7 +210,6 @@ func TestMergeIteratorSeekInvalid(t *testing.T) {
 	mergeIt := NewMergeIterator([]y.Iterator{it, it2, it3, it4}, false)
 	mergeIt.Seek([]byte("f"))
 	require.False(t, mergeIt.Valid())
-	closeAndCheck(t, mergeIt, 4)
 }
 
 func TestMergeIteratorSeekInvalidReversed(t *testing.T) {
@@ -237,7 +220,6 @@ func TestMergeIteratorSeekInvalidReversed(t *testing.T) {
 	mergeIt := NewMergeIterator([]y.Iterator{it, it2, it3, it4}, true)
 	mergeIt.Seek([]byte("0"))
 	require.False(t, mergeIt.Valid())
-	closeAndCheck(t, mergeIt, 4)
 }
 
 func TestMergeIteratorDuplicate(t *testing.T) {

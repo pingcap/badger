@@ -253,7 +253,6 @@ func TestIteratorNext(t *testing.T) {
 	l := NewSkiplist(arenaSize)
 	defer l.Delete()
 	it := l.NewIterator()
-	defer it.Close()
 	require.False(t, it.Valid())
 	it.SeekToFirst()
 	require.False(t, it.Valid())
@@ -277,7 +276,6 @@ func TestIteratorPrev(t *testing.T) {
 	l := NewSkiplist(arenaSize)
 	defer l.Delete()
 	it := l.NewIterator()
-	defer it.Close()
 	require.False(t, it.Valid())
 	it.SeekToFirst()
 	require.False(t, it.Valid())
@@ -302,7 +300,6 @@ func TestIteratorSeek(t *testing.T) {
 	defer l.Delete()
 
 	it := l.NewIterator()
-	defer it.Close()
 
 	require.False(t, it.Valid())
 	it.SeekToFirst()

@@ -724,7 +724,6 @@ func arenaSize(opt Options) int64 {
 // WriteLevel0Table flushes memtable. It drops deleteValues.
 func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File, bb *blobFileBuilder) error {
 	iter := s.NewIterator(false)
-	defer iter.Close()
 	b := table.NewTableBuilder(f, db.limiter, 0, db.opt.TableBuilderOptions)
 	defer b.Close()
 	var numWrite, bytesWrite int

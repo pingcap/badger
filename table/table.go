@@ -124,7 +124,6 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 	t.readIndex()
 
 	it := t.NewIterator(false)
-	defer it.Close()
 	it.Rewind()
 	if it.Valid() {
 		// key with max ts is the binary smallest key.
@@ -132,7 +131,6 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 	}
 
 	it2 := t.NewIterator(true)
-	defer it2.Close()
 	it2.Rewind()
 	if it2.Valid() {
 		// key with 0 ts is the binary biggest key.

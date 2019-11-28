@@ -65,7 +65,6 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 	guard := w.resourceMgr.Acquire()
 	defer guard.Done()
 	it := w.mt.NewIterator(false)
-	defer it.Close()
 	for _, t := range task.tbls {
 		it.Seek(t.Smallest())
 		if it.Valid() && y.CompareKeysWithVer(it.Key(), y.KeyWithTs(t.Biggest(), 0)) <= 0 {
@@ -167,10 +166,8 @@ func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
 		it := mt.NewIterator(false)
 		it.Seek(kr.left)
 		if !it.Valid() || y.CompareKeysWithVer(it.Key(), kr.right) <= 0 {
-			it.Close()
 			return true
 		}
-		it.Close()
 	}
 	return false
 }

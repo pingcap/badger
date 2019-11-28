@@ -154,11 +154,6 @@ func (t *Table) NewIterator(reversed bool) *Iterator {
 	return it
 }
 
-// Close closes the iterator (and it must be called).
-func (itr *Iterator) Close() error {
-	return nil
-}
-
 func (itr *Iterator) reset() {
 	itr.bpos = 0
 	itr.err = nil
@@ -516,9 +511,4 @@ func (s *ConcatIterator) Next() {
 			break
 		}
 	}
-}
-
-// Close implements y.Interface.
-func (s *ConcatIterator) Close() error {
-	return nil
 }

@@ -455,11 +455,6 @@ type Iterator struct {
 	n    *node
 }
 
-// Close frees the resources held by the iterator
-func (s *Iterator) Close() error {
-	return nil
-}
-
 // Valid returns true iff the iterator is positioned at a valid node.
 func (s *Iterator) Valid() bool { return s.n != nil }
 
@@ -568,6 +563,3 @@ func (s *UniIterator) FillValue(vs *y.ValueStruct) { s.iter.FillValue(vs) }
 
 // Valid implements y.Interface
 func (s *UniIterator) Valid() bool { return s.iter.Valid() }
-
-// Close implements y.Interface (and frees up the iter's resources)
-func (s *UniIterator) Close() error { return s.iter.Close() }
