@@ -25,7 +25,7 @@ var endian = binary.LittleEndian
 //    selectInByteLut[b00010001][2] = 8
 //    ...
 //    selectInByteLut[b00010001][7] = 8
-var selectInByteLut [256][8]int
+var selectInByteLut [256][8]uint8
 
 func init() {
 	for i := 0; i < 256; i++ {
@@ -39,7 +39,7 @@ func findFirstSet(x int) int {
 	return bits.TrailingZeros64(uint64(x)) + 1
 }
 
-func selectInByte(i, j int) int {
+func selectInByte(i, j int) uint8 {
 	r := 0
 	for ; j != 0; j-- {
 		s := findFirstSet(i)
@@ -49,7 +49,7 @@ func selectInByte(i, j int) int {
 	if i == 0 {
 		return 8
 	}
-	return r + findFirstSet(i) - 1
+	return uint8(r + findFirstSet(i) - 1)
 }
 
 func select64Broadword(x uint64, nth int64) int64 {
@@ -70,7 +70,7 @@ func select64Broadword(x uint64, nth int64) int64 {
 	geqKStep8 := ((step8 | msbsStep8) - byteSums) & msbsStep8
 	place := bits.OnesCount64(geqKStep8) * 8
 	byteRank := k - (((byteSums << 8) >> place) & uint64(0xff))
-	return int64(place + selectInByteLut[(x>>place)&0xff][byteRank])
+	return int64(place + int(selectInByteLut[(x>>place)&0xff][byteRank]))
 }
 
 func popcountBlock(bs []uint64, off, nbits uint32) uint32 {
