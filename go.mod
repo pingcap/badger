@@ -1,6 +1,6 @@
 module github.com/coocood/badger
 
-go 1.12
+go 1.13
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -11,6 +11,7 @@ require (
 	github.com/gogo/protobuf v1.2.1 // indirect
 	github.com/golang/protobuf v1.3.1
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
+	github.com/klauspost/cpuid v1.2.1
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/ncw/directio v1.0.4
 	github.com/ngaut/log v0.0.0-20180314031856-b8e36e7ba5ac
