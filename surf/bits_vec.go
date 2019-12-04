@@ -723,3 +723,99 @@ func extractRealSuffix(suffix uint64, suffixLen uint32) uint64 {
 	mask := (uint64(1) << suffixLen) - 1
 	return suffix & mask
 }
+
+type prefixVector struct {
+	hasPrefixVec  rankVectorSparse
+	prefixOffsets []uint32
+	prefixData    []byte
+}
+
+func (v *prefixVector) Init(hasPrefixBits [][]uint64, numNodesPerLevel []uint32, prefixes [][][]byte) {
+	v.hasPrefixVec.Init(hasPrefixBits, numNodesPerLevel)
+
+	var offset uint32
+	for _, level := range prefixes {
+		for _, prefix := range level {
+			v.prefixOffsets = append(v.prefixOffsets, offset)
+			offset += uint32(len(prefix))
+			v.prefixData = append(v.prefixData, prefix...)
+		}
+	}
+}
+
+func (v *prefixVector) CheckPrefix(key []byte, depth uint32, nodeID uint32) (uint32, bool) {
+	prefix := v.GetPrefix(nodeID)
+	if len(prefix) == 0 {
+		return 0, true
+	}
+
+	if int(depth)+len(prefix) > len(key) {
+		return 0, false
+	}
+	if !bytes.Equal(key[depth:depth+uint32(len(prefix))], prefix) {
+		return 0, false
+	}
+	return uint32(len(prefix)), true
+}
+
+func (v *prefixVector) GetPrefix(nodeID uint32) []byte {
+	if !v.hasPrefixVec.IsSet(nodeID) {
+		return nil
+	}
+
+	prefixID := v.hasPrefixVec.Rank(nodeID) - 1
+	start := v.prefixOffsets[prefixID]
+	end := uint32(len(v.prefixData))
+	if int(prefixID+1) < len(v.prefixOffsets) {
+		end = v.prefixOffsets[prefixID+1]
+	}
+	return v.prefixData[start:end]
+}
+
+func (v *prefixVector) WriteTo(w io.Writer) error {
+	if err := v.hasPrefixVec.WriteTo(w); err != nil {
+		return err
+	}
+
+	var length [8]byte
+	endian.PutUint32(length[:4], uint32(len(v.prefixOffsets)*4))
+	endian.PutUint32(length[4:], uint32(len(v.prefixData)))
+
+	if _, err := w.Write(length[:]); err != nil {
+		return err
+	}
+	if _, err := w.Write(u32SliceToBytes(v.prefixOffsets)); err != nil {
+		return err
+	}
+	if _, err := w.Write(v.prefixData); err != nil {
+		return err
+	}
+
+	padding := v.MarshalSize() - v.rawMarshalSize()
+	var zeros [8]byte
+	_, err := w.Write(zeros[:padding])
+	return err
+}
+
+func (v *prefixVector) Unmarshal(b []byte) []byte {
+	buf1 := v.hasPrefixVec.Unmarshal(b)
+	var cursor int64
+	offsetsLen := int64(endian.Uint32(buf1[cursor:]))
+	cursor += 4
+	dataLen := int64(endian.Uint32(buf1[cursor:]))
+	cursor += 4
+
+	v.prefixOffsets = bytesToU32Slice(buf1[cursor : cursor+offsetsLen])
+	cursor += offsetsLen
+	v.prefixData = buf1[cursor : cursor+dataLen]
+
+	return b[v.MarshalSize():]
+}
+
+func (v *prefixVector) rawMarshalSize() int64 {
+	return v.hasPrefixVec.MarshalSize() + 8 + int64(len(v.prefixOffsets)+len(v.prefixData))
+}
+
+func (v *prefixVector) MarshalSize() int64 {
+	return align(v.rawMarshalSize())
+}
