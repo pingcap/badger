@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
@@ -54,6 +55,8 @@ type Table struct {
 	// The following are initialized once and const.
 	smallest, biggest []byte // Smallest and largest keys.
 	id                uint64 // file id, part of filename
+
+	compacting int32
 
 	bf   bbloom.Bloom
 	hIdx hashIndex
@@ -288,6 +291,17 @@ func (t *Table) SetGlobalTs(ts uint64) error {
 	}
 	t.globalTs = encodeTs
 	return nil
+}
+
+func (t *Table) MarkCompacting(flag bool) {
+	if flag {
+		atomic.StoreInt32(&t.compacting, 1)
+	}
+	atomic.StoreInt32(&t.compacting, 0)
+}
+
+func (t *Table) IsCompacting() bool {
+	return atomic.LoadInt32(&t.compacting) == 1
 }
 
 // Size is its file size in bytes

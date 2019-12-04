@@ -341,6 +341,73 @@ func Open(opt Options) (db *DB, err error) {
 	return db, nil
 }
 
+// DeleteFilesInRange delete files in [start, end).
+// If some file contains keys outside the range, they will not be deleted.
+// This function is designed to reclaim space quickly.
+// If you want to ensure no future transaction can read keys in range,
+// considering iterate and delete the remained keys, or using compaction filter to cleanup them asynchronously.
+func (db *DB) DeleteFilesInRange(start, end []byte) {
+	var (
+		changes   []*protos.ManifestChange
+		pruneTbls []*table.Table
+		startKey  = y.KeyWithTs(start, math.MaxUint64)
+		endKey    = y.KeyWithTs(end, 0)
+		guard     = db.resourceMgr.Acquire()
+	)
+
+	for _, lc := range db.lc.levels {
+		lc.Lock()
+		left, right := 0, len(lc.tables)
+		if lc.level > 0 {
+			left, right = getTablesInRange(lc.tables, startKey, endKey)
+		}
+		if left >= right {
+			lc.Unlock()
+			continue
+		}
+
+		newTables := lc.tables[:left]
+		for _, tbl := range lc.tables[left:right] {
+			if !isTableInRange(tbl, startKey, endKey) || tbl.IsCompacting() {
+				newTables = append(newTables, tbl)
+				continue
+			}
+			pruneTbls = append(pruneTbls, tbl)
+			changes = append(changes, makeTableDeleteChange(tbl.ID()))
+		}
+		newTables = append(newTables, lc.tables[right:]...)
+		for i := len(newTables); i < len(lc.tables); i++ {
+			lc.tables[i] = nil
+		}
+		assertTablesOrder(newTables)
+		lc.tables = newTables
+		lc.Unlock()
+	}
+
+	db.manifest.addChanges(changes, nil)
+	var discardStats DiscardStats
+	deletes := make([]epoch.Resource, len(pruneTbls))
+	for i, tbl := range pruneTbls {
+		it := tbl.NewIterator(false)
+		// TODO: use rate limiter to avoid burst IO.
+		for it.Rewind(); it.Valid(); it.Next() {
+			discardStats.collect(it.Value())
+		}
+		deletes[i] = tbl
+	}
+	if len(discardStats.ptrs) > 0 {
+		db.blobManger.discardCh <- &discardStats
+	}
+	guard.Delete(deletes)
+	guard.Done()
+}
+
+func isTableInRange(t *table.Table, start, end []byte) bool {
+	left := y.CompareKeysWithVer(start, t.Smallest()) <= 0
+	right := y.CompareKeysWithVer(t.Biggest(), end) < 0
+	return left && right
+}
+
 // NewExternalTableBuilder returns a new sst builder.
 func (db *DB) NewExternalTableBuilder(f *os.File, limiter *rate.Limiter) *table.Builder {
 	return table.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions)

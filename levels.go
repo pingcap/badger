@@ -459,7 +459,6 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 				skipKey = y.SafeCopy(skipKey, key)
 
 				if isDeleted(vs.Meta) {
-					log.Errorf("discard key %v at %d", key, version)
 					// If this key range has overlap with lower levels, then keep the deletion
 					// marker with the latest version, discarding the rest. We have set skipKey,
 					// so the following key versions would be skipped. Otherwise discard the deletion marker.
@@ -588,6 +587,18 @@ func (cd *compactDef) biggest() []byte {
 	return cd.thisRange.right
 }
 
+func (cd *compactDef) markTablesCompacting() {
+	for _, tbl := range cd.top {
+		tbl.MarkCompacting(true)
+	}
+	for _, tbl := range cd.bot {
+		tbl.MarkCompacting(true)
+	}
+	for _, tbl := range cd.skippedTbls {
+		tbl.MarkCompacting(true)
+	}
+}
+
 /*
 type rangeWithSize struct {
 	start []byte
@@ -659,6 +670,7 @@ func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 		return false
 	}
 
+	cd.markTablesCompacting()
 	return true
 }
 
@@ -730,6 +742,7 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 			if !lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd) {
 				continue
 			}
+			cd.markTablesCompacting()
 			return true
 		}
 		cd.nextRange = getKeyRange(overlappingTables)
@@ -741,6 +754,7 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 		if !lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd) {
 			continue
 		}
+		cd.markTablesCompacting()
 		return true
 	}
 	return false
@@ -873,6 +887,13 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 	}
 	if err := thisLevel.deleteTables(cd.top, guard, topMove); err != nil {
 		return err
+	}
+
+	for _, tbl := range newTables {
+		tbl.MarkCompacting(false)
+	}
+	for _, tbl := range cd.skippedTbls {
+		tbl.MarkCompacting(false)
 	}
 
 	// Note: For level 0, while doCompact is running, it is possible that new tables are added.
