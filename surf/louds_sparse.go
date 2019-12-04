@@ -16,6 +16,44 @@ type loudsSparse struct {
 	prefixVec   prefixVector
 }
 
+func (ls *loudsSparse) Init(builder *Builder) *loudsSparse {
+	ls.height = uint32(len(builder.lsLabels))
+	ls.startLevel = builder.sparseStartLevel
+
+	for l := 0; uint32(l) < ls.startLevel; l++ {
+		ls.denseNodeCount += builder.nodeCounts[l]
+	}
+
+	if ls.startLevel != 0 {
+		ls.denseChildCount = ls.denseNodeCount + builder.nodeCounts[ls.startLevel] - 1
+	}
+
+	ls.labelVec.Init(builder.lsLabels, ls.startLevel, ls.height)
+
+	numItemsPerLevel := make([]uint32, ls.sparseLevels())
+	for level := range numItemsPerLevel {
+		numItemsPerLevel[level] = uint32(len(builder.lsLabels[int(ls.startLevel)+level]))
+	}
+	ls.hasChildVec.Init(builder.lsHasChild[ls.startLevel:], numItemsPerLevel)
+	ls.loudsVec.Init(builder.lsLoudsBits[ls.startLevel:], numItemsPerLevel)
+
+	if builder.suffixLen() != 0 {
+		hashLen := builder.hashSuffixLen
+		realLen := builder.realSuffixLen
+		suffixLen := hashLen + realLen
+		numSuffixBitsPerLevel := make([]uint32, ls.sparseLevels())
+		for i := range numSuffixBitsPerLevel {
+			numSuffixBitsPerLevel[i] = builder.suffixCounts[int(ls.startLevel)+i] * suffixLen
+		}
+		ls.suffixes.Init(hashLen, realLen, builder.suffixes[ls.startLevel:], numSuffixBitsPerLevel)
+	}
+
+	ls.values.Init(builder.values[ls.startLevel:], builder.valueSize)
+	ls.prefixVec.Init(builder.hasPrefix[ls.startLevel:], builder.nodeCounts[ls.startLevel:], builder.prefixes[ls.startLevel:])
+
+	return ls
+}
+
 func (ls *loudsSparse) Get(key []byte, startDepth, nodeID uint32) (value []byte, ok bool) {
 	var (
 		pos       = ls.firstLabelPos(nodeID)

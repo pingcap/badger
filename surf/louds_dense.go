@@ -19,6 +19,35 @@ type loudsDense struct {
 	height uint32
 }
 
+func (ld *loudsDense) Init(builder *Builder) *loudsDense {
+	ld.height = builder.sparseStartLevel
+
+	numBitsPerLevel := make([]uint32, ld.height)
+	for level := range numBitsPerLevel {
+		numBitsPerLevel[level] = uint32(len(builder.ldLabels[level]) * wordSize)
+	}
+
+	ld.labelVec.Init(builder.ldLabels[:ld.height], numBitsPerLevel)
+	ld.hasChildVec.Init(builder.ldHasChild[:ld.height], numBitsPerLevel)
+	ld.isPrefixVec.Init(builder.ldIsPrefix[:ld.height], builder.nodeCounts)
+
+	if builder.suffixLen() != 0 {
+		hashLen := builder.hashSuffixLen
+		realLen := builder.realSuffixLen
+		suffixLen := hashLen + realLen
+		numSuffixBitsPerLevel := make([]uint32, ld.height)
+		for i := range numSuffixBitsPerLevel {
+			numSuffixBitsPerLevel[i] = builder.suffixCounts[i] * suffixLen
+		}
+		ld.suffixes.Init(hashLen, realLen, builder.suffixes[:ld.height], numSuffixBitsPerLevel)
+	}
+
+	ld.values.Init(builder.values[:ld.height], builder.valueSize)
+	ld.prefixVec.Init(builder.hasPrefix[:ld.height], builder.nodeCounts[:ld.height], builder.prefixes[:ld.height])
+
+	return ld
+}
+
 func (ld *loudsDense) Get(key []byte) (sparseNode int64, depth uint32, value []byte, ok bool) {
 	var nodeID, pos uint32
 	for level := uint32(0); level < ld.height; level++ {
