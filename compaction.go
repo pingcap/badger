@@ -165,7 +165,7 @@ func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd compactDef)
 	thisLevel.ranges = append(thisLevel.ranges, cd.thisRange)
 	nextLevel.ranges = append(nextLevel.ranges, cd.nextRange)
 	thisLevel.deltaSize += cd.thisSize
-
+	cd.markTablesCompacting()
 	return true
 }
 

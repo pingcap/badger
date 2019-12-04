@@ -670,7 +670,6 @@ func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 		return false
 	}
 
-	cd.markTablesCompacting()
 	return true
 }
 
@@ -742,7 +741,6 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 			if !lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd) {
 				continue
 			}
-			cd.markTablesCompacting()
 			return true
 		}
 		cd.nextRange = getKeyRange(overlappingTables)
@@ -754,7 +752,6 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 		if !lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd) {
 			continue
 		}
-		cd.markTablesCompacting()
 		return true
 	}
 	return false
@@ -859,6 +856,15 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 	var newTables []*table.Table
 	var changeSet protos.ManifestChangeSet
 	var topMove bool
+	defer func() {
+		for _, tbl := range newTables {
+			tbl.MarkCompacting(false)
+		}
+		for _, tbl := range cd.skippedTbls {
+			tbl.MarkCompacting(false)
+		}
+	}()
+
 	if l > 0 && len(cd.bot) == 0 && len(cd.skippedTbls) == 0 {
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.top
@@ -882,19 +888,8 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 
 	// See comment earlier in this function about the ordering of these ops, and the order in which
 	// we access levels when reading.
-	if err := nextLevel.replaceTables(newTables, &cd, guard); err != nil {
-		return err
-	}
-	if err := thisLevel.deleteTables(cd.top, guard, topMove); err != nil {
-		return err
-	}
-
-	for _, tbl := range newTables {
-		tbl.MarkCompacting(false)
-	}
-	for _, tbl := range cd.skippedTbls {
-		tbl.MarkCompacting(false)
-	}
+	nextLevel.replaceTables(newTables, &cd, guard)
+	thisLevel.deleteTables(cd.top, guard, topMove)
 
 	// Note: For level 0, while doCompact is running, it is possible that new tables are added.
 	// However, the tables are added only to the end, so it is ok to just delete the first table.

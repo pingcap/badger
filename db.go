@@ -368,7 +368,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 
 		newTables := lc.tables[:left]
 		for _, tbl := range lc.tables[left:right] {
-			if !isTableInRange(tbl, startKey, endKey) || tbl.IsCompacting() {
+			if !isRangeCoversTable(startKey, endKey, tbl) || tbl.IsCompacting() {
 				newTables = append(newTables, tbl)
 				continue
 			}
@@ -402,7 +402,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 	guard.Done()
 }
 
-func isTableInRange(t *table.Table, start, end []byte) bool {
+func isRangeCoversTable(start, end []byte, t *table.Table) bool {
 	left := y.CompareKeysWithVer(start, t.Smallest()) <= 0
 	right := y.CompareKeysWithVer(t.Biggest(), end) < 0
 	return left && right

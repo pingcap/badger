@@ -75,7 +75,7 @@ func (s *levelHandler) initTables(tables []*table.Table) {
 }
 
 // deleteTables remove tables idx0, ..., idx1-1.
-func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, isMove bool) error {
+func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, isMove bool) {
 	s.Lock() // s.Unlock() below
 
 	toDelMap := make(map[uint64]struct{})
@@ -108,7 +108,6 @@ func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, is
 		}
 		guard.Delete(del)
 	}
-	return nil
 }
 
 func assertTablesOrder(tables []*table.Table) {
@@ -137,7 +136,7 @@ func sortTables(tables []*table.Table) {
 
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
-func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, guard *epoch.Guard) error {
+func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, guard *epoch.Guard) {
 	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
 	assertTablesOrder(newTables)
 
@@ -167,7 +166,6 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, g
 	s.tables = tables
 	s.Unlock()
 	guard.Delete(toDelete)
-	return nil
 }
 
 func containsTable(tables []*table.Table, tbl *table.Table) bool {
