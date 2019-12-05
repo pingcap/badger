@@ -6,7 +6,9 @@ import (
 	"math/rand"
 	"sort"
 	"testing"
+	"time"
 
+	"github.com/ngaut/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,8 +75,9 @@ func TestMarshal(t *testing.T) {
 // you can use small round (0 is allowed) to generate a sparse key set,
 // or use a large round to generate a key set which has many common prefixes.
 func randomKeys(initSize, initLen, round int) [][]byte {
+	start := time.Now()
 	keys := make([][]byte, initSize)
-	rand := rand.New(rand.NewSource(0xdeadbeaf))
+	rand := rand.New(rand.NewSource(start.Unix()))
 	for i := range keys {
 		keys[i] = make([]byte, rand.Intn(initLen)+1)
 		rand.Read(keys[i])
@@ -105,6 +108,7 @@ func randomKeys(initSize, initLen, round int) [][]byte {
 	for i := len(result); i < len(keys); i++ {
 		keys[i] = nil
 	}
+	log.Debugf("generate %d keys using %v with seed %x", len(result), time.Since(start), start.Unix())
 
 	return result
 }
