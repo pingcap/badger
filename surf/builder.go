@@ -52,13 +52,6 @@ func (b *Builder) Build(keys, vals [][]byte, bitsPerKeyHint int) *SuRF {
 	b.determineCutoffLevel(bitsPerKeyHint)
 	b.buildDense()
 
-	var prefixVec prefixVector
-	numItemsPerLevel := make([]uint32, b.treeHeight())
-	for level := range numItemsPerLevel {
-		numItemsPerLevel[level] = b.nodeCounts[level]
-	}
-	prefixVec.Init(b.hasPrefix, numItemsPerLevel, b.prefixes)
-
 	surf := new(SuRF)
 	surf.ld.Init(b)
 	surf.ls.Init(b)
