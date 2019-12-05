@@ -813,7 +813,7 @@ func (v *prefixVector) Unmarshal(b []byte) []byte {
 }
 
 func (v *prefixVector) rawMarshalSize() int64 {
-	return v.hasPrefixVec.MarshalSize() + 8 + int64(len(v.prefixOffsets)+len(v.prefixData))
+	return v.hasPrefixVec.MarshalSize() + 8 + int64(len(v.prefixOffsets)*4+len(v.prefixData))
 }
 
 func (v *prefixVector) MarshalSize() int64 {

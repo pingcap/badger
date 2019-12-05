@@ -24,11 +24,6 @@ func (s *SuRF) MarshalSize() int64 {
 	return s.ld.MarshalSize() + s.ls.MarshalSize() + s.ld.values.MarshalSize() + s.ls.values.MarshalSize()
 }
 
-// MarshalNoValueSize returns the size of index part in SuRF after serialization.
-func (s *SuRF) MarshalNoValueSize() int64 {
-	return s.ld.MarshalSize() + s.ls.MarshalSize()
-}
-
 // Marshal returns the serialized SuRF.
 func (s *SuRF) Marshal() []byte {
 	w := bytes.NewBuffer(make([]byte, 0, s.MarshalSize()))
