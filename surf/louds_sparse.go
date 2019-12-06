@@ -1,6 +1,9 @@
 package surf
 
-import "io"
+import (
+	"bytes"
+	"io"
+)
 
 type loudsSparse struct {
 	height          uint32
@@ -201,4 +204,311 @@ func (ls *loudsSparse) nodeSize(pos uint32) uint32 {
 
 func (ls *loudsSparse) isEndOfNode(pos uint32) bool {
 	return pos == ls.loudsVec.numBits-1 || ls.loudsVec.IsSet(pos+1)
+}
+
+type sparseIter struct {
+	valid        bool
+	atTerminator bool
+	ls           *loudsSparse
+	startLevel   uint32
+	startNodeID  uint32
+	startDepth   uint32
+	level        uint32
+	keyBuf       []byte
+	posInTrie    []uint32
+	nodeID       []uint32
+	prefixLen    []uint32
+}
+
+func (it *sparseIter) Init(ls *loudsSparse) {
+	it.ls = ls
+	it.startLevel = ls.startLevel
+	it.posInTrie = make([]uint32, ls.height-ls.startLevel)
+	it.prefixLen = make([]uint32, ls.height-ls.startLevel)
+	it.nodeID = make([]uint32, ls.height-ls.startLevel)
+}
+
+func (it *sparseIter) Next() {
+	it.atTerminator = false
+	pos := it.posInTrie[it.level] + 1
+	nodeID := it.nodeID[it.level]
+
+	for pos >= it.ls.loudsVec.numBits || it.ls.loudsVec.IsSet(pos) {
+		if it.level == 0 {
+			it.valid = false
+			it.keyBuf = it.keyBuf[:0]
+			return
+		}
+		it.level--
+		pos = it.posInTrie[it.level] + 1
+		nodeID = it.nodeID[it.level]
+	}
+	it.setAt(it.level, pos, nodeID)
+	it.MoveToLeftMostKey()
+}
+
+func (it *sparseIter) Prev() {
+	it.atTerminator = false
+	pos := it.posInTrie[it.level]
+	nodeID := it.nodeID[it.level]
+
+	if pos == 0 {
+		it.valid = false
+		return
+	}
+	for it.ls.loudsVec.IsSet(pos) {
+		if it.level == 0 {
+			it.valid = false
+			it.keyBuf = it.keyBuf[:0]
+			return
+		}
+		it.level--
+		pos = it.posInTrie[it.level]
+		nodeID = it.nodeID[it.level]
+	}
+	it.setAt(it.level, pos-1, nodeID)
+	it.MoveToRightMostKey()
+}
+
+func (it *sparseIter) Seek(key []byte) bool {
+	nodeID := it.startNodeID
+	pos := it.ls.firstLabelPos(nodeID)
+	var ok bool
+	depth := it.startDepth
+
+	for it.level = 0; it.level < it.ls.sparseLevels(); it.level++ {
+		prefix := it.ls.prefixVec.GetPrefix(it.ls.prefixID(nodeID))
+		var prefixCmp int
+		if len(prefix) != 0 {
+			end := int(depth) + len(prefix)
+			if end > len(key) {
+				end = len(key)
+			}
+			prefixCmp = bytes.Compare(prefix, key[depth:end])
+		}
+
+		if prefixCmp < 0 {
+			if it.level == 0 {
+				it.valid = false
+				return false
+			}
+			it.level--
+			it.Next()
+			return false
+		}
+
+		depth += uint32(len(prefix))
+		if depth >= uint32(len(key)) || prefixCmp > 0 {
+			it.append(it.ls.labelVec.GetLabel(pos), pos, nodeID)
+			it.MoveToLeftMostKey()
+			return false
+		}
+
+		nodeSize := it.ls.nodeSize(pos)
+		pos, ok = it.ls.labelVec.Search(key[depth], pos, nodeSize)
+		if !ok {
+			it.moveToLeftInNextSubTrie(pos, nodeID, nodeSize, key[depth])
+			return false
+		}
+
+		it.append(key[depth], pos, nodeID)
+
+		if !it.ls.hasChildVec.IsSet(pos) {
+			return it.compareSuffixGreaterThan(key, pos, depth+1)
+		}
+
+		nodeID = it.ls.childNodeID(pos)
+		pos = it.ls.firstLabelPos(nodeID)
+		depth++
+	}
+
+	if it.ls.labelVec.GetLabel(pos) == labelTerminator && !it.ls.hasChildVec.IsSet(pos) && !it.ls.isEndOfNode(pos) {
+		it.append(labelTerminator, pos, nodeID)
+		it.atTerminator = true
+		it.valid = true
+		return false
+	}
+
+	if uint32(len(key)) <= depth {
+		it.MoveToLeftMostKey()
+		return false
+	}
+
+	it.valid = true
+	return true
+}
+
+func (it *sparseIter) Key() []byte {
+	if it.atTerminator {
+		return it.keyBuf[:len(it.keyBuf)-1]
+	}
+	return it.keyBuf
+}
+
+func (it *sparseIter) Value() []byte {
+	valPos := it.ls.suffixPos(it.posInTrie[it.level])
+	return it.ls.values.Get(valPos)
+}
+
+func (it *sparseIter) Compare(key []byte) int {
+	itKey := it.Key()
+	startDepth := int(it.startDepth)
+	if startDepth > len(key) {
+		panic("dense compare have bug")
+	}
+	if startDepth == len(key) {
+		if it.atTerminator {
+			return 0
+		}
+		return 1
+	}
+	key = key[startDepth:]
+
+	cmpLen := len(itKey)
+	if cmpLen > len(key) {
+		cmpLen = len(key)
+	}
+	cmp := bytes.Compare(itKey[:cmpLen], key[:cmpLen])
+	if cmp != 0 {
+		return cmp
+	}
+	if len(itKey) > len(key) {
+		return 1
+	}
+	if len(itKey) == len(key) && it.atTerminator {
+		return 0
+	}
+	suffixPos := it.ls.suffixPos(it.posInTrie[it.level])
+	return it.ls.suffixes.Compare(key, suffixPos, uint32(len(itKey)))
+}
+
+func (it *sparseIter) Reset() {
+	it.valid = false
+	it.level = 0
+	it.atTerminator = false
+	it.keyBuf = it.keyBuf[:0]
+}
+
+func (it *sparseIter) MoveToLeftMostKey() {
+	if len(it.keyBuf) == 0 {
+		pos := it.ls.firstLabelPos(it.startNodeID)
+		label := it.ls.labelVec.GetLabel(pos)
+		it.append(label, pos, it.startNodeID)
+	}
+
+	pos := it.posInTrie[it.level]
+	label := it.ls.labelVec.GetLabel(pos)
+
+	if !it.ls.hasChildVec.IsSet(pos) {
+		if label == labelTerminator && !it.ls.isEndOfNode(pos) {
+			it.atTerminator = true
+		}
+		it.valid = true
+		return
+	}
+
+	for it.level < it.ls.sparseLevels() {
+		it.level++
+		nodeID := it.ls.childNodeID(pos)
+		pos = it.ls.firstLabelPos(nodeID)
+		label = it.ls.labelVec.GetLabel(pos)
+
+		if !it.ls.hasChildVec.IsSet(pos) {
+			it.append(label, pos, nodeID)
+			if label == labelTerminator && !it.ls.isEndOfNode(pos) {
+				it.atTerminator = true
+			}
+			it.valid = true
+			return
+		}
+		it.append(label, pos, nodeID)
+	}
+	panic("unreachable")
+}
+
+func (it *sparseIter) MoveToRightMostKey() {
+	if len(it.keyBuf) == 0 {
+		pos := it.ls.lastLabelPos(it.startNodeID)
+		label := it.ls.labelVec.GetLabel(pos)
+		it.append(label, pos, it.startNodeID)
+	}
+
+	pos := it.posInTrie[it.level]
+	label := it.ls.labelVec.GetLabel(pos)
+
+	if !it.ls.hasChildVec.IsSet(pos) {
+		if label == labelTerminator && !it.ls.isEndOfNode(pos) {
+			it.atTerminator = true
+		}
+		it.valid = true
+		return
+	}
+
+	for it.level < it.ls.sparseLevels() {
+		it.level++
+		nodeID := it.ls.childNodeID(pos)
+		pos = it.ls.lastLabelPos(nodeID)
+		label = it.ls.labelVec.GetLabel(pos)
+
+		if !it.ls.hasChildVec.IsSet(pos) {
+			it.append(label, pos, nodeID)
+			if label == labelTerminator && !it.ls.isEndOfNode(pos) {
+				it.atTerminator = true
+			}
+			it.valid = true
+			return
+		}
+		it.append(label, pos, nodeID)
+	}
+	panic("unreachable")
+}
+
+func (it *sparseIter) SetToFirstInRoot() {
+	it.append(it.ls.labelVec.GetLabel(0), 0, it.startNodeID)
+}
+
+func (it *sparseIter) SetToLastInRoot() {
+	pos := it.ls.lastLabelPos(0)
+	it.append(it.ls.labelVec.GetLabel(pos), pos, it.startNodeID)
+}
+
+func (it *sparseIter) append(label byte, pos, nodeID uint32) {
+	prefix := it.ls.prefixVec.GetPrefix(it.ls.prefixID(nodeID))
+	it.keyBuf = append(it.keyBuf, prefix...)
+	it.keyBuf = append(it.keyBuf, label)
+	it.posInTrie[it.level] = pos
+	it.prefixLen[it.level] = uint32(len(prefix)) + 1
+	if it.level != 0 {
+		it.prefixLen[it.level] += it.prefixLen[it.level-1]
+	}
+	it.nodeID[it.level] = nodeID
+}
+
+func (it *sparseIter) setAt(level, pos, nodeID uint32) {
+	it.keyBuf = append(it.keyBuf[:it.prefixLen[level]-1], it.ls.labelVec.GetLabel(pos))
+	it.posInTrie[it.level] = pos
+}
+
+func (it *sparseIter) truncate(level uint32) {
+	it.keyBuf = it.keyBuf[:it.prefixLen[level]]
+}
+
+func (it *sparseIter) moveToLeftInNextSubTrie(pos, nodeID, nodeSize uint32, label byte) {
+	pos, ok := it.ls.labelVec.SearchGreaterThan(label, pos, nodeSize)
+	it.append(it.ls.labelVec.GetLabel(pos), pos, nodeID)
+	if ok {
+		it.MoveToLeftMostKey()
+	} else {
+		it.Next()
+	}
+}
+
+func (it *sparseIter) compareSuffixGreaterThan(key []byte, pos, level uint32) bool {
+	cmp := it.ls.suffixes.Compare(key, it.ls.suffixPos(pos), level)
+	if cmp < 0 {
+		it.Next()
+		return false
+	}
+	it.valid = true
+	return cmp == couldBePositive
 }

@@ -670,10 +670,10 @@ func constructSuffix(key []byte, level uint32, realSuffixLen, hashSuffixLen uint
 	if hashSuffixLen == 0 && realSuffixLen == 0 {
 		return 0
 	}
-	if hashSuffixLen != 0 {
+	if realSuffixLen == 0 {
 		return constructHashSuffix(key, hashSuffixLen)
 	}
-	if realSuffixLen != 0 {
+	if hashSuffixLen == 0 {
 		return constructRealSuffix(key, level, realSuffixLen)
 	}
 	return constructMixedSuffix(key, level, realSuffixLen, hashSuffixLen)

@@ -1,6 +1,9 @@
 package surf
 
-import "io"
+import (
+	"bytes"
+	"io"
+)
 
 const (
 	denseFanout      = 256
@@ -160,8 +163,310 @@ func (ld *loudsDense) nextPos(pos uint32) uint32 {
 
 func (ld *loudsDense) prevPos(pos uint32) (uint32, bool) {
 	dist := ld.labelVec.DistanceToPrevSetBit(pos)
-	if pos <= dist {
+	if pos < dist {
 		return 0, true
 	}
 	return pos - dist, false
+}
+
+type denseIter struct {
+	valid         bool
+	searchComp    bool
+	leftComp      bool
+	rightComp     bool
+	ld            *loudsDense
+	sendOutNodeID uint32
+	sendOutDepth  uint32
+	keyBuf        []byte
+	level         uint32
+	posInTrie     []uint32
+	prefixLen     []uint32
+	atPrefixKey   bool
+}
+
+func (it *denseIter) Init(ld *loudsDense) {
+	it.ld = ld
+	it.posInTrie = make([]uint32, ld.height)
+	it.prefixLen = make([]uint32, ld.height)
+}
+
+func (it *denseIter) Reset() {
+	it.valid = false
+	it.level = 0
+	it.atPrefixKey = false
+	it.keyBuf = it.keyBuf[:0]
+}
+
+func (it *denseIter) Next() {
+	if it.ld.height == 0 {
+		return
+	}
+	if it.atPrefixKey {
+		it.atPrefixKey = false
+		it.MoveToLeftMostKey()
+		return
+	}
+
+	pos := it.posInTrie[it.level]
+	nextPos := it.ld.nextPos(pos)
+
+	for pos == nextPos || nextPos/denseFanout > pos/denseFanout {
+		if it.level == 0 {
+			it.valid = false
+			return
+		}
+		it.level--
+		pos = it.posInTrie[it.level]
+		nextPos = it.ld.nextPos(pos)
+	}
+	it.setAt(it.level, nextPos)
+	it.MoveToLeftMostKey()
+}
+
+func (it *denseIter) Prev() {
+	if it.ld.height == 0 {
+		return
+	}
+	if it.atPrefixKey {
+		it.atPrefixKey = false
+		it.level--
+	}
+	pos := it.posInTrie[it.level]
+	prevPos, out := it.ld.prevPos(pos)
+	if out {
+		it.valid = false
+		return
+	}
+
+	for prevPos/denseFanout < pos/denseFanout {
+		nodeID := pos / denseFanout
+		if it.ld.isPrefixVec.IsSet(nodeID) {
+			it.truncate(it.level)
+			it.atPrefixKey = true
+			it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+			return
+		}
+
+		if it.level == 0 {
+			it.valid = false
+			return
+		}
+		it.level--
+		pos = it.posInTrie[it.level]
+		prevPos, out = it.ld.prevPos(pos)
+		if out {
+			it.valid = false
+			return
+		}
+	}
+	it.setAt(it.level, prevPos)
+	it.MoveToRightMostKey()
+}
+
+func (it *denseIter) Seek(key []byte) bool {
+	var nodeID, pos, depth uint32
+	for it.level = 0; it.level < it.ld.height; it.level++ {
+		prefix := it.ld.prefixVec.GetPrefix(nodeID)
+		var prefixCmp int
+		if len(prefix) != 0 {
+			end := int(depth) + len(prefix)
+			if end > len(key) {
+				end = len(key)
+			}
+			prefixCmp = bytes.Compare(prefix, key[depth:end])
+		}
+
+		if prefixCmp < 0 {
+			if nodeID == 0 {
+				it.valid = false
+				return false
+			}
+			it.level--
+			it.Next()
+			return false
+		}
+
+		pos = nodeID * denseFanout
+		depth += uint32(len(prefix))
+		if depth >= uint32(len(key)) || prefixCmp > 0 {
+			if pos > 0 {
+				it.append(it.ld.nextPos(pos - 1))
+			} else {
+				it.SetToFirstInRoot()
+			}
+			if it.ld.isPrefixVec.IsSet(nodeID) {
+				it.atPrefixKey = true
+				it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+			} else {
+				it.MoveToLeftMostKey()
+			}
+			return prefixCmp == 0
+		}
+
+		pos += uint32(key[depth])
+		it.append(pos)
+		depth++
+
+		if !it.ld.labelVec.IsSet(pos) {
+			it.Next()
+			return false
+		}
+
+		if !it.ld.hasChildVec.IsSet(pos) {
+			return it.compareSuffixGreaterThan(key, pos, depth)
+		}
+
+		nodeID = it.ld.childNodeID(pos)
+	}
+
+	it.level--
+	it.sendOutNodeID = nodeID
+	it.sendOutDepth = depth
+	it.valid, it.searchComp, it.leftComp, it.rightComp = true, false, true, true
+	return true
+}
+
+func (it *denseIter) Key() []byte {
+	if it.atPrefixKey {
+		return it.keyBuf[:len(it.keyBuf)-1]
+	}
+	return it.keyBuf
+}
+
+func (it *denseIter) Value() []byte {
+	valPos := it.ld.suffixPos(it.posInTrie[it.level], it.atPrefixKey)
+	return it.ld.values.Get(valPos)
+}
+
+func (it *denseIter) Compare(key []byte) int {
+	itKey := it.Key()
+
+	cmpLen := len(itKey)
+	if cmpLen > len(key) {
+		cmpLen = len(key)
+	}
+	cmp := bytes.Compare(itKey[:cmpLen], key[:cmpLen])
+	if cmp != 0 {
+		return cmp
+	}
+	if len(itKey) > len(key) {
+		return 1
+	}
+	if len(itKey) == len(key) && it.atPrefixKey {
+		return 0
+	}
+
+	if it.IsComplete() {
+		suffixPos := it.ld.suffixPos(it.posInTrie[it.level], it.atPrefixKey)
+		return it.ld.suffixes.Compare(key, suffixPos, uint32(len(itKey)))
+	}
+	return cmp
+}
+
+func (it *denseIter) IsComplete() bool {
+	return it.searchComp && (it.leftComp && it.rightComp)
+}
+
+func (it *denseIter) append(pos uint32) {
+	nodeID := pos / denseFanout
+	prefix := it.ld.prefixVec.GetPrefix(nodeID)
+	it.keyBuf = append(it.keyBuf, prefix...)
+	it.keyBuf = append(it.keyBuf, byte(pos%denseFanout))
+	it.posInTrie[it.level] = pos
+	it.prefixLen[it.level] = uint32(len(prefix)) + 1
+	if it.level != 0 {
+		it.prefixLen[it.level] += it.prefixLen[it.level-1]
+	}
+}
+
+func (it *denseIter) MoveToLeftMostKey() {
+	pos := it.posInTrie[it.level]
+	if !it.ld.hasChildVec.IsSet(pos) {
+		it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+		return
+	}
+
+	for it.level < it.ld.height-1 {
+		it.level++
+		nodeID := it.ld.childNodeID(pos)
+		if it.ld.isPrefixVec.IsSet(nodeID) {
+			it.append(it.ld.nextPos(nodeID*denseFanout - 1))
+			it.atPrefixKey = true
+			it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+			return
+		}
+
+		pos = it.ld.nextPos(nodeID*denseFanout - 1)
+		it.append(pos)
+
+		// If trie branch terminates
+		if !it.ld.hasChildVec.IsSet(pos) {
+			it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+			return
+		}
+	}
+	it.sendOutNodeID = it.ld.childNodeID(pos)
+	it.sendOutDepth = uint32(len(it.keyBuf))
+	it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, false, true
+}
+
+func (it *denseIter) MoveToRightMostKey() {
+	pos := it.posInTrie[it.level]
+	if !it.ld.hasChildVec.IsSet(pos) {
+		it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+		return
+	}
+
+	var out bool
+	for it.level < it.ld.height-1 {
+		it.level++
+		nodeID := it.ld.childNodeID(pos)
+		pos, out = it.ld.prevPos((nodeID + 1) * denseFanout)
+		if out {
+			it.valid = false
+			return
+		}
+		it.append(pos)
+
+		// If trie branch terminates
+		if !it.ld.hasChildVec.IsSet(pos) {
+			it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+			return
+		}
+	}
+	it.sendOutNodeID = it.ld.childNodeID(pos)
+	it.sendOutDepth = uint32(len(it.keyBuf))
+	it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, false
+}
+
+func (it *denseIter) SetToFirstInRoot() {
+	if it.ld.labelVec.IsSet(0) {
+		it.append(0)
+	} else {
+		it.append(it.ld.nextPos(0))
+	}
+}
+
+func (it *denseIter) SetToLastInRoot() {
+	pos, _ := it.ld.prevPos(denseFanout)
+	it.append(pos)
+}
+
+func (it *denseIter) setAt(level, pos uint32) {
+	it.keyBuf = append(it.keyBuf[:it.prefixLen[level]-1], byte(pos%denseFanout))
+	it.posInTrie[it.level] = pos
+}
+
+func (it *denseIter) truncate(level uint32) {
+	it.keyBuf = it.keyBuf[:it.prefixLen[level]]
+}
+
+func (it *denseIter) compareSuffixGreaterThan(key []byte, pos, level uint32) bool {
+	cmp := it.ld.suffixes.Compare(key, it.ld.suffixPos(pos, false), level)
+	if cmp < 0 {
+		it.Next()
+		return false
+	}
+	it.valid, it.searchComp, it.leftComp, it.rightComp = true, true, true, true
+	return cmp == couldBePositive
 }

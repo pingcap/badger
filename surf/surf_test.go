@@ -162,7 +162,35 @@ func checkSuRF(t *testing.T, surf *SuRF, keys, vals [][]byte) {
 		require.EqualValues(t, vals[i], val)
 	}
 
-	// TODO: add iterator check
+	var i int
+	it := surf.NewIterator()
+	for it.SeekToFirst(); it.Valid(); it.Next() {
+		require.Truef(t, bytes.HasPrefix(keys[i], it.Key()), "%v %v %d", keys[i], it.Key(), i)
+		require.EqualValues(t, vals[i], it.Value())
+		i++
+	}
+	require.Equal(t, len(keys), i)
+
+	i = len(keys) - 1
+	for it.SeekToLast(); it.Valid(); it.Prev() {
+		require.True(t, bytes.HasPrefix(keys[i], it.Key()))
+		require.EqualValues(t, vals[i], it.Value())
+		i--
+	}
+	require.Equal(t, -1, i)
+
+	for i, k := range keys {
+		it.Seek(k)
+		var prev, next []byte
+		if i != 0 {
+			prev = keys[i-1]
+		}
+		if i != len(keys)-1 {
+			next = keys[i+1]
+		}
+		result := endian.Uint32(it.Value())
+		require.EqualValuesf(t, vals[i], it.Value(), "seek key %v (%v, %v), want %d got %d", k, prev, next, i, result)
+	}
 }
 
 func (v *rankVector) checkEquals(t *testing.T, o *rankVector) {
