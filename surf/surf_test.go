@@ -13,7 +13,7 @@ import (
 )
 
 func TestBuildPrefixKeys(t *testing.T) {
-	buildAndCheckSuRF(t, [][]byte{
+	keys := [][]byte{
 		{1},
 		{1, 1},
 		{1, 1, 1},
@@ -21,11 +21,14 @@ func TestBuildPrefixKeys(t *testing.T) {
 		{2},
 		{2, 2},
 		{2, 2, 2},
-	})
+	}
+	vals := genSeqVals(len(keys))
+	checker := newFullSuRFChecker(keys, vals)
+	buildAndCheckSuRF(t, keys, vals, checker)
 }
 
 func TestBuildCompressPath(t *testing.T) {
-	buildAndCheckSuRF(t, [][]byte{
+	keys := [][]byte{
 		{1, 1, 1},
 		{1, 1, 1, 2, 2},
 		{1, 1, 1, 2, 2, 2},
@@ -34,28 +37,64 @@ func TestBuildCompressPath(t *testing.T) {
 		{2, 2, 3},
 		{2, 3, 1, 1, 1, 1, 1, 1, 1},
 		{2, 3, 1, 1, 1, 2, 2, 2, 2},
-	})
-}
-
-func TestRandomKeysSparse(t *testing.T) {
-	buildAndCheckSuRF(t, randomKeys(2000000, 60, 0))
-}
-
-func TestRandomKeysPrefixGrowth(t *testing.T) {
-	buildAndCheckSuRF(t, randomKeys(100, 10, 200))
+	}
+	vals := genSeqVals(len(keys))
+	checker := newFullSuRFChecker(keys, vals)
+	buildAndCheckSuRF(t, keys, vals, checker)
 }
 
 func TestBuildSuffixKeys(t *testing.T) {
-	buildAndCheckSuRF(t, [][]byte{
+	keys := [][]byte{
 		bytes.Repeat([]byte{1}, 30),
 		bytes.Repeat([]byte{2}, 30),
 		bytes.Repeat([]byte{3}, 30),
 		bytes.Repeat([]byte{4}, 30),
-	})
+	}
+	vals := genSeqVals(len(keys))
+	checker := newFullSuRFChecker(keys, vals)
+	buildAndCheckSuRF(t, keys, vals, checker)
+}
+
+func TestRandomKeysSparse(t *testing.T) {
+	keys := genRandomKeys(2000000, 60, 0)
+	vals := genSeqVals(len(keys))
+	checker := newFullSuRFChecker(keys, vals)
+	buildAndCheckSuRF(t, keys, vals, checker)
+}
+
+func TestRandomKeysPrefixGrowth(t *testing.T) {
+	keys := genRandomKeys(100, 10, 200)
+	vals := genSeqVals(len(keys))
+	checker := newFullSuRFChecker(keys, vals)
+	buildAndCheckSuRF(t, keys, vals, checker)
+}
+
+func TestSeekKeys(t *testing.T) {
+	keys := genRandomKeys(50, 10, 300)
+	insert := keys[:0]
+	seek := make([][]byte, 0, len(keys)/2)
+	vals := make([][]byte, 0, len(keys)/2)
+	for i := 0; i < len(keys) & ^1; i += 2 {
+		seek = append(seek, keys[i])
+		insert = append(insert, keys[i+1])
+		val := make([]byte, 4)
+		endian.PutUint32(val, uint32(i+1))
+		vals = append(vals, val)
+	}
+	checker := func(t *testing.T, surf *SuRF) {
+		it := surf.NewIterator()
+		for i, k := range seek {
+			it.Seek(k)
+			require.True(t, it.Valid())
+			require.True(t, endian.Uint32(it.Value()) <= endian.Uint32(vals[i]))
+		}
+	}
+
+	buildAndCheckSuRF(t, insert, vals, checker)
 }
 
 func TestMarshal(t *testing.T) {
-	keys := randomKeys(30, 20, 300)
+	keys := genRandomKeys(30, 20, 300)
 	vals := make([][]byte, len(keys))
 	for i := range keys {
 		vals[i] = make([]byte, 4)
@@ -67,14 +106,14 @@ func TestMarshal(t *testing.T) {
 	buf := s1.Marshal()
 	s2.Unmarshal(buf)
 	s1.checkEquals(t, &s2)
-	checkSuRF(t, &s2, keys, vals)
+	newFullSuRFChecker(keys, vals)(t, &s2)
 }
 
 // max key length is `initLen * (round + 1)`
 // max result size is (initSize + initSize * (round + 1)) * (round + 1) / 2
 // you can use small round (0 is allowed) to generate a sparse key set,
 // or use a large round to generate a key set which has many common prefixes.
-func randomKeys(initSize, initLen, round int) [][]byte {
+func genRandomKeys(initSize, initLen, round int) [][]byte {
 	start := time.Now()
 	keys := make([][]byte, initSize)
 	rand := rand.New(rand.NewSource(start.Unix()))
@@ -113,7 +152,16 @@ func randomKeys(initSize, initLen, round int) [][]byte {
 	return result
 }
 
-func buildAndCheckSuRF(t *testing.T, keys [][]byte) {
+func genSeqVals(n int) [][]byte {
+	vals := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		vals[i] = make([]byte, 4)
+		endian.PutUint32(vals[i], uint32(i))
+	}
+	return vals
+}
+
+func buildAndCheckSuRF(t *testing.T, keys, vals [][]byte, checker func(t *testing.T, surf *SuRF)) {
 	suffixLens := [][]uint32{
 		{0, 0},
 		{4, 0},
@@ -128,11 +176,6 @@ func buildAndCheckSuRF(t *testing.T, keys [][]byte) {
 
 	for _, sl := range suffixLens {
 		b := NewBuilder(4, sl[0], sl[1])
-		vals := make([][]byte, len(keys))
-		for i := range keys {
-			vals[i] = make([]byte, 4)
-			endian.PutUint32(vals[i], uint32(i))
-		}
 
 		b.totalCount = len(keys)
 		b.buildNodes(keys, vals, 0, 0, 0)
@@ -149,47 +192,51 @@ func buildAndCheckSuRF(t *testing.T, keys [][]byte) {
 
 			t.Run(fmt.Sprintf("cutoff=%d,hashLen=%d,realLen=%d", i, sl[0], sl[1]), func(t *testing.T) {
 				t.Parallel()
-				checkSuRF(t, surf, keys, vals)
+				checker(t, surf)
 			})
 		}
 	}
 }
 
-func checkSuRF(t *testing.T, surf *SuRF, keys, vals [][]byte) {
-	for i, k := range keys {
-		val, ok := surf.Get(k)
-		require.True(t, ok)
-		require.EqualValues(t, vals[i], val)
-	}
-
-	var i int
-	it := surf.NewIterator()
-	for it.SeekToFirst(); it.Valid(); it.Next() {
-		require.Truef(t, bytes.HasPrefix(keys[i], it.Key()), "%v %v %d", keys[i], it.Key(), i)
-		require.EqualValues(t, vals[i], it.Value())
-		i++
-	}
-	require.Equal(t, len(keys), i)
-
-	i = len(keys) - 1
-	for it.SeekToLast(); it.Valid(); it.Prev() {
-		require.True(t, bytes.HasPrefix(keys[i], it.Key()))
-		require.EqualValues(t, vals[i], it.Value())
-		i--
-	}
-	require.Equal(t, -1, i)
-
-	for i, k := range keys {
-		it.Seek(k)
-		var prev, next []byte
-		if i != 0 {
-			prev = keys[i-1]
+func newFullSuRFChecker(keys, vals [][]byte) func(t *testing.T, surf *SuRF) {
+	return func(t *testing.T, surf *SuRF) {
+		for i, k := range keys {
+			val, ok := surf.Get(k)
+			require.True(t, ok)
+			require.EqualValues(t, vals[i], val)
 		}
-		if i != len(keys)-1 {
-			next = keys[i+1]
+
+		var i int
+		it := surf.NewIterator()
+		for it.SeekToFirst(); it.Valid(); it.Next() {
+			require.Truef(t, bytes.HasPrefix(keys[i], it.Key()), "%v %v %d", keys[i], it.Key(), i)
+			require.EqualValues(t, vals[i], it.Value())
+			i++
 		}
-		result := endian.Uint32(it.Value())
-		require.EqualValuesf(t, vals[i], it.Value(), "seek key %v (%v, %v), want %d got %d", k, prev, next, i, result)
+		require.Equal(t, len(keys), i)
+
+		i = len(keys) - 1
+		for it.SeekToLast(); it.Valid(); it.Prev() {
+			require.True(t, bytes.HasPrefix(keys[i], it.Key()))
+			require.EqualValues(t, vals[i], it.Value())
+			i--
+		}
+		require.Equal(t, -1, i)
+
+		for i, k := range keys {
+			it.Seek(k)
+			if i != 0 {
+				cmp := it.compare(keys[i-1])
+				require.True(t, cmp > 0)
+			}
+			if i != len(keys)-1 {
+				cmp := it.compare(keys[i+1])
+				require.True(t, cmp < 0 || cmp == couldBePositive)
+			}
+			cmp := it.compare(k)
+			require.True(t, cmp >= 0)
+			require.EqualValues(t, vals[i], it.Value())
+		}
 	}
 }
 

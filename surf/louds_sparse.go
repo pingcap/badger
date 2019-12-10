@@ -357,29 +357,29 @@ func (it *sparseIter) Compare(key []byte) int {
 		panic("dense compare have bug")
 	}
 	if startDepth == len(key) {
-		if it.atTerminator {
+		if len(itKey) == 0 {
 			return 0
 		}
 		return 1
 	}
-	key = key[startDepth:]
+	cmpKey := key[startDepth:]
 
 	cmpLen := len(itKey)
-	if cmpLen > len(key) {
-		cmpLen = len(key)
+	if cmpLen > len(cmpKey) {
+		cmpLen = len(cmpKey)
 	}
-	cmp := bytes.Compare(itKey[:cmpLen], key[:cmpLen])
+	cmp := bytes.Compare(itKey[:cmpLen], cmpKey[:cmpLen])
 	if cmp != 0 {
 		return cmp
 	}
-	if len(itKey) > len(key) {
+	if len(itKey) > len(cmpKey) {
 		return 1
 	}
-	if len(itKey) == len(key) && it.atTerminator {
+	if len(itKey) == len(cmpKey) && it.atTerminator {
 		return 0
 	}
 	suffixPos := it.ls.suffixPos(it.posInTrie[it.level])
-	return it.ls.suffixes.Compare(key, suffixPos, uint32(len(itKey)))
+	return it.ls.suffixes.Compare(key, suffixPos, uint32(len(itKey)+startDepth))
 }
 
 func (it *sparseIter) Reset() {

@@ -1,5 +1,7 @@
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
+github.com/bobotu/testify v1.3.1-0.20190730155233-067b303304a8 h1:6AtqKc1qLILoI75+9PGIse6QGfSrZJOlKkUYpBgBAiE=
+github.com/bobotu/testify v1.3.1-0.20190730155233-067b303304a8/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81PSLYec5m4=
 github.com/coocood/bbloom v0.0.0-20180518162752-7774d68761e5 h1:A9dUQP3gNU5GjLMe8by8QM3mn+sHLRAlwquACitTHb0=
 github.com/coocood/bbloom v0.0.0-20180518162752-7774d68761e5/go.mod h1:aXF5GNK2jkah+VKjINjpMxB29d5XlAKk4Yo1oX0q9wk=
 github.com/coocood/bbloom v0.0.0-20190830030839-58deb6228d64 h1:W1SHiII3e0jVwvaQFglwu3kS9NLxOeTpvik7MbKCyuQ=
@@ -54,3 +56,6 @@ golang.org/x/sys v0.0.0-20190303192550-c2f5717e611c/go.mod h1:STP8DvDyc/dI5b8T5h
 golang.org/x/time v0.0.0-20181108054448-85acf8d2951c h1:fqgJT0MGcGpPgpWU7VRdRjuArfcOvC4AoJmILihzhDg=
 golang.org/x/time v0.0.0-20181108054448-85acf8d2951c/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
 golang.org/x/tools v0.0.0-20180221164845-07fd8470d635/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+gopkg.in/yaml.v2 v2.2.2 h1:ZCJp+EgiOT7lHqUV2J862kp8Qj64Jo6az82+3Td9dZw=
+gopkg.in/yaml.v2 v2.2.2/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=

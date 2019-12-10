@@ -27,3 +27,6 @@ require (
 	golang.org/x/sys v0.0.0-20190303192550-c2f5717e611c
 	golang.org/x/time v0.0.0-20181108054448-85acf8d2951c
 )
+
+// this fork has some performance tweak (e.g. surf package's test time, 600s -> 100s)
+replace github.com/stretchr/testify => github.com/bobotu/testify v1.3.1-0.20190730155233-067b303304a8

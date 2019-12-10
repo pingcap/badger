@@ -457,7 +457,8 @@ func (v *labelVector) GetLabel(pos uint32) byte {
 	return v.labels[pos]
 }
 
-func (v *labelVector) Search(k byte, start, size uint32) (uint32, bool) {
+func (v *labelVector) Search(k byte, off, size uint32) (uint32, bool) {
+	start := off
 	if size > 1 && v.labels[start] == labelTerminator {
 		start++
 		size--
@@ -469,7 +470,7 @@ func (v *labelVector) Search(k byte, start, size uint32) (uint32, bool) {
 	}
 	result := bytes.IndexByte(v.labels[start:end], k)
 	if result < 0 {
-		return start, false
+		return off, false
 	}
 	return start + uint32(result), true
 }
