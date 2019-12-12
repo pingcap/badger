@@ -71,16 +71,7 @@ func TestRandomKeysPrefixGrowth(t *testing.T) {
 
 func TestSeekKeys(t *testing.T) {
 	keys := genRandomKeys(50, 10, 300)
-	insert := keys[:0]
-	seek := make([][]byte, 0, len(keys)/2)
-	vals := make([][]byte, 0, len(keys)/2)
-	for i := 0; i < len(keys) & ^1; i += 2 {
-		seek = append(seek, keys[i])
-		insert = append(insert, keys[i+1])
-		val := make([]byte, 4)
-		endian.PutUint32(val, uint32(i+1))
-		vals = append(vals, val)
-	}
+	insert, vals, seek := splitKeys(keys)
 	checker := func(t *testing.T, surf *SuRF) {
 		it := surf.NewIterator()
 		for i, k := range seek {
@@ -107,6 +98,20 @@ func TestMarshal(t *testing.T) {
 	s2.Unmarshal(buf)
 	s1.checkEquals(t, &s2)
 	newFullSuRFChecker(keys, vals)(t, &s2)
+}
+
+func splitKeys(keys [][]byte) (a, aIdx, b [][]byte) {
+	a = keys[:0]
+	b = make([][]byte, 0, len(keys)/2)
+	aIdx = make([][]byte, 0, len(keys)/2)
+	for i := 0; i < len(keys) & ^1; i += 2 {
+		b = append(b, keys[i])
+		a = append(a, keys[i+1])
+		val := make([]byte, 4)
+		endian.PutUint32(val, uint32(i+1))
+		aIdx = append(aIdx, val)
+	}
+	return
 }
 
 // max key length is `initLen * (round + 1)`

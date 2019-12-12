@@ -4,6 +4,7 @@ go 1.13
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/brianvoe/gofakeit v3.18.0+incompatible
 	github.com/coocood/bbloom v0.0.0-20190830030839-58deb6228d64
 	github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2
 	github.com/dgryski/go-farm v0.0.0-20190104051053-3adb47b1fb0f
