@@ -174,9 +174,9 @@ var DefaultOptions = Options{
 		LevelSizeMultiplier: 10,
 		LogicalBloomFPR:     0.01,
 		SuRFOptions: options.SuRFOptions{
-			HashSuffixLen:  4,
-			RealSuffixLen:  0,
-			BitsPerKeyHint: 28,
+			HashSuffixLen:  8,
+			RealSuffixLen:  8,
+			BitsPerKeyHint: 40,
 		},
 	},
 	ValueLogWriteOptions: options.ValueLogWriterOptions{
