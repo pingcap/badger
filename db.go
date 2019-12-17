@@ -105,7 +105,8 @@ func replayFunction(out *DB) func(Entry) error {
 	var lastCommit uint64
 
 	toLSM := func(nk []byte, vs y.ValueStruct) {
-		out.ensureRoomForWrite()
+		e := table.Entry{Key: nk, Value: vs}
+		out.ensureRoomForWrite(e.EstimateSize())
 		out.mt.PutToSkl(nk, vs)
 	}
 
@@ -699,9 +700,6 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 		size += int64(e.estimateSize())
 		count++
 	}
-	if count >= db.opt.maxBatchCount || size >= db.opt.maxBatchSize {
-		return nil, ErrTxnTooBig
-	}
 
 	// We can only service one request because we need each txn to be stored in a contigous section.
 	// Txns should not interleave among other txns or rewrites.
@@ -750,12 +748,13 @@ func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 }
 
 // ensureRoomForWrite is always called serially.
-func (db *DB) ensureRoomForWrite() error {
-	if db.mt.MemSize() < db.opt.MaxTableSize {
-		return nil
+func (db *DB) ensureRoomForWrite(minSize int64) (int64, error) {
+	free := db.opt.MaxTableSize - db.mt.MemSize()
+	if free >= minSize {
+		return free, nil
 	}
 	_, err := db.flushMemTable()
-	return err
+	return db.opt.MaxTableSize, err
 }
 
 func (db *DB) flushMemTable() (*sync.WaitGroup, error) {
@@ -775,7 +774,7 @@ func (db *DB) flushMemTable() (*sync.WaitGroup, error) {
 			return &ft.wg, nil
 		default:
 			db.Unlock()
-			log.Warnf("Making room for writes")
+			// log.Warnf("Making room for writes")
 			// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
 			// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
 			// you will get a deadlock.
@@ -785,7 +784,7 @@ func (db *DB) flushMemTable() (*sync.WaitGroup, error) {
 }
 
 func arenaSize(opt Options) int64 {
-	return opt.MaxTableSize + opt.maxBatchSize + opt.maxBatchCount*int64(skl.MaxNodeSize)
+	return opt.MaxTableSize + opt.maxBatchCount*int64(skl.MaxNodeSize)
 }
 
 // WriteLevel0Table flushes memtable. It drops deleteValues.

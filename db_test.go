@@ -318,16 +318,14 @@ func TestGetMore(t *testing.T) {
 		data := func(i int) []byte {
 			return []byte(fmt.Sprintf("%b", i))
 		}
-		//	n := 500000
 		n := 10000
-		m := 45 // Increasing would cause ErrTxnTooBig
-		for i := 0; i < n; i += m {
-			txn := db.NewTransaction(true)
-			for j := i; j < i+m && j < n; j++ {
-				require.NoError(t, txn.Set(data(j), data(j)))
-			}
-			require.NoError(t, txn.Commit())
+
+		txn := db.NewTransaction(true)
+		for i := 0; i < n; i++ {
+			require.NoError(t, txn.Set(data(i), data(i)))
 		}
+		require.NoError(t, txn.Commit())
+
 		require.NoError(t, db.validate())
 
 		for i := 0; i < n; i++ {
@@ -341,15 +339,14 @@ func TestGetMore(t *testing.T) {
 		}
 
 		// Overwrite
-		for i := 0; i < n; i += m {
-			txn := db.NewTransaction(true)
-			for j := i; j < i+m && j < n; j++ {
-				require.NoError(t, txn.Set(data(j),
-					// Use a long value that will certainly exceed value threshold.
-					[]byte(fmt.Sprintf("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz%9d", j))))
-			}
-			require.NoError(t, txn.Commit())
+		txn = db.NewTransaction(true)
+		for i := 0; i < n; i++ {
+			require.NoError(t, txn.Set(data(i),
+				// Use a long value that will certainly exceed value threshold.
+				[]byte(fmt.Sprintf("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz%9d", i))))
 		}
+		require.NoError(t, txn.Commit())
+
 		require.NoError(t, db.validate())
 
 		for i := 0; i < n; i++ {
@@ -402,16 +399,15 @@ func TestGetMore(t *testing.T) {
 		txn1.Discard()
 
 		// "Delete" key.
-		for i := 0; i < n; i += m {
+		txn = db.NewTransaction(true)
+		for i := 0; i < n; i++ {
 			if (i % 10000) == 0 {
 				fmt.Printf("Deleting i=%d\n", i)
 			}
-			txn := db.NewTransaction(true)
-			for j := i; j < i+m && j < n; j++ {
-				require.NoError(t, txn.Delete(data(j)))
-			}
-			require.NoError(t, txn.Commit())
+			require.NoError(t, txn.Delete(data(i)))
 		}
+		require.NoError(t, txn.Commit())
+
 		db.validate()
 		for i := 0; i < n; i++ {
 			if (i % 10000) == 0 {

@@ -15,6 +15,10 @@ type Entry struct {
 	Value y.ValueStruct
 }
 
+func (e *Entry) EstimateSize() int64 {
+	return int64(len(e.Key) + int(e.Value.EncodedSize()) + skl.EstimateNodeSize)
+}
+
 type MemTable struct {
 	skl         *skl.Skiplist
 	pendingList unsafe.Pointer // *listNode
@@ -126,8 +130,8 @@ type listNode struct {
 func newListNode(entries []Entry) *listNode {
 	n := &listNode{entries: entries}
 	for _, e := range n.entries {
-		sz := len(e.Key) + int(e.Value.EncodedSize()) + skl.EstimateNodeSize
-		n.memSize += int64(sz)
+		sz := e.EstimateSize()
+		n.memSize += sz
 	}
 	for _, e := range entries {
 		e.Value.Version = y.ParseTs(e.Key)

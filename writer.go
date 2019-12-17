@@ -191,7 +191,6 @@ func (w *writeWorker) writeLSM(reqs []*request) {
 			w.done(reqs, err)
 			return
 		}
-		w.updateOffset(b.off)
 	}
 
 	w.done(reqs, nil)
@@ -209,31 +208,54 @@ func (w *writeWorker) done(reqs []*request, err error) {
 	}
 }
 
+func newEntry(entry *Entry) table.Entry {
+	return table.Entry{
+		Key: entry.Key,
+		Value: y.ValueStruct{
+			Value:    entry.Value,
+			Meta:     entry.meta,
+			UserMeta: entry.UserMeta,
+			Version:  y.ParseTs(entry.Key),
+		},
+	}
+}
+
 func (w *writeWorker) writeToLSM(entries []*Entry) error {
-	if err := w.ensureRoomForWrite(); err != nil {
-		return err
+	for len(entries) != 0 {
+		e := newEntry(entries[0])
+		free, err := w.ensureRoomForWrite(e.EstimateSize())
+		if err != nil {
+			return err
+		}
+
+		needMerge := free != w.opt.MaxTableSize
+		es := make([]table.Entry, 0, len(entries))
+		var i int
+		for i = 0; i < len(entries); i++ {
+			entry := entries[i]
+			if entry.meta&bitFinTxn != 0 {
+				continue
+			}
+
+			e := newEntry(entry)
+			if free < e.EstimateSize() {
+				break
+			}
+			free -= e.EstimateSize()
+			es = append(es, e)
+		}
+		w.updateOffset(entries[i-1].logOffset)
+		log.Errorf("new sst for %v", w.logOff)
+		entries = entries[i:]
+		w.mt.PutToPendingList(es)
+
+		if needMerge {
+			w.mergeLSMCh <- mergeLSMTask{
+				mt:    w.mt,
+				guard: w.resourceMgr.Acquire(),
+			}
+		}
 	}
 
-	es := make([]table.Entry, 0, len(entries)-1)
-	for _, entry := range entries {
-		if entry.meta&bitFinTxn != 0 {
-			continue
-		}
-		es = append(es, table.Entry{
-			Key: entry.Key,
-			Value: y.ValueStruct{
-				Value:    entry.Value,
-				Meta:     entry.meta,
-				UserMeta: entry.UserMeta,
-				Version:  y.ParseTs(entry.Key),
-			},
-		})
-	}
-	guard := w.resourceMgr.Acquire()
-	w.mt.PutToPendingList(es)
-	w.mergeLSMCh <- mergeLSMTask{
-		mt:    w.mt,
-		guard: guard,
-	}
 	return nil
 }

@@ -483,7 +483,6 @@ func (lo *logOffset) Decode(buf []byte) {
 type request struct {
 	// Input values
 	Entries []*Entry
-	off     logOffset
 	Wg      sync.WaitGroup
 	Err     error
 }
@@ -549,10 +548,9 @@ func (vlog *valueLog) write(reqs []*request) error {
 			vlog.curWriter.Append(vlog.buf.Bytes())
 			vlog.buf.Reset()
 			vlog.pendingLen += plen
-
-			b.off.fid = vlog.currentLogFile().fid
+			e.logOffset.fid = vlog.currentLogFile().fid
 			// Use the offset including buffer length so far.
-			b.off.offset = vlog.writableOffset() + uint32(vlog.pendingLen)
+			e.logOffset.offset = vlog.writableOffset() + uint32(vlog.pendingLen)
 		}
 		vlog.numEntriesWritten += uint32(len(b.Entries))
 		// We write to disk here so that all entries that are part of the same transaction are

@@ -67,6 +67,7 @@ func TestValueBasic(t *testing.T) {
 	err = kv.IterateVLog(offset, func(e Entry) {
 		expectedEntry := expectedEntries[i]
 		expectedEntry.offset = e.offset
+		expectedEntry.logOffset = logOffset{}
 		require.Equal(t, expectedEntry, e)
 		i++
 	})

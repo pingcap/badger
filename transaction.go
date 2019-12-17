@@ -243,13 +243,13 @@ func (txn *Txn) checkSize(e *Entry) error {
 	if len(e.UserMeta) > 255 {
 		return ErrUserMetaTooLarge
 	}
-	count := txn.count + 1
 	// Extra bytes for version in key.
-	size := txn.size + int64(e.estimateSize()) + 10
-	if count >= txn.db.opt.maxBatchCount || size >= txn.db.opt.maxBatchSize {
+	size := int64(e.estimateSize()) + 10
+	if size >= txn.db.opt.MaxTableSize {
 		return ErrTxnTooBig
 	}
-	txn.count, txn.size = count, size
+	txn.count++
+	txn.size += size
 	return nil
 }
 

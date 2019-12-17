@@ -50,10 +50,11 @@ func isEncodedHeader(data []byte) bool {
 
 // Entry provides Key, Value, UserMeta. This struct can be used by the user to set data.
 type Entry struct {
-	Key      []byte
-	Value    []byte
-	UserMeta []byte
-	meta     byte
+	Key       []byte
+	Value     []byte
+	UserMeta  []byte
+	meta      byte
+	logOffset logOffset
 
 	// Fields maintained internally.
 	offset uint32
