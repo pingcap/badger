@@ -1642,14 +1642,12 @@ func TestDeleteRange(t *testing.T) {
 			return []byte(fmt.Sprintf("%06d", i))
 		}
 		n := 20000
-		m := 30 // Increasing would cause ErrTxnTooBig
-		for i := 0; i < n; i += m {
-			txn := db.NewTransaction(true)
-			for j := i; j < i+m && j < n; j++ {
-				require.NoError(t, txn.Set(data(j), make([]byte, 128)))
-			}
-			require.NoError(t, txn.Commit())
+
+		txn := db.NewTransaction(true)
+		for i := 0; i < n; i++ {
+			require.NoError(t, txn.Set(data(i), make([]byte, 128)))
 		}
+		require.NoError(t, txn.Commit())
 		require.NoError(t, db.validate())
 
 		db.DeleteFilesInRange(data(0), data(n/2))
@@ -1657,7 +1655,7 @@ func TestDeleteRange(t *testing.T) {
 		// wait for compaction.
 		time.Sleep(2 * time.Second)
 
-		txn := db.NewTransaction(false)
+		txn = db.NewTransaction(false)
 		for i := 0; i < n/4; i++ {
 			_, err := txn.Get(data(i))
 			require.Equal(t, ErrKeyNotFound, err)

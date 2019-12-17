@@ -245,7 +245,6 @@ func (w *writeWorker) writeToLSM(entries []*Entry) error {
 			es = append(es, e)
 		}
 		w.updateOffset(entries[i-1].logOffset)
-		log.Errorf("new sst for %v", w.logOff)
 		entries = entries[i:]
 		w.mt.PutToPendingList(es)
 
