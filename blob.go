@@ -574,7 +574,7 @@ func (h *blobGCHandler) doGCIfNeeded() error {
 	sort.Slice(validEntries, func(i, j int) bool {
 		return validEntries[i].logicalAddr.Less(validEntries[j].logicalAddr)
 	})
-	newFid := uint32(h.bm.kv.lc.reserveFileID())
+	newFid := h.bm.allocFileID()
 	fileName := newBlobFileName(newFid, h.bm.kv.opt.Dir)
 	file, err := directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
