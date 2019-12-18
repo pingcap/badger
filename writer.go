@@ -228,7 +228,6 @@ func (w *writeWorker) writeToLSM(entries []*Entry) error {
 			return err
 		}
 
-		needMerge := free != w.opt.MaxTableSize
 		es := make([]table.Entry, 0, len(entries))
 		var i int
 		for i = 0; i < len(entries); i++ {
@@ -246,13 +245,11 @@ func (w *writeWorker) writeToLSM(entries []*Entry) error {
 		}
 		w.updateOffset(entries[i-1].logOffset)
 		entries = entries[i:]
-		w.mt.PutToPendingList(es)
 
-		if needMerge {
-			w.mergeLSMCh <- mergeLSMTask{
-				mt:    w.mt,
-				guard: w.resourceMgr.Acquire(),
-			}
+		w.mt.PutToPendingList(es)
+		w.mergeLSMCh <- mergeLSMTask{
+			mt:    w.mt,
+			guard: w.resourceMgr.Acquire(),
 		}
 	}
 
