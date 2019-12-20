@@ -417,6 +417,7 @@ func applyManifestChange(build *Manifest, tc *protos.ManifestChange) error {
 		delete(build.Levels[tm.Level].Tables, tc.Id)
 		delete(build.Tables, tc.Id)
 		build.Deletions++
+		tc.Compression = uint32(tm.Compression)
 		addNewToManifest(build, tc)
 	default:
 		return fmt.Errorf("MANIFEST file has invalid manifestChange op")

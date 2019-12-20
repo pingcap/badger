@@ -68,8 +68,7 @@ type Builder struct {
 	baseKeysBuf     []byte
 	baseKeysEndOffs []uint32
 
-	blockBaseKey    []byte // Base key for the current block.
-	blockBaseOffset uint32 // Offset for the current block.
+	blockBaseKey []byte // Base key for the current block.
 
 	blockEndOffsets []uint32 // Base offsets of every block.
 
@@ -132,7 +131,6 @@ func (b *Builder) resetBuffers() {
 	b.baseKeysBuf = b.baseKeysBuf[:0]
 	b.baseKeysEndOffs = b.baseKeysEndOffs[:0]
 	b.blockBaseKey = b.blockBaseKey[:0]
-	b.blockBaseOffset = 0
 	b.blockEndOffsets = b.blockEndOffsets[:0]
 	b.entryEndOffsets = b.entryEndOffsets[:0]
 	b.hashEntries = b.hashEntries[:0]
@@ -233,7 +231,6 @@ func (b *Builder) finishBlock() error {
 	}
 	b.blockEndOffsets = append(b.blockEndOffsets, uint32(b.writtenLen+len(data)))
 	b.writtenLen += len(data)
-	b.blockBaseOffset = uint32(b.writtenLen + len(data))
 
 	// Reset the block for the next build.
 	b.entryEndOffsets = b.entryEndOffsets[:0]

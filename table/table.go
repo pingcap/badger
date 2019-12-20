@@ -40,13 +40,6 @@ import (
 
 const fileSuffix = ".sst"
 
-// TableInterface is useful for testing.
-type TableInterface interface {
-	Smallest() []byte
-	Biggest() []byte
-	DoesNotHave(hash uint64) bool
-}
-
 // Table represents a loaded table file with the info we have about it
 type Table struct {
 	sync.Mutex
@@ -283,30 +276,30 @@ func (t *Table) readIndex() {
 	t.blockEndOffsets = bytesToU32Slice(buf)
 }
 
-func (t *Table) block(idx int) (*block, error) {
-	y.AssertTruef(idx >= 0, "idx=%d", idx)
+func (t *Table) block(idx int) (block, error) {
+	y.Assert(idx >= 0)
 	if idx >= len(t.blockEndOffsets) {
-		return nil, errors.New("block out of index")
+		return block{}, errors.New("block out of index")
 	}
 
 	var startOffset int
 	if idx > 0 {
 		startOffset = int(t.blockEndOffsets[idx-1])
 	}
-	blk := &block{
+	blk := block{
 		offset: startOffset,
 	}
 	endOffset := int(t.blockEndOffsets[idx])
 	dataLen := endOffset - startOffset
 	var err error
 	if blk.data, err = t.read(blk.offset, dataLen); err != nil {
-		return nil, errors.Wrapf(err,
+		return block{}, errors.Wrapf(err,
 			"failed to read from file: %s at offset: %d, len: %d", t.fd.Name(), blk.offset, dataLen)
 	}
 
 	blk.data, err = t.decompressData(blk.data)
 	if err != nil {
-		return nil, errors.Wrapf(err,
+		return block{}, errors.Wrapf(err,
 			"failed to decode compressed data in file: %s at offset: %d, len: %d",
 			t.fd.Name(), blk.offset, dataLen)
 	}
