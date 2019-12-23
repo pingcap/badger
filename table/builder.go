@@ -36,8 +36,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const restartInterval = 256 // Might want to change this to be based on total size instead of numKeys.
-
 type header struct {
 	baseLen uint16 // Overlap with base key.
 	diffLen uint16 // Length of the diff.
@@ -61,9 +59,10 @@ const headerSize = 4
 type Builder struct {
 	counter int // Number of keys written for the current block.
 
-	w          *fileutil.DirectWriter
-	buf        []byte
-	writtenLen int
+	idxFileName string
+	w           *fileutil.DirectWriter
+	buf         []byte
+	writtenLen  int
 
 	baseKeysBuf     []byte
 	baseKeysEndOffs []uint32
@@ -76,7 +75,9 @@ type Builder struct {
 	// The offsets are relative to the start of the block.
 	entryEndOffsets []uint32
 
-	prevKey []byte
+	prevKey  []byte
+	smallest []byte
+	biggest  []byte
 
 	hashEntries []hashEntry
 	bloomFpr    float64
@@ -96,6 +97,7 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 	levelFactor := math.Pow(t, float64(opt.MaxLevels-level))
 
 	return &Builder{
+		idxFileName: f.Name() + idxFileSuffix,
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
 		baseKeysBuf: make([]byte, 0, 4*1024),
@@ -108,6 +110,7 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 
 func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
 	return &Builder{
+		idxFileName: f.Name() + idxFileSuffix,
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
 		baseKeysBuf: make([]byte, 0, 4*1024),
@@ -122,6 +125,7 @@ func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.Tabl
 func (b *Builder) Reset(f *os.File) {
 	b.resetBuffers()
 	b.w.Reset(f)
+	b.idxFileName = f.Name() + idxFileSuffix
 }
 
 func (b *Builder) resetBuffers() {
@@ -137,6 +141,8 @@ func (b *Builder) resetBuffers() {
 	b.surfKeys = nil
 	b.surfVals = nil
 	b.prevKey = b.prevKey[:0]
+	b.smallest = b.smallest[:0]
+	b.biggest = b.biggest[:0]
 }
 
 // Close closes the TableBuilder.
@@ -186,6 +192,11 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	if len(key) > 0 {
 		b.addIndex(key)
 	}
+
+	if len(b.smallest) == 0 {
+		b.smallest = append(b.smallest, key...)
+	}
+	b.biggest = append(b.biggest[:0], key...)
 
 	// diffKey stores the difference of key with blockBaseKey.
 	var diffKey []byte
@@ -243,13 +254,27 @@ func (b *Builder) finishBlock() error {
 // Add adds a key-value pair to the block.
 // If doNotRestart is true, we will not restart even if b.counter >= restartInterval.
 func (b *Builder) Add(key []byte, value y.ValueStruct) error {
-	if b.counter >= restartInterval {
+	if b.shouldFinishBlock(key, value) {
 		if err := b.finishBlock(); err != nil {
 			return err
 		}
 	}
 	b.addHelper(key, value)
 	return nil // Currently, there is no meaningful error.
+}
+
+func (b *Builder) shouldFinishBlock(key []byte, value y.ValueStruct) bool {
+	// If there is no entry till now, we will return false.
+	if len(b.entryEndOffsets) <= 0 {
+		return false
+	}
+
+	// We should include current entry also in size, that's why +1 to len(b.entryOffsets).
+	entriesOffsetsSize := uint32((len(b.entryEndOffsets)+1)*4 + 4)
+	estimatedSize := uint32(len(b.buf)) + uint32(6 /*header size for entry*/) +
+		uint32(len(key)) + uint32(value.EncodedSize()) + entriesOffsetsSize
+
+	return estimatedSize > uint32(b.opt.BlockSize)
 }
 
 // ReachedCapacity returns true if we... roughly (?) reached capacity?
@@ -273,10 +298,40 @@ func (b *Builder) EstimateSize() int {
 // Finish finishes the table by appending the index.
 func (b *Builder) Finish() error {
 	b.finishBlock() // This will never start a new block.
-	b.buf = append(b.buf, u32SliceToBytes(b.blockEndOffsets)...)
-	b.buf = append(b.buf, b.baseKeysBuf...)
-	b.buf = append(b.buf, u32SliceToBytes(b.baseKeysEndOffs)...)
+	if err := b.w.Finish(); err != nil {
+		return err
+	}
+	idxFile, err := y.OpenTruncFile(b.idxFileName, false)
+	if err != nil {
+		return err
+	}
+	b.w.Reset(idxFile)
+
+	var encodeBuf [8]byte
+
+	// Don't compress the global ts, because it may be updated during ingest.
+	ts := uint64(math.MaxUint64)
+	if b.isExternal {
+		// External builder doesn't append ts to the keys, the output sst should has a non-MaxUint64 global ts.
+		ts = math.MaxUint64 - 1
+	}
+	binary.BigEndian.PutUint64(encodeBuf[:], ts)
+	if err := b.w.Append(encodeBuf[:]); err != nil {
+		return err
+	}
+
+	binary.BigEndian.PutUint64(encodeBuf[:], uint64(b.writtenLen))
+	b.buf = append(b.buf, encodeBuf[:]...)
+
+	b.buf = append(b.buf, u32ToBytes(uint32(len(b.smallest)))...)
+	b.buf = append(b.buf, b.smallest...)
+	b.buf = append(b.buf, u32ToBytes(uint32(len(b.biggest)))...)
+	b.buf = append(b.buf, b.biggest...)
+
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.baseKeysEndOffs)))...)
+	b.buf = append(b.buf, u32SliceToBytes(b.baseKeysEndOffs)...)
+	b.buf = append(b.buf, b.baseKeysBuf...)
+	b.buf = append(b.buf, u32SliceToBytes(b.blockEndOffsets)...)
 
 	// Write bloom filter.
 	if !b.useSuRF {
@@ -285,8 +340,8 @@ func (b *Builder) Finish() error {
 			bloomFilter.Add(he.hash)
 		}
 		bfData := bloomFilter.BinaryMarshal()
-		b.buf = append(b.buf, bfData...)
 		b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
+		b.buf = append(b.buf, bfData...)
 	} else {
 		b.buf = append(b.buf, u32ToBytes(0)...)
 	}
@@ -297,9 +352,6 @@ func (b *Builder) Finish() error {
 	} else {
 		b.buf = append(b.buf, u32ToBytes(0)...)
 	}
-	if err := b.w.Append(b.buf); err != nil {
-		return err
-	}
 
 	// Write SuRF.
 	if b.useSuRF && len(b.surfKeys) > 0 {
@@ -307,26 +359,19 @@ func (b *Builder) Finish() error {
 		rl := uint32(b.opt.SuRFOptions.RealSuffixLen)
 		sb := surf.NewBuilder(3, hl, rl)
 		sf := sb.Build(b.surfKeys, b.surfVals, b.opt.SuRFOptions.BitsPerKeyHint)
-		if err := sf.WriteTo(b.w); err != nil {
-			return err
-		}
-		if err := b.w.Append(u32ToBytes(uint32(sf.MarshalSize()))); err != nil {
-			return err
-		}
+		b.buf = append(b.buf, u32ToBytes(uint32(sf.MarshalSize()))...)
+		b.buf = append(b.buf, sf.Marshal()...)
 	} else {
-		if err := b.w.Append(u32ToBytes(0)); err != nil {
-			return err
-		}
+		b.buf = append(b.buf, u32ToBytes(0)...)
 	}
 
-	ts := uint64(math.MaxUint64)
-	if b.isExternal {
-		// External builder doesn't append ts to the keys, the output sst should has a non-MaxUint64 global ts.
-		ts = math.MaxUint64 - 1
+	idxData := b.buf
+	if b.opt.Compression != options.None {
+		if idxData, err = b.compressData(b.buf); err != nil {
+			return err
+		}
 	}
-	var tsBuf [8]byte
-	binary.BigEndian.PutUint64(tsBuf[:], ts)
-	if err := b.w.Append(tsBuf[:]); err != nil {
+	if err := b.w.Append(idxData); err != nil {
 		return err
 	}
 

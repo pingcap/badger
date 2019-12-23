@@ -19,6 +19,7 @@ package table
 import (
 	"encoding/binary"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -40,23 +41,27 @@ import (
 	"github.com/pingcap/errors"
 )
 
-const fileSuffix = ".sst"
-const intSize = int(unsafe.Sizeof(int(0)))
+const (
+	fileSuffix    = ".sst"
+	idxFileSuffix = ".idx"
+
+	intSize = int(unsafe.Sizeof(int(0)))
+)
+
+func IndexFilename(tableFilename string) string { return tableFilename + idxFileSuffix }
 
 // Table represents a loaded table file with the info we have about it
 type Table struct {
 	sync.Mutex
 
 	fd        *os.File // Own fd.
-	tableSize int      // Initialized in OpenTable, using fd.Stat().
+	indexFd   *os.File
+	tableSize int // Initialized in OpenTable, using fd.Stat().
 
 	globalTs        uint64
 	blockEndOffsets []uint32
 	baseKeys        []byte
 	baseKeysEndOffs []uint32
-
-	loadingMode options.FileLoadingMode
-	mmap        []byte // Memory mapped.
 
 	// The following are initialized once and const.
 	smallest, biggest []byte // Smallest and largest keys.
@@ -80,9 +85,6 @@ func (t *Table) CompressionType() options.CompressionType {
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
-	if t.loadingMode == options.MemoryMap {
-		y.Munmap(t.mmap)
-	}
 	if err := t.fd.Truncate(0); err != nil {
 		// This is very important to let the FS know that the file is deleted.
 		return err
@@ -91,86 +93,53 @@ func (t *Table) Delete() error {
 	if err := t.fd.Close(); err != nil {
 		return err
 	}
-	return os.Remove(filename)
-}
-
-type block struct {
-	offset int
-	data   []byte
-}
-
-func (b *block) size() int64 {
-	return int64(intSize + len(b.data))
+	if err := os.Remove(filename); err != nil {
+		return err
+	}
+	return os.Remove(filename + idxFileSuffix)
 }
 
 // OpenTable assumes file has only one table and opens it.  Takes ownership of fd upon function
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(fd *os.File, loadingMode options.FileLoadingMode, compression options.CompressionType, cache *ristretto.Cache) (*Table, error) {
-	fileInfo, err := fd.Stat()
-	if err != nil {
-		// It's OK to ignore fd.Close() errs in this function because we have only read
-		// from the file.
-		_ = fd.Close()
-		return nil, y.Wrap(err)
-	}
-
-	filename := fileInfo.Name()
+func OpenTable(filename string, compression options.CompressionType, cache *ristretto.Cache) (*Table, error) {
 	id, ok := ParseFileID(filename)
 	if !ok {
-		_ = fd.Close()
 		return nil, errors.Errorf("Invalid filename: %s", filename)
 	}
+
+	// TODO: after we support cache of L2 storage, we will open block data file in cache manager.
+	fd, err := y.OpenExistingFile(filename, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	indexFd, err := y.OpenExistingFile(filename+idxFileSuffix, 0)
+	if err != nil {
+		return nil, err
+	}
+
 	t := &Table{
 		fd:          fd,
+		indexFd:     indexFd,
 		id:          id,
-		loadingMode: loadingMode,
 		compression: compression,
 		cache:       cache,
 	}
-
-	t.tableSize = int(fileInfo.Size())
-
-	if loadingMode == options.MemoryMap {
-		t.mmap, err = y.Mmap(fd, false, fileInfo.Size())
-		if err != nil {
-			_ = fd.Close()
-			return nil, y.Wrapf(err, "Unable to map file")
-		}
-	} else if loadingMode == options.LoadToRAM {
-		err = t.loadToRAM()
-		if err != nil {
-			_ = fd.Close()
-			return nil, y.Wrap(err)
-		}
-	}
-
-	t.readIndex()
-
-	it := t.NewIterator(false)
-	it.Rewind()
-	if it.Valid() {
-		// key with max ts is the binary smallest key.
-		t.smallest = y.KeyWithTs(it.RawKey(), math.MaxUint64)
-	}
-
-	it2 := t.NewIterator(true)
-	it2.Rewind()
-	if it2.Valid() {
-		// key with 0 ts is the binary biggest key.
-		t.biggest = y.KeyWithTs(it2.RawKey(), 0)
-	}
+	t.loadIndex()
 	return t, nil
 }
 
 // Close closes the open table.  (Releases resources back to the OS.)
 func (t *Table) Close() error {
-	if t.loadingMode == options.MemoryMap {
-		y.Munmap(t.mmap)
+	if t.fd != nil {
+		t.fd.Close()
 	}
-
-	return t.fd.Close()
+	if t.indexFd != nil {
+		t.indexFd.Close()
+	}
+	return nil
 }
 
 // PointGet try to lookup a key and its value by table's hash index.
@@ -212,13 +181,6 @@ func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, boo
 }
 
 func (t *Table) read(off int, sz int) ([]byte, error) {
-	if len(t.mmap) > 0 {
-		if len(t.mmap[off:]) < sz {
-			return nil, y.ErrEOF
-		}
-		return t.mmap[off : off+sz], nil
-	}
-
 	res := make([]byte, sz)
 	_, err := t.fd.ReadAt(res, int64(off))
 	return res, err
@@ -230,60 +192,98 @@ func (t *Table) readNoFail(off int, sz int) []byte {
 	return res
 }
 
-func (t *Table) readIndex() {
-	readPos := t.tableSize
-
-	readPos -= 8
-	buf := t.readNoFail(readPos, 8)
-	t.globalTs = binary.BigEndian.Uint64(buf)
-
-	readPos -= 4
-	buf = t.readNoFail(readPos, 4)
-	surfSize := int(bytesToU32(buf))
-	if surfSize != 0 {
-		readPos -= surfSize
-		data := t.readNoFail(readPos, surfSize)
-		t.surf = new(surf.SuRF)
-		t.surf.Unmarshal(data)
+func (t *Table) loadIndex() error {
+	// TODO: now we simply keep all index data in memory.
+	// We can add a cache policy to evict unused index to avoid OOM later.
+	idxData, err := ioutil.ReadAll(t.indexFd)
+	if err != nil {
+		return err
 	}
 
-	readPos -= 4
-	buf = t.readNoFail(readPos, 4)
-	numBuckets := int(bytesToU32(buf))
-	if numBuckets != 0 {
-		hashLen := numBuckets * 3
-		readPos -= hashLen
-		buckets := t.readNoFail(readPos, hashLen)
-		t.hIdx = new(hashIndex)
-		t.hIdx.readIndex(buckets, numBuckets)
+	t.globalTs = binary.BigEndian.Uint64(idxData[:8])
+
+	idxData = idxData[8:]
+	if t.compression != options.None {
+		if idxData, err = t.decompressData(idxData); err != nil {
+			return err
+		}
 	}
 
-	// Read bloom filter.
-	readPos -= 4
-	buf = t.readNoFail(readPos, 4)
-	bloomLen := int(bytesToU32(buf))
-	if bloomLen != 0 {
-		readPos -= bloomLen
-		data := t.readNoFail(readPos, bloomLen)
-		t.bf = new(bbloom.Bloom)
-		t.bf.BinaryUnmarshal(data)
+	var cursor int
+	t.tableSize = int(binary.BigEndian.Uint64(idxData[cursor : cursor+8]))
+	cursor += 8
+
+	smallestLen := int(bytesToU32(idxData[cursor : cursor+4]))
+	cursor += 4
+	if smallestLen != 0 {
+		smallest := idxData[cursor : cursor+smallestLen]
+		if !t.HasGlobalTs() {
+			smallest = y.ParseKey(smallest)
+		}
+		t.smallest = y.KeyWithTs(smallest, math.MaxUint64)
+		cursor += smallestLen
 	}
 
-	readPos -= 4
-	buf = t.readNoFail(readPos, 4)
-	numBlocks := int(bytesToU32(buf))
+	biggestLen := int(bytesToU32(idxData[cursor : cursor+4]))
+	cursor += 4
+	if biggestLen != 0 {
+		biggest := idxData[cursor : cursor+biggestLen]
+		if !t.HasGlobalTs() {
+			biggest = y.ParseKey(biggest)
+		}
+		t.biggest = y.KeyWithTs(biggest, 0)
+		cursor += biggestLen
+	}
 
-	readPos -= 4 * numBlocks
-	buf = t.readNoFail(readPos, 4*numBlocks)
-	t.baseKeysEndOffs = bytesToU32Slice(buf)
+	numBlocks := int(bytesToU32(idxData[cursor : cursor+4]))
+	blkIdxSize := 4 * numBlocks
+	cursor += 4
+
+	t.baseKeysEndOffs = bytesToU32Slice(idxData[cursor : cursor+blkIdxSize])
+	cursor += blkIdxSize
 
 	baseKeyBufLen := int(t.baseKeysEndOffs[numBlocks-1])
-	readPos -= baseKeyBufLen
-	t.baseKeys = t.readNoFail(readPos, baseKeyBufLen)
+	t.baseKeys = idxData[cursor : cursor+baseKeyBufLen]
+	cursor += baseKeyBufLen
 
-	readPos -= 4 * numBlocks
-	buf = t.readNoFail(readPos, 4*numBlocks)
-	t.blockEndOffsets = bytesToU32Slice(buf)
+	t.blockEndOffsets = bytesToU32Slice(idxData[cursor : cursor+blkIdxSize])
+	cursor += blkIdxSize
+
+	// Read bloom filter.
+	bloomLen := int(bytesToU32(idxData[cursor : cursor+4]))
+	cursor += 4
+	if bloomLen != 0 {
+		t.bf = new(bbloom.Bloom)
+		t.bf.BinaryUnmarshal(idxData[cursor : cursor+bloomLen])
+		cursor += bloomLen
+	}
+
+	numBuckets := int(bytesToU32(idxData[cursor : cursor+4]))
+	cursor += 4
+	if numBuckets != 0 {
+		hashLen := numBuckets * 3
+		t.hIdx = new(hashIndex)
+		t.hIdx.readIndex(idxData[cursor:cursor+hashLen], numBuckets)
+		cursor += hashLen
+	}
+
+	surfSize := int(bytesToU32(idxData[cursor : cursor+4]))
+	cursor += 4
+	if surfSize != 0 {
+		t.surf = new(surf.SuRF)
+		t.surf.Unmarshal(idxData[cursor : cursor+surfSize])
+	}
+
+	return nil
+}
+
+type block struct {
+	offset int
+	data   []byte
+}
+
+func (b *block) size() int64 {
+	return int64(intSize + len(b.data))
 }
 
 func (t *Table) block(idx int) (block, error) {
@@ -350,10 +350,10 @@ func (t *Table) SetGlobalTs(ts uint64) error {
 	var buf [8]byte
 	encodeTs := math.MaxUint64 - ts
 	binary.BigEndian.PutUint64(buf[:], encodeTs)
-	if _, err := t.fd.WriteAt(buf[:], t.Size()-8); err != nil {
+	if _, err := t.indexFd.WriteAt(buf[:], 0); err != nil {
 		return err
 	}
-	if err := fileutil.Fsync(t.fd); err != nil {
+	if err := fileutil.Fsync(t.indexFd); err != nil {
 		return err
 	}
 	t.globalTs = encodeTs
@@ -444,15 +444,6 @@ func IDToFilename(id uint64) string {
 // filepath.
 func NewFilename(id uint64, dir string) string {
 	return filepath.Join(dir, IDToFilename(id))
-}
-
-func (t *Table) loadToRAM() error {
-	t.mmap = make([]byte, t.tableSize)
-	read, err := t.fd.ReadAt(t.mmap, 0)
-	if err != nil || read != t.tableSize {
-		return y.Wrapf(err, "Unable to load file in memory. Table file: %s", t.Filename())
-	}
-	return nil
 }
 
 // decompressData decompresses the given data.

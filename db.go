@@ -462,12 +462,12 @@ func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
 			return nil, err
 		}
 
-		fd, err := os.OpenFile(filename, os.O_RDWR, 0666)
+		err = os.Link(table.IndexFilename(fd.Name()), table.IndexFilename(filename))
 		if err != nil {
 			return nil, err
 		}
 
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression, db.blockCache)
+		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.Compression, db.blockCache)
 		if err != nil {
 			return nil, err
 		}
@@ -908,8 +908,8 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 
 		fileID := db.lc.reserveFileID()
-		fileName := table.NewFilename(fileID, db.opt.Dir)
-		fd, err := directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
+		filename := table.NewFilename(fileID, db.opt.Dir)
+		fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
 			return y.Wrap(err)
 		}
@@ -930,11 +930,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		fd, err = os.OpenFile(fileName, os.O_RDWR, 0666)
-		if err != nil {
-			return err
-		}
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode, db.opt.TableBuilderOptions.Compression, db.blockCache)
+		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.Compression, db.blockCache)
 		if err != nil {
 			log.Infof("ERROR while opening table: %v", err)
 			return err

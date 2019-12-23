@@ -43,7 +43,8 @@ func buildHashIndex(buf []byte, hashEntries []hashEntry, hashUtilRatio float32) 
 	numBuckets := uint32(float32(len(hashEntries)) / hashUtilRatio)
 	bufLen := len(buf)
 	buf = append(buf, make([]byte, numBuckets*3+4)...)
-	buckets := buf[bufLen:]
+	copy(buf[bufLen:], u32ToBytes(numBuckets))
+	buckets := buf[bufLen+4:]
 	for i := 0; i < int(numBuckets); i++ {
 		binary.LittleEndian.PutUint16(buckets[i*3:], resultNoEntry)
 	}
@@ -59,7 +60,6 @@ func buildHashIndex(buf []byte, hashEntries []hashEntry, hashUtilRatio float32) 
 			binary.LittleEndian.PutUint16(bucket[:2], resultFallback)
 		}
 	}
-	copy(buckets[numBuckets*3:], u32ToBytes(numBuckets))
 
 	return buf
 }

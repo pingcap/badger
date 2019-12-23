@@ -115,13 +115,8 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 		if kv.opt.ReadOnly {
 			flags |= y.ReadOnly
 		}
-		fd, err := y.OpenExistingFile(fname, flags)
-		if err != nil {
-			closeAllTables(tables)
-			return nil, errors.Wrapf(err, "Opening file: %q", fname)
-		}
 
-		t, err := table.OpenTable(fd, kv.opt.TableLoadingMode, tableManifest.Compression, kv.blockCache)
+		t, err := table.OpenTable(fname, tableManifest.Compression, kv.blockCache)
 		if err != nil {
 			closeAllTables(tables)
 			return nil, errors.Wrapf(err, "Opening table: %q", fname)
@@ -398,9 +393,9 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	for it.Valid() {
 		timeStart := time.Now()
 		fileID := lc.reserveFileID()
-		fileName := table.NewFilename(fileID, lc.kv.opt.Dir)
+		filename := table.NewFilename(fileID, lc.kv.opt.Dir)
 		var fd *os.File
-		fd, err = directio.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0666)
+		fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
 			return
 		}
@@ -492,12 +487,8 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 			return
 		}
 		fd.Close()
-		fd, err = os.OpenFile(fileName, os.O_RDWR, 0666)
-		if err != nil {
-			return
-		}
 		var tbl *table.Table
-		tbl, err = table.OpenTable(fd, lc.kv.opt.TableLoadingMode, lc.opt.Compression, lc.kv.blockCache)
+		tbl, err = table.OpenTable(filename, lc.opt.Compression, lc.kv.blockCache)
 		if err != nil {
 			return
 		}

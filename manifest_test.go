@@ -26,7 +26,6 @@ import (
 	"testing"
 
 	"github.com/coocood/badger/epoch"
-	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
@@ -181,7 +180,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)
 	f := buildTestTable(t, "k", 2)
-	t1, err := table.OpenTable(f, options.MemoryMap, opt.TableBuilderOptions.Compression, testCache())
+	t1, err := table.OpenTable(f.Name(), opt.TableBuilderOptions.Compression, testCache())
 	require.NoError(t, err)
 	defer t1.Delete()
 
@@ -205,7 +204,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lc.runCompactDef(0, cd, nil, g)
 
 	f = buildTestTable(t, "l", 2)
-	t2, err := table.OpenTable(f, options.MemoryMap, opts.Compression, testCache())
+	t2, err := table.OpenTable(f.Name(), opts.Compression, testCache())
 	require.NoError(t, err)
 	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)
