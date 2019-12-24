@@ -298,10 +298,8 @@ func (b *Builder) EstimateSize() int {
 	return size
 }
 
-// id use 6 bits, so the number of id is limited to 64.
 const (
-	idFileSize = iota
-	idSmallest
+	idSmallest byte = iota
 	idBiggest
 	idBaseKeysEndOffs
 	idBaseKeys
@@ -335,12 +333,11 @@ func (b *Builder) Finish() error {
 
 	encoder := metaEncoder{b.buf}
 
-	encoder.appendUint(uint64(b.writtenLen), idFileSize)
-	encoder.appendBytes(b.smallest, idSmallest)
-	encoder.appendBytes(b.biggest, idBiggest)
-	encoder.appendBytes(u32SliceToBytes(b.baseKeysEndOffs), idBaseKeysEndOffs)
-	encoder.appendBytes(b.baseKeysBuf, idBaseKeys)
-	encoder.appendBytes(u32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)
+	encoder.append(b.smallest, idSmallest)
+	encoder.append(b.biggest, idBiggest)
+	encoder.append(u32SliceToBytes(b.baseKeysEndOffs), idBaseKeysEndOffs)
+	encoder.append(b.baseKeysBuf, idBaseKeys)
+	encoder.append(u32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)
 
 	var bloomFilter []byte
 	if !b.useSuRF {
@@ -350,13 +347,13 @@ func (b *Builder) Finish() error {
 		}
 		bloomFilter = bf.BinaryMarshal()
 	}
-	encoder.appendBytes(bloomFilter, idBloomFilter)
+	encoder.append(bloomFilter, idBloomFilter)
 
 	var hashIndex []byte
 	if !b.useSuRF {
 		hashIndex = buildHashIndex(b.hashEntries, b.opt.HashUtilRatio)
 	}
-	encoder.appendBytes(hashIndex, idHashIndex)
+	encoder.append(hashIndex, idHashIndex)
 
 	var surfIndex []byte
 	if b.useSuRF && len(b.surfKeys) > 0 {
@@ -366,7 +363,7 @@ func (b *Builder) Finish() error {
 		sf := sb.Build(b.surfKeys, b.surfVals, b.opt.SuRFOptions.BitsPerKeyHint)
 		surfIndex = sf.Marshal()
 	}
-	encoder.appendBytes(surfIndex, idSuRFIndex)
+	encoder.append(surfIndex, idSuRFIndex)
 
 	idxData := encoder.buf
 	if b.opt.Compression != options.None {
@@ -438,25 +435,12 @@ func (b *Builder) compressData(data []byte) ([]byte, error) {
 	return nil, errors.New("Unsupported compression type")
 }
 
-// type use 2 bits, now we have two unused type.
-const (
-	typeUint    = 0
-	typeBytes   = 1
-	typeUnused1 = 2
-	typeUnused2 = 3
-)
-
 type metaEncoder struct {
 	buf []byte
 }
 
-func (e *metaEncoder) appendUint(d uint64, id byte) {
-	e.buf = append(e.buf, id<<2|typeUint)
-	e.buf = append(e.buf, u64ToBytes(d)...)
-}
-
-func (e *metaEncoder) appendBytes(d []byte, id byte) {
-	e.buf = append(e.buf, id<<2|typeBytes)
+func (e *metaEncoder) append(d []byte, id byte) {
+	e.buf = append(e.buf, id)
 	e.buf = append(e.buf, u32ToBytes(uint32(len(d)))...)
 	e.buf = append(e.buf, d...)
 }
@@ -470,22 +454,12 @@ func (e *metaDecoder) valid() bool {
 	return e.cursor < len(e.buf)
 }
 
-func (e *metaDecoder) currentIdAndType() (id byte, tp byte) {
-	tag := e.buf[e.cursor]
-	return tag >> 2, tag & 3
+func (e *metaDecoder) currentId() byte {
+	return e.buf[e.cursor]
 }
 
-func (e *metaDecoder) decodeUint() uint64 {
-	y.Assert(e.buf[e.cursor]&3 == typeUint)
-	e.cursor += 1
-	d := bytesToU64(e.buf[e.cursor:])
-	e.cursor += 8
-	return d
-}
-
-func (e *metaDecoder) decodeBytes() []byte {
-	y.Assert(e.buf[e.cursor]&3 == typeBytes)
-	e.cursor += 1
+func (e *metaDecoder) decode() []byte {
+	e.cursor++
 	l := int(bytesToU32(e.buf[e.cursor:]))
 	e.cursor += 4
 	d := e.buf[e.cursor : e.cursor+l]
@@ -494,12 +468,6 @@ func (e *metaDecoder) decodeBytes() []byte {
 }
 
 func (e *metaDecoder) skip() {
-	tp := e.buf[e.cursor] & 3
-	switch tp {
-	case typeUint:
-		e.cursor += 1 + 4
-	case typeBytes:
-		l := int(bytesToU32(e.buf[e.cursor+1:]))
-		e.cursor += 1 + 4 + l
-	}
+	l := int(bytesToU32(e.buf[e.cursor+1:]))
+	e.cursor += 1 + 4 + l
 }

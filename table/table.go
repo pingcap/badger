@@ -209,42 +209,39 @@ func (t *Table) loadIndex() error {
 
 	decoder := metaDecoder{buf: idxData}
 	for decoder.valid() {
-		id, _ := decoder.currentIdAndType()
-		switch id {
-		case idFileSize:
-			t.tableSize = int(decoder.decodeUint())
+		switch decoder.currentId() {
 		case idSmallest:
-			if k := decoder.decodeBytes(); len(k) != 0 {
+			if k := decoder.decode(); len(k) != 0 {
 				if !t.HasGlobalTs() {
 					k = y.ParseKey(k)
 				}
 				t.smallest = y.KeyWithTs(k, math.MaxUint64)
 			}
 		case idBiggest:
-			if k := decoder.decodeBytes(); len(k) != 0 {
+			if k := decoder.decode(); len(k) != 0 {
 				if !t.HasGlobalTs() {
 					k = y.ParseKey(k)
 				}
 				t.biggest = y.KeyWithTs(k, 0)
 			}
 		case idBaseKeysEndOffs:
-			t.baseKeysEndOffs = bytesToU32Slice(decoder.decodeBytes())
+			t.baseKeysEndOffs = bytesToU32Slice(decoder.decode())
 		case idBaseKeys:
-			t.baseKeys = decoder.decodeBytes()
+			t.baseKeys = decoder.decode()
 		case idBlockEndOffsets:
-			t.blockEndOffsets = bytesToU32Slice(decoder.decodeBytes())
+			t.blockEndOffsets = bytesToU32Slice(decoder.decode())
 		case idBloomFilter:
-			if d := decoder.decodeBytes(); len(d) != 0 {
+			if d := decoder.decode(); len(d) != 0 {
 				t.bf = new(bbloom.Bloom)
 				t.bf.BinaryUnmarshal(d)
 			}
 		case idHashIndex:
-			if d := decoder.decodeBytes(); len(d) != 0 {
+			if d := decoder.decode(); len(d) != 0 {
 				t.hIdx = new(hashIndex)
 				t.hIdx.readIndex(d)
 			}
 		case idSuRFIndex:
-			if d := decoder.decodeBytes(); len(d) != 0 {
+			if d := decoder.decode(); len(d) != 0 {
 				t.surf = new(surf.SuRF)
 				t.surf.Unmarshal(d)
 			}
@@ -354,7 +351,7 @@ func (t *Table) blockCacheKey(idx int) uint64 {
 }
 
 // Size is its file size in bytes
-func (t *Table) Size() int64 { return int64(t.tableSize) }
+func (t *Table) Size() int64 { return int64(t.blockEndOffsets[len(t.blockEndOffsets)-1]) }
 
 // Smallest is its smallest key, or nil if there are none
 func (t *Table) Smallest() []byte { return t.smallest }
