@@ -75,7 +75,6 @@ type Builder struct {
 	// The offsets are relative to the start of the block.
 	entryEndOffsets []uint32
 
-	prevKey  []byte
 	smallest []byte
 	biggest  []byte
 
@@ -140,7 +139,6 @@ func (b *Builder) resetBuffers() {
 	b.hashEntries = b.hashEntries[:0]
 	b.surfKeys = nil
 	b.surfVals = nil
-	b.prevKey = b.prevKey[:0]
 	b.smallest = b.smallest[:0]
 	b.biggest = b.biggest[:0]
 }
@@ -167,12 +165,22 @@ func (b *Builder) addIndex(key []byte) {
 		keyNoTs = y.ParseKey(key)
 	}
 
-	cmp := bytes.Compare(keyNoTs, b.prevKey)
-	y.Assert(cmp >= 0)
-	if cmp == 0 {
-		return
+	if len(b.smallest) == 0 {
+		b.smallest = append(b.smallest, key...)
 	}
-	b.prevKey = y.SafeCopy(b.prevKey, keyNoTs)
+
+	if len(b.biggest) > 0 {
+		prev := b.biggest
+		if !b.isExternal {
+			prev = y.ParseKey(b.biggest)
+		}
+		cmp := bytes.Compare(keyNoTs, prev)
+		y.Assert(cmp >= 0)
+		if cmp == 0 {
+			return
+		}
+	}
+	b.biggest = y.SafeCopy(b.biggest, key)
 
 	keyHash := farm.Fingerprint64(keyNoTs)
 	// It is impossible that a single table contains 16 million keys.
@@ -192,11 +200,6 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	if len(key) > 0 {
 		b.addIndex(key)
 	}
-
-	if len(b.smallest) == 0 {
-		b.smallest = append(b.smallest, key...)
-	}
-	b.biggest = append(b.biggest[:0], key...)
 
 	// diffKey stores the difference of key with blockBaseKey.
 	var diffKey []byte
@@ -265,7 +268,7 @@ func (b *Builder) Add(key []byte, value y.ValueStruct) error {
 
 func (b *Builder) shouldFinishBlock(key []byte, value y.ValueStruct) bool {
 	// If there is no entry till now, we will return false.
-	if len(b.entryEndOffsets) <= 0 {
+	if len(b.entryEndOffsets) == 0 {
 		return false
 	}
 
@@ -295,6 +298,19 @@ func (b *Builder) EstimateSize() int {
 	return size
 }
 
+// id use 6 bits, so the number of id is limited to 64.
+const (
+	idFileSize = iota
+	idSmallest
+	idBiggest
+	idBaseKeysEndOffs
+	idBaseKeys
+	idBlockEndOffsets
+	idBloomFilter
+	idHashIndex
+	idSuRFIndex
+)
+
 // Finish finishes the table by appending the index.
 func (b *Builder) Finish() error {
 	b.finishBlock() // This will never start a new block.
@@ -307,67 +323,54 @@ func (b *Builder) Finish() error {
 	}
 	b.w.Reset(idxFile)
 
-	var encodeBuf [8]byte
-
 	// Don't compress the global ts, because it may be updated during ingest.
 	ts := uint64(math.MaxUint64)
 	if b.isExternal {
 		// External builder doesn't append ts to the keys, the output sst should has a non-MaxUint64 global ts.
 		ts = math.MaxUint64 - 1
 	}
-	binary.BigEndian.PutUint64(encodeBuf[:], ts)
-	if err := b.w.Append(encodeBuf[:]); err != nil {
+	if err := b.w.Append(u64ToBytes(ts)); err != nil {
 		return err
 	}
 
-	binary.BigEndian.PutUint64(encodeBuf[:], uint64(b.writtenLen))
-	b.buf = append(b.buf, encodeBuf[:]...)
+	encoder := metaEncoder{b.buf}
 
-	b.buf = append(b.buf, u32ToBytes(uint32(len(b.smallest)))...)
-	b.buf = append(b.buf, b.smallest...)
-	b.buf = append(b.buf, u32ToBytes(uint32(len(b.biggest)))...)
-	b.buf = append(b.buf, b.biggest...)
+	encoder.appendUint(uint64(b.writtenLen), idFileSize)
+	encoder.appendBytes(b.smallest, idSmallest)
+	encoder.appendBytes(b.biggest, idBiggest)
+	encoder.appendBytes(u32SliceToBytes(b.baseKeysEndOffs), idBaseKeysEndOffs)
+	encoder.appendBytes(b.baseKeysBuf, idBaseKeys)
+	encoder.appendBytes(u32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)
 
-	b.buf = append(b.buf, u32ToBytes(uint32(len(b.baseKeysEndOffs)))...)
-	b.buf = append(b.buf, u32SliceToBytes(b.baseKeysEndOffs)...)
-	b.buf = append(b.buf, b.baseKeysBuf...)
-	b.buf = append(b.buf, u32SliceToBytes(b.blockEndOffsets)...)
-
-	// Write bloom filter.
+	var bloomFilter []byte
 	if !b.useSuRF {
-		bloomFilter := bbloom.New(float64(len(b.hashEntries)), b.bloomFpr)
+		bf := bbloom.New(float64(len(b.hashEntries)), b.bloomFpr)
 		for _, he := range b.hashEntries {
-			bloomFilter.Add(he.hash)
+			bf.Add(he.hash)
 		}
-		bfData := bloomFilter.BinaryMarshal()
-		b.buf = append(b.buf, u32ToBytes(uint32(len(bfData)))...)
-		b.buf = append(b.buf, bfData...)
-	} else {
-		b.buf = append(b.buf, u32ToBytes(0)...)
+		bloomFilter = bf.BinaryMarshal()
 	}
+	encoder.appendBytes(bloomFilter, idBloomFilter)
 
-	// Write Hash Index.
+	var hashIndex []byte
 	if !b.useSuRF {
-		b.buf = buildHashIndex(b.buf, b.hashEntries, b.opt.HashUtilRatio)
-	} else {
-		b.buf = append(b.buf, u32ToBytes(0)...)
+		hashIndex = buildHashIndex(b.hashEntries, b.opt.HashUtilRatio)
 	}
+	encoder.appendBytes(hashIndex, idHashIndex)
 
-	// Write SuRF.
+	var surfIndex []byte
 	if b.useSuRF && len(b.surfKeys) > 0 {
 		hl := uint32(b.opt.SuRFOptions.HashSuffixLen)
 		rl := uint32(b.opt.SuRFOptions.RealSuffixLen)
 		sb := surf.NewBuilder(3, hl, rl)
 		sf := sb.Build(b.surfKeys, b.surfVals, b.opt.SuRFOptions.BitsPerKeyHint)
-		b.buf = append(b.buf, u32ToBytes(uint32(sf.MarshalSize()))...)
-		b.buf = append(b.buf, sf.Marshal()...)
-	} else {
-		b.buf = append(b.buf, u32ToBytes(0)...)
+		surfIndex = sf.Marshal()
 	}
+	encoder.appendBytes(surfIndex, idSuRFIndex)
 
-	idxData := b.buf
+	idxData := encoder.buf
 	if b.opt.Compression != options.None {
-		if idxData, err = b.compressData(b.buf); err != nil {
+		if idxData, err = b.compressData(idxData); err != nil {
 			return err
 		}
 	}
@@ -381,6 +384,12 @@ func (b *Builder) Finish() error {
 func u32ToBytes(v uint32) []byte {
 	var uBuf [4]byte
 	binary.LittleEndian.PutUint32(uBuf[:], v)
+	return uBuf[:]
+}
+
+func u64ToBytes(v uint64) []byte {
+	var uBuf [8]byte
+	binary.LittleEndian.PutUint64(uBuf[:], v)
 	return uBuf[:]
 }
 
@@ -412,6 +421,10 @@ func bytesToU32(b []byte) uint32 {
 	return binary.LittleEndian.Uint32(b)
 }
 
+func bytesToU64(b []byte) uint64 {
+	return binary.LittleEndian.Uint64(b)
+}
+
 // compressData compresses the given data.
 func (b *Builder) compressData(data []byte) ([]byte, error) {
 	switch b.opt.Compression {
@@ -423,4 +436,70 @@ func (b *Builder) compressData(data []byte) ([]byte, error) {
 		return zstd.Compress(nil, data)
 	}
 	return nil, errors.New("Unsupported compression type")
+}
+
+// type use 2 bits, now we have two unused type.
+const (
+	typeUint    = 0
+	typeBytes   = 1
+	typeUnused1 = 2
+	typeUnused2 = 3
+)
+
+type metaEncoder struct {
+	buf []byte
+}
+
+func (e *metaEncoder) appendUint(d uint64, id byte) {
+	e.buf = append(e.buf, id<<2|typeUint)
+	e.buf = append(e.buf, u64ToBytes(d)...)
+}
+
+func (e *metaEncoder) appendBytes(d []byte, id byte) {
+	e.buf = append(e.buf, id<<2|typeBytes)
+	e.buf = append(e.buf, u32ToBytes(uint32(len(d)))...)
+	e.buf = append(e.buf, d...)
+}
+
+type metaDecoder struct {
+	buf    []byte
+	cursor int
+}
+
+func (e *metaDecoder) valid() bool {
+	return e.cursor < len(e.buf)
+}
+
+func (e *metaDecoder) currentIdAndType() (id byte, tp byte) {
+	tag := e.buf[e.cursor]
+	return tag >> 2, tag & 3
+}
+
+func (e *metaDecoder) decodeUint() uint64 {
+	y.Assert(e.buf[e.cursor]&3 == typeUint)
+	e.cursor += 1
+	d := bytesToU64(e.buf[e.cursor:])
+	e.cursor += 8
+	return d
+}
+
+func (e *metaDecoder) decodeBytes() []byte {
+	y.Assert(e.buf[e.cursor]&3 == typeBytes)
+	e.cursor += 1
+	l := int(bytesToU32(e.buf[e.cursor:]))
+	e.cursor += 4
+	d := e.buf[e.cursor : e.cursor+l]
+	e.cursor += l
+	return d
+}
+
+func (e *metaDecoder) skip() {
+	tp := e.buf[e.cursor] & 3
+	switch tp {
+	case typeUint:
+		e.cursor += 1 + 4
+	case typeBytes:
+		l := int(bytesToU32(e.buf[e.cursor+1:]))
+		e.cursor += 1 + 4 + l
+	}
 }

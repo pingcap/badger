@@ -17,7 +17,6 @@
 package table
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -200,8 +199,7 @@ func (t *Table) loadIndex() error {
 		return err
 	}
 
-	t.globalTs = binary.BigEndian.Uint64(idxData[:8])
-
+	t.globalTs = bytesToU64(idxData[:8])
 	idxData = idxData[8:]
 	if t.compression != options.None {
 		if idxData, err = t.decompressData(idxData); err != nil {
@@ -209,71 +207,51 @@ func (t *Table) loadIndex() error {
 		}
 	}
 
-	var cursor int
-	t.tableSize = int(binary.BigEndian.Uint64(idxData[cursor : cursor+8]))
-	cursor += 8
-
-	smallestLen := int(bytesToU32(idxData[cursor : cursor+4]))
-	cursor += 4
-	if smallestLen != 0 {
-		smallest := idxData[cursor : cursor+smallestLen]
-		if !t.HasGlobalTs() {
-			smallest = y.ParseKey(smallest)
+	decoder := metaDecoder{buf: idxData}
+	for decoder.valid() {
+		id, _ := decoder.currentIdAndType()
+		switch id {
+		case idFileSize:
+			t.tableSize = int(decoder.decodeUint())
+		case idSmallest:
+			if k := decoder.decodeBytes(); len(k) != 0 {
+				if !t.HasGlobalTs() {
+					k = y.ParseKey(k)
+				}
+				t.smallest = y.KeyWithTs(k, math.MaxUint64)
+			}
+		case idBiggest:
+			if k := decoder.decodeBytes(); len(k) != 0 {
+				if !t.HasGlobalTs() {
+					k = y.ParseKey(k)
+				}
+				t.biggest = y.KeyWithTs(k, 0)
+			}
+		case idBaseKeysEndOffs:
+			t.baseKeysEndOffs = bytesToU32Slice(decoder.decodeBytes())
+		case idBaseKeys:
+			t.baseKeys = decoder.decodeBytes()
+		case idBlockEndOffsets:
+			t.blockEndOffsets = bytesToU32Slice(decoder.decodeBytes())
+		case idBloomFilter:
+			if d := decoder.decodeBytes(); len(d) != 0 {
+				t.bf = new(bbloom.Bloom)
+				t.bf.BinaryUnmarshal(d)
+			}
+		case idHashIndex:
+			if d := decoder.decodeBytes(); len(d) != 0 {
+				t.hIdx = new(hashIndex)
+				t.hIdx.readIndex(d)
+			}
+		case idSuRFIndex:
+			if d := decoder.decodeBytes(); len(d) != 0 {
+				t.surf = new(surf.SuRF)
+				t.surf.Unmarshal(d)
+			}
+		default:
+			decoder.skip()
 		}
-		t.smallest = y.KeyWithTs(smallest, math.MaxUint64)
-		cursor += smallestLen
 	}
-
-	biggestLen := int(bytesToU32(idxData[cursor : cursor+4]))
-	cursor += 4
-	if biggestLen != 0 {
-		biggest := idxData[cursor : cursor+biggestLen]
-		if !t.HasGlobalTs() {
-			biggest = y.ParseKey(biggest)
-		}
-		t.biggest = y.KeyWithTs(biggest, 0)
-		cursor += biggestLen
-	}
-
-	numBlocks := int(bytesToU32(idxData[cursor : cursor+4]))
-	blkIdxSize := 4 * numBlocks
-	cursor += 4
-
-	t.baseKeysEndOffs = bytesToU32Slice(idxData[cursor : cursor+blkIdxSize])
-	cursor += blkIdxSize
-
-	baseKeyBufLen := int(t.baseKeysEndOffs[numBlocks-1])
-	t.baseKeys = idxData[cursor : cursor+baseKeyBufLen]
-	cursor += baseKeyBufLen
-
-	t.blockEndOffsets = bytesToU32Slice(idxData[cursor : cursor+blkIdxSize])
-	cursor += blkIdxSize
-
-	// Read bloom filter.
-	bloomLen := int(bytesToU32(idxData[cursor : cursor+4]))
-	cursor += 4
-	if bloomLen != 0 {
-		t.bf = new(bbloom.Bloom)
-		t.bf.BinaryUnmarshal(idxData[cursor : cursor+bloomLen])
-		cursor += bloomLen
-	}
-
-	numBuckets := int(bytesToU32(idxData[cursor : cursor+4]))
-	cursor += 4
-	if numBuckets != 0 {
-		hashLen := numBuckets * 3
-		t.hIdx = new(hashIndex)
-		t.hIdx.readIndex(idxData[cursor:cursor+hashLen], numBuckets)
-		cursor += hashLen
-	}
-
-	surfSize := int(bytesToU32(idxData[cursor : cursor+4]))
-	cursor += 4
-	if surfSize != 0 {
-		t.surf = new(surf.SuRF)
-		t.surf.Unmarshal(idxData[cursor : cursor+surfSize])
-	}
-
 	return nil
 }
 
@@ -347,10 +325,8 @@ func (t *Table) HasGlobalTs() bool {
 
 // SetGlobalTs update the global ts of external ingested tables.
 func (t *Table) SetGlobalTs(ts uint64) error {
-	var buf [8]byte
 	encodeTs := math.MaxUint64 - ts
-	binary.BigEndian.PutUint64(buf[:], encodeTs)
-	if _, err := t.indexFd.WriteAt(buf[:], 0); err != nil {
+	if _, err := t.indexFd.WriteAt(u64ToBytes(encodeTs), 0); err != nil {
 		return err
 	}
 	if err := fileutil.Fsync(t.indexFd); err != nil {
