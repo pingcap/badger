@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/coocood/badger/epoch"
+	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
@@ -146,7 +147,9 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 		return keyValues[i][0] < keyValues[j][0]
 	})
 
-	b := table.NewTableBuilder(f, nil, 0, DefaultOptions.TableBuilderOptions)
+	opts := DefaultOptions.TableBuilderOptions
+	opts.CompressionPerLevel = getTestCompression(options.ZSTD)
+	b := table.NewTableBuilder(f, nil, 0, opts)
 	defer b.Close()
 	for _, kv := range keyValues {
 		y.Assert(len(kv) == 2)
@@ -180,7 +183,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)
 	f := buildTestTable(t, "k", 2)
-	t1, err := table.OpenTable(f.Name(), opt.TableBuilderOptions.Compression, testCache())
+	t1, err := table.OpenTable(f.Name(), options.ZSTD, testCache())
 	require.NoError(t, err)
 	defer t1.Delete()
 
@@ -204,7 +207,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lc.runCompactDef(0, cd, nil, g)
 
 	f = buildTestTable(t, "l", 2)
-	t2, err := table.OpenTable(f.Name(), opts.Compression, testCache())
+	t2, err := table.OpenTable(f.Name(), options.ZSTD, testCache())
 	require.NoError(t, err)
 	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)

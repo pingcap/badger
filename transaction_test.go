@@ -27,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 
 	"github.com/stretchr/testify/require"
@@ -799,7 +798,6 @@ func TestArmV7Issue311Fix(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	config := DefaultOptions
-	config.TableLoadingMode = options.MemoryMap
 	config.ValueLogFileSize = 16 << 20
 	config.LevelOneSize = 8 << 20
 	config.MaxTableSize = 2 << 20

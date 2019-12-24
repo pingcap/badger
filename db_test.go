@@ -40,6 +40,14 @@ import (
 
 var mmap = flag.Bool("vlog_mmap", true, "Specify if value log must be memory-mapped")
 
+func getTestCompression(tp options.CompressionType) []options.CompressionType {
+	tps := make([]options.CompressionType, DefaultOptions.TableBuilderOptions.MaxLevels)
+	for i := range tps {
+		tps[i] = tp
+	}
+	return tps
+}
+
 func getTestOptions(dir string) Options {
 	opt := DefaultOptions
 	opt.MaxTableSize = 4 << 15 // Force more compaction.
@@ -47,9 +55,7 @@ func getTestOptions(dir string) Options {
 	opt.Dir = dir
 	opt.ValueDir = dir
 	opt.SyncWrites = false
-	if !*mmap {
-		opt.ValueLogLoadingMode = options.FileIO
-	}
+	opt.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.ZSTD)
 	return opt
 }
 
@@ -606,12 +612,11 @@ func TestLoad(t *testing.T) {
 
 	t.Run("Without compression", func(t *testing.T) {
 		opt := getTestOptions("")
-		opt.TableBuilderOptions.Compression = options.None
+		opt.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.None)
 		testLoad(t, opt)
 	})
 	t.Run("With compression", func(t *testing.T) {
 		opt := getTestOptions("")
-		opt.TableBuilderOptions.Compression = options.ZSTD
 		testLoad(t, opt)
 	})
 }
@@ -1160,7 +1165,7 @@ func TestCompactionFilter(t *testing.T) {
 		return &testFilter{}
 	}
 	// This case depend on level's size, so disable compression for now.
-	opts.TableBuilderOptions.Compression = options.None
+	opts.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.None)
 	db, err := Open(opts)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1345,7 +1350,6 @@ func TestMultiGet(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
-	opts.TableLoadingMode = options.MemoryMap
 	opts.ValueThreshold = 512
 	db, err := Open(opts)
 	require.NoError(t, err)
@@ -1388,7 +1392,7 @@ func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.OpenSyncedFile(filename, true)
 	require.NoError(t, err)
-	builder := table.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions)
+	builder := table.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions, options.ZSTD)
 
 	for i, k := range keys {
 		err := builder.Add(k, y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})
@@ -1410,7 +1414,6 @@ func TestIngestSimple(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
-	opts.TableLoadingMode = options.MemoryMap
 	opts.ValueThreshold = 512
 	db, err := Open(opts)
 	require.NoError(t, err)
@@ -1426,7 +1429,7 @@ func TestIngestSimple(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	cnt, err := db.IngestExternalFiles([]*os.File{f})
+	cnt, err := db.IngestExternalFiles([]ExternalTableSpec{{f.Name(), options.ZSTD}})
 	require.NoError(t, err)
 	require.Equal(t, 1, cnt)
 
@@ -1455,7 +1458,6 @@ func TestIngestOverwrite(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
-	opts.TableLoadingMode = options.MemoryMap
 	opts.ValueThreshold = 512
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
@@ -1474,7 +1476,7 @@ func TestIngestOverwrite(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	cnt, err := db.IngestExternalFiles([]*os.File{f})
+	cnt, err := db.IngestExternalFiles([]ExternalTableSpec{{f.Name(), options.ZSTD}})
 	require.NoError(t, err)
 	require.Equal(t, 1, cnt)
 
@@ -1512,7 +1514,6 @@ func TestIngestWhileWrite(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
-	opts.TableLoadingMode = options.MemoryMap
 	opts.ValueThreshold = 512
 	db, err := Open(opts)
 	require.NoError(t, err)
@@ -1540,7 +1541,14 @@ func TestIngestWhileWrite(t *testing.T) {
 		}
 	}()
 
-	cnt, err := db.IngestExternalFiles(files)
+	specs := make([]ExternalTableSpec, len(files))
+	for i := range specs {
+		specs[i] = ExternalTableSpec{
+			Filename:    files[i].Name(),
+			Compression: options.ZSTD,
+		}
+	}
+	cnt, err := db.IngestExternalFiles(specs)
 	require.NoError(t, err)
 	require.Equal(t, len(files), cnt)
 	close(stop)
@@ -1590,7 +1598,6 @@ func TestIngestSplit(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
-	opts.TableLoadingMode = options.MemoryMap
 	opts.ValueThreshold = 512
 	opts.NumLevelZeroTables = 10
 	opts.NumLevelZeroTablesStall = 20
@@ -1622,7 +1629,14 @@ func TestIngestSplit(t *testing.T) {
 	l0.Unlock()
 	l1.Unlock()
 
-	cnt, err := db.IngestExternalFiles(files)
+	specs := make([]ExternalTableSpec, len(files))
+	for i := range specs {
+		specs[i] = ExternalTableSpec{
+			Filename:    files[i].Name(),
+			Compression: options.ZSTD,
+		}
+	}
+	cnt, err := db.IngestExternalFiles(specs)
 	require.NoError(t, err)
 	require.Equal(t, 3, cnt)
 

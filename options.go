@@ -43,12 +43,6 @@ type Options struct {
 	// loading significantly.
 	SyncWrites bool
 
-	// How should LSM tree be accessed.
-	TableLoadingMode options.FileLoadingMode
-
-	// How should value log be accessed.
-	ValueLogLoadingMode options.FileLoadingMode
-
 	// 3. Flags that user might want to review
 	// ----------------------------------------
 	// The following affect all levels of LSM tree.
@@ -149,10 +143,8 @@ const (
 // DefaultOptions sets a list of recommended options for good performance.
 // Feel free to modify these to suit your needs.
 var DefaultOptions = Options{
-	DoNotCompact:        false,
-	LevelOneSize:        256 << 20,
-	TableLoadingMode:    options.LoadToRAM,
-	ValueLogLoadingMode: options.FileIO,
+	DoNotCompact: false,
+	LevelOneSize: 256 << 20,
 	// table.MemoryMap to mmap() the tables.
 	// table.Nothing to not preload the tables.
 	MaxTableSize:            64 << 20,
@@ -176,7 +168,8 @@ var DefaultOptions = Options{
 		MaxLevels:           7,
 		LevelSizeMultiplier: 10,
 		BlockSize:           4 * 1024,
-		Compression:         options.ZSTD,
+		// TODO: use lz4 instead of snappy for better (de)compress performance.
+		CompressionPerLevel: []options.CompressionType{options.None, options.None, options.Snappy, options.Snappy, options.Snappy, options.ZSTD, options.ZSTD},
 		LogicalBloomFPR:     0.01,
 		SuRFOptions: options.SuRFOptions{
 			HashSuffixLen:  8,
@@ -199,5 +192,4 @@ func init() {
 
 	LSMOnlyOptions.ValueThreshold = 65500      // Max value length which fits in uint16.
 	LSMOnlyOptions.ValueLogFileSize = 64 << 20 // Allow easy space reclamation.
-	LSMOnlyOptions.ValueLogLoadingMode = options.FileIO
 }

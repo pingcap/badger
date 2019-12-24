@@ -63,6 +63,7 @@ type Builder struct {
 	w           *fileutil.DirectWriter
 	buf         []byte
 	writtenLen  int
+	compression options.CompressionType
 
 	baseKeysBuf     []byte
 	baseKeysEndOffs []uint32
@@ -102,12 +103,13 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		baseKeysBuf: make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    fprBase / levelFactor,
+		compression: opt.CompressionPerLevel[level],
 		opt:         opt,
 		useSuRF:     level >= opt.SuRFStartLevel,
 	}
 }
 
-func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
+func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions, compression options.CompressionType) *Builder {
 	return &Builder{
 		idxFileName: f.Name() + idxFileSuffix,
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
@@ -116,6 +118,7 @@ func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.Tabl
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    opt.LogicalBloomFPR,
 		isExternal:  true,
+		compression: compression,
 		opt:         opt,
 	}
 }
@@ -232,7 +235,7 @@ func (b *Builder) finishBlock() error {
 	b.baseKeysEndOffs = append(b.baseKeysEndOffs, uint32(len(b.baseKeysBuf)))
 
 	data := b.buf
-	if b.opt.Compression != options.None {
+	if b.compression != options.None {
 		var err error
 		// TODO: Find a way to reuse buffers. Current implementation creates a
 		// new buffer for each compressData call.
@@ -366,7 +369,7 @@ func (b *Builder) Finish() error {
 	encoder.append(surfIndex, idSuRFIndex)
 
 	idxData := encoder.buf
-	if b.opt.Compression != options.None {
+	if b.compression != options.None {
 		if idxData, err = b.compressData(idxData); err != nil {
 			return err
 		}
@@ -424,7 +427,7 @@ func bytesToU64(b []byte) uint64 {
 
 // compressData compresses the given data.
 func (b *Builder) compressData(data []byte) ([]byte, error) {
-	switch b.opt.Compression {
+	switch b.compression {
 	case options.None:
 		return data, nil
 	case options.Snappy:

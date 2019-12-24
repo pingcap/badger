@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/coocood/badger/epoch"
+	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
@@ -425,16 +426,21 @@ func isRangeCoversTable(start, end []byte, t *table.Table) bool {
 }
 
 // NewExternalTableBuilder returns a new sst builder.
-func (db *DB) NewExternalTableBuilder(f *os.File, limiter *rate.Limiter) *table.Builder {
-	return table.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions)
+func (db *DB) NewExternalTableBuilder(f *os.File, compression options.CompressionType, limiter *rate.Limiter) *table.Builder {
+	return table.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions, compression)
 }
 
 // ErrExternalTableOverlap returned by IngestExternalFiles when files overlaps.
 var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
 
+type ExternalTableSpec struct {
+	Filename string
+	Compression options.CompressionType
+}
+
 // IngestExternalFiles ingest external constructed tables into DB.
 // Note: insure there is no concurrent write overlap with tables to be ingested.
-func (db *DB) IngestExternalFiles(files []*os.File) (int, error) {
+func (db *DB) IngestExternalFiles(files []ExternalTableSpec) (int, error) {
 	tbls, err := db.prepareExternalFiles(files)
 	if err != nil {
 		return 0, err
@@ -451,23 +457,23 @@ func (db *DB) IngestExternalFiles(files []*os.File) (int, error) {
 	return task.cnt, task.err
 }
 
-func (db *DB) prepareExternalFiles(files []*os.File) ([]*table.Table, error) {
-	tbls := make([]*table.Table, len(files))
-	for i, fd := range files {
+func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]*table.Table, error) {
+	tbls := make([]*table.Table, len(specs))
+	for i, spec := range specs {
 		id := db.lc.reserveFileID()
 		filename := table.NewFilename(id, db.opt.Dir)
 
-		err := os.Link(fd.Name(), filename)
+		err := os.Link(spec.Filename, filename)
 		if err != nil {
 			return nil, err
 		}
 
-		err = os.Link(table.IndexFilename(fd.Name()), table.IndexFilename(filename))
+		err = os.Link(table.IndexFilename(spec.Filename), table.IndexFilename(filename))
 		if err != nil {
 			return nil, err
 		}
 
-		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.Compression, db.blockCache)
+		tbl, err := table.OpenTable(filename, spec.Compression, db.blockCache)
 		if err != nil {
 			return nil, err
 		}
@@ -930,7 +936,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.Compression, db.blockCache)
+		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.CompressionPerLevel[0], db.blockCache)
 		if err != nil {
 			log.Infof("ERROR while opening table: %v", err)
 			return err

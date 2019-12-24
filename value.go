@@ -32,7 +32,6 @@ import (
 	"sync/atomic"
 
 	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 	"github.com/pingcap/errors"
 )
@@ -51,11 +50,10 @@ const (
 )
 
 type logFile struct {
-	path        string
-	fd          *os.File
-	fid         uint32
-	size        uint32
-	loadingMode options.FileLoadingMode
+	path string
+	fd   *os.File
+	fid  uint32
+	size uint32
 }
 
 // openReadOnly assumes that we have a write lock on logFile.
@@ -317,9 +315,8 @@ func (vlog *valueLog) openOrCreateFiles(readOnly bool) error {
 		found[fid] = struct{}{}
 
 		lf := &logFile{
-			fid:         uint32(fid),
-			path:        vlog.fpath(uint32(fid)),
-			loadingMode: vlog.opt.ValueLogLoadingMode,
+			fid:  uint32(fid),
+			path: vlog.fpath(uint32(fid)),
 		}
 		vlog.files = append(vlog.files, lf)
 		if uint32(fid) > maxFid {
@@ -366,7 +363,7 @@ func (vlog *valueLog) createVlogFile(fid uint32) error {
 	atomic.StoreUint64(&vlog.maxPtr, uint64(fid)<<32)
 
 	path := vlog.fpath(fid)
-	lf := &logFile{fid: fid, path: path, loadingMode: vlog.opt.ValueLogLoadingMode}
+	lf := &logFile{fid: fid, path: path}
 	vlog.numEntriesWritten = 0
 
 	var err error
