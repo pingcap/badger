@@ -59,11 +59,12 @@ const headerSize = 4
 type Builder struct {
 	counter int // Number of keys written for the current block.
 
-	idxFileName string
-	w           *fileutil.DirectWriter
-	buf         []byte
-	writtenLen  int
-	compression options.CompressionType
+	idxFileName   string
+	w             *fileutil.DirectWriter
+	buf           []byte
+	writtenLen    int
+	rawWrittenLen int
+	compression   options.CompressionType
 
 	baseKeysBuf     []byte
 	baseKeysEndOffs []uint32
@@ -134,6 +135,7 @@ func (b *Builder) resetBuffers() {
 	b.counter = 0
 	b.buf = b.buf[:0]
 	b.writtenLen = 0
+	b.rawWrittenLen = 0
 	b.baseKeysBuf = b.baseKeysBuf[:0]
 	b.baseKeysEndOffs = b.baseKeysEndOffs[:0]
 	b.blockBaseKey = b.blockBaseKey[:0]
@@ -248,6 +250,7 @@ func (b *Builder) finishBlock() error {
 	}
 	b.blockEndOffsets = append(b.blockEndOffsets, uint32(b.writtenLen+len(data)))
 	b.writtenLen += len(data)
+	b.rawWrittenLen += len(b.buf)
 
 	// Reset the block for the next build.
 	b.entryEndOffsets = b.entryEndOffsets[:0]
@@ -285,7 +288,7 @@ func (b *Builder) shouldFinishBlock(key []byte, value y.ValueStruct) bool {
 
 // ReachedCapacity returns true if we... roughly (?) reached capacity?
 func (b *Builder) ReachedCapacity(capacity int64) bool {
-	estimateSz := b.writtenLen + len(b.buf) +
+	estimateSz := b.rawWrittenLen + len(b.buf) +
 		4*len(b.blockEndOffsets) +
 		len(b.baseKeysBuf) +
 		4*len(b.baseKeysEndOffs)
@@ -294,7 +297,7 @@ func (b *Builder) ReachedCapacity(capacity int64) bool {
 
 // EstimateSize returns the size of the SST to build.
 func (b *Builder) EstimateSize() int {
-	size := b.writtenLen + len(b.buf) + 4*len(b.blockEndOffsets) + len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs)
+	size := b.rawWrittenLen + len(b.buf) + 4*len(b.blockEndOffsets) + len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs)
 	if !b.useSuRF {
 		size += 3 * int(float32(len(b.hashEntries))/b.opt.HashUtilRatio)
 	}
