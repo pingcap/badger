@@ -18,7 +18,9 @@ package badger
 
 import (
 	"fmt"
+	"log"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/coocood/badger/epoch"
@@ -95,10 +97,7 @@ func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, is
 	}
 	s.tables = newTables
 
-	// We can add new L0 tables during compaction, so we shouldn't assert tables order for L0.
-	if s.level != 0 {
-		assertTablesOrder(newTables)
-	}
+	assertTablesOrder(s.level, newTables)
 	s.Unlock()
 
 	if !isMove {
@@ -110,21 +109,27 @@ func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, is
 	}
 }
 
-func assertTablesOrder(tables []*table.Table) {
+func assertTablesOrder(level int, tables []*table.Table) {
+	if level == 0 {
+		return
+	}
+
 	for i := 0; i < len(tables)-1; i++ {
-		y.AssertTruef(y.CompareKeysWithVer(tables[i].Smallest(), tables[i].Biggest()) <= 0,
-			"tables[i].Smallest() %v, tables[i].Biggest() %v",
-			tables[i].Smallest(),
-			tables[i].Biggest())
+		if y.CompareKeysWithVer(tables[i].Smallest(), tables[i].Biggest()) > 0 ||
+			y.CompareKeysWithVer(tables[i].Smallest(), tables[i+1].Smallest()) >= 0 ||
+			y.CompareKeysWithVer(tables[i].Biggest(), tables[i+1].Biggest()) >= 0 {
 
-		y.AssertTruef(y.CompareKeysWithVer(tables[i].Smallest(), tables[i+1].Smallest()) < 0,
-			"tables[i].Smallest() :%v, tables[i+1].Smallest():%v",
-			tables[i].Smallest(),
-			tables[i+1].Smallest())
-
-		y.AssertTruef(y.CompareKeysWithVer(tables[i].Biggest(), tables[i+1].Biggest()) < 0,
-			"y.CompareKeysWithVer(tables[i].Biggest() %v, tables[i+1].Biggest() %v",
-			tables[i].Biggest(), tables[i+1].Biggest())
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "the order of level %d tables is invalid:\n", level)
+			for idx, tbl := range tables {
+				tag := "  "
+				if idx == i {
+					tag = "->"
+				}
+				fmt.Fprintf(&sb, "%s %v %v\n", tag, tbl.Smallest(), tbl.Biggest())
+			}
+			log.Fatal(sb.String())
+		}
 	}
 }
 
@@ -138,7 +143,7 @@ func sortTables(tables []*table.Table) {
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
 func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, guard *epoch.Guard) {
 	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
-	assertTablesOrder(newTables)
+	assertTablesOrder(s.level, newTables)
 
 	s.Lock() // We s.Unlock() below.
 
@@ -162,7 +167,7 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, g
 	tables = append(tables, cd.skippedTbls...)
 	tables = append(tables, s.tables[right:]...)
 	sortTables(tables)
-	assertTablesOrder(tables)
+	assertTablesOrder(s.level, tables)
 	s.tables = tables
 	s.Unlock()
 	guard.Delete(toDelete)

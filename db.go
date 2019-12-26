@@ -372,7 +372,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 		guard     = db.resourceMgr.Acquire()
 	)
 
-	for _, lc := range db.lc.levels {
+	for level, lc := range db.lc.levels {
 		lc.Lock()
 		left, right := 0, len(lc.tables)
 		if lc.level > 0 {
@@ -396,7 +396,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 		for i := len(newTables); i < len(lc.tables); i++ {
 			lc.tables[i] = nil
 		}
-		assertTablesOrder(newTables)
+		assertTablesOrder(level, newTables)
 		lc.tables = newTables
 		lc.Unlock()
 	}
@@ -434,7 +434,7 @@ func (db *DB) NewExternalTableBuilder(f *os.File, compression options.Compressio
 var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
 
 type ExternalTableSpec struct {
-	Filename string
+	Filename    string
 	Compression options.CompressionType
 }
 

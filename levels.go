@@ -488,7 +488,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		}
 		fd.Close()
 		var tbl *table.Table
-		tbl, err = table.OpenTable(filename, lc.opt.CompressionPerLevel[ cd.nextLevel.level], lc.kv.blockCache)
+		tbl, err = table.OpenTable(filename, lc.opt.CompressionPerLevel[cd.nextLevel.level], lc.kv.blockCache)
 		if err != nil {
 			return
 		}
@@ -521,7 +521,6 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	if len(discardStats.ptrs) > 0 {
 		lc.kv.blobManger.discardCh <- discardStats
 	}
-	assertTablesOrder(newTables)
 	return
 }
 
