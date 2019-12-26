@@ -22,7 +22,7 @@ func TestStressSetGet(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	for i := 0; i < 100; i++ {
+	for i := uint64(0); i < 100; i++ {
 		c.Set(i, i, 1)
 	}
 	time.Sleep(wait)
@@ -32,11 +32,11 @@ func TestStressSetGet(t *testing.T) {
 		go func() {
 			r := rand.New(rand.NewSource(time.Now().UnixNano()))
 			for a := 0; a < 1000; a++ {
-				k := r.Int() % 10
+				k := r.Uint64() % 10
 				if val, ok := c.Get(k); val == nil || !ok {
 					err = fmt.Errorf("expected %d but got nil", k)
 					break
-				} else if val != nil && val.(int) != k {
+				} else if val != nil && val.(uint64) != k {
 					err = fmt.Errorf("expected %d but got %d", k, val.(int))
 					break
 				}

@@ -18,164 +18,101 @@ package cache
 
 import (
 	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
-type storeItem struct {
-	key      uint64
-	conflict uint64
-	value    interface{}
+const numShards = 256
+
+// item is passed to setBuf so items can eventually be added to the cache
+type item struct {
+	sync.Mutex
+	dead  bool
+	key   uint64
+	value atomic.Value
 }
 
-// store is the interface fulfilled by all hash map implementations in this
-// file. Some hash map implementations are better suited for certain data
-// distributions than others, so this allows us to abstract that out for use
-// in Ristretto.
-//
-// Every store is safe for concurrent usage.
-type store interface {
-	// Get returns the value associated with the key parameter.
-	Get(uint64, uint64) (interface{}, bool)
-	// Set adds the key-value pair to the Map or updates the value if it's
-	// already present.
-	Set(uint64, uint64, interface{})
-	// Del deletes the key-value pair from the Map.
-	Del(uint64, uint64) (uint64, interface{})
-	// Update attempts to update the key with a new value and returns true if
-	// successful.
-	Update(uint64, uint64, interface{}) bool
-	// Clear clears all contents of the store.
-	Clear()
-}
-
-// newStore returns the default store implementation.
-func newStore() store {
-	return newShardedMap()
-}
-
-const numShards uint64 = 256
-
-type shardedMap struct {
-	shards []*lockedMap
-}
-
-func newShardedMap() *shardedMap {
-	sm := &shardedMap{
-		shards: make([]*lockedMap, int(numShards)),
-	}
-	for i := range sm.shards {
-		sm.shards[i] = newLockedMap()
-	}
-	return sm
-}
-
-func (sm *shardedMap) Get(key, conflict uint64) (interface{}, bool) {
-	return sm.shards[key%numShards].Get(key, conflict)
-}
-
-func (sm *shardedMap) Set(key, conflict uint64, value interface{}) {
-	sm.shards[key%numShards].Set(key, conflict, value)
-}
-
-func (sm *shardedMap) Del(key, conflict uint64) (uint64, interface{}) {
-	return sm.shards[key%numShards].Del(key, conflict)
-}
-
-func (sm *shardedMap) Update(key, conflict uint64, value interface{}) bool {
-	return sm.shards[key%numShards].Update(key, conflict, value)
-}
-
-func (sm *shardedMap) Clear() {
-	for i := uint64(0); i < numShards; i++ {
-		sm.shards[i].Clear()
-	}
-}
-
-type lockedMap struct {
-	sync.RWMutex
-	data map[uint64]storeItem
-}
-
-func newLockedMap() *lockedMap {
-	return &lockedMap{
-		data: make(map[uint64]storeItem),
-	}
-}
-
-func (m *lockedMap) Get(key, conflict uint64) (interface{}, bool) {
-	m.RLock()
-	item, ok := m.data[key]
-	m.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if conflict != 0 && (conflict != item.conflict) {
-		return nil, false
-	}
-	return item.value, true
-}
-
-func (m *lockedMap) Set(key, conflict uint64, value interface{}) {
-	m.Lock()
-	item, ok := m.data[key]
-	if !ok {
-		m.data[key] = storeItem{
-			key:      key,
-			conflict: conflict,
-			value:    value,
-		}
-		m.Unlock()
-		return
-	}
-	if conflict != 0 && (conflict != item.conflict) {
-		m.Unlock()
-		return
-	}
-	m.data[key] = storeItem{
-		key:      key,
-		conflict: conflict,
-		value:    value,
-	}
-	m.Unlock()
-}
-
-func (m *lockedMap) Del(key, conflict uint64) (uint64, interface{}) {
-	m.Lock()
-	item, ok := m.data[key]
-	if !ok {
-		m.Unlock()
-		return 0, nil
-	}
-	if conflict != 0 && (conflict != item.conflict) {
-		m.Unlock()
-		return 0, nil
-	}
-	delete(m.data, key)
-	m.Unlock()
-	return item.conflict, item.value
-}
-
-func (m *lockedMap) Update(key, conflict uint64, value interface{}) bool {
-	m.Lock()
-	item, ok := m.data[key]
-	if !ok {
-		m.Unlock()
+func (i *item) del(s *store) bool {
+	if i.dead {
 		return false
 	}
-	if conflict != 0 && (conflict != item.conflict) {
-		m.Unlock()
-		return false
-	}
-	m.data[key] = storeItem{
-		key:      key,
-		conflict: conflict,
-		value:    value,
-	}
-	m.Unlock()
+
+	i.dead = true
+	s.Del(i.key)
 	return true
 }
 
-func (m *lockedMap) Clear() {
+type shardMap struct {
+	sync.RWMutex
+	data map[uint64]*item
+}
+
+type shard struct {
+	shardMap
+	pad [64 - unsafe.Sizeof(shardMap{})%64]byte
+}
+
+type store struct {
+	shards [numShards]shard
+}
+
+func newStore() *store {
+	s := new(store)
+	for i := range s.shards {
+		s.shards[i].data = make(map[uint64]*item)
+	}
+	return s
+}
+
+func (s *store) GetValue(key uint64) (interface{}, bool) {
+	i, ok := s.Get(key)
+	if !ok {
+		return nil, false
+	}
+	return i.value.Load(), true
+}
+
+func (s *store) Get(key uint64) (*item, bool) {
+	m := &s.shards[key%numShards]
+	m.RLock()
+	i, ok := m.data[key]
+	m.RUnlock()
+	return i, ok
+}
+
+func (s *store) GetOrNew(key uint64) *item {
+	m := &s.shards[key%numShards]
+	m.RLock()
+	if i, ok := m.data[key]; ok {
+		m.RUnlock()
+		return i
+	}
+	m.RUnlock()
 	m.Lock()
-	m.data = make(map[uint64]storeItem)
+	if i, ok := m.data[key]; ok {
+		m.Unlock()
+		return i
+	}
+	i := &item{key: key}
+	m.data[key] = i
 	m.Unlock()
+	return i
+}
+
+func (s *store) Set(key uint64, value *item) {
+}
+
+func (s *store) Del(key uint64) *item {
+	m := &s.shards[key%numShards]
+	m.Lock()
+	i := m.data[key]
+	delete(m.data, key)
+	m.Unlock()
+	return i
+}
+
+func (s *store) Clear() {
+	for i := uint64(0); i < numShards; i++ {
+		s.shards[i].data = make(map[uint64]*item)
+	}
 }

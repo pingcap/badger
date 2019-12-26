@@ -24,43 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
-
-	"github.com/coocood/badger/cache/z"
 )
-
-const (
-	// TODO: find the optimal value for this or make it configurable
-	setBufSize = 32 * 1024
-)
-
-// Cache is a thread-safe implementation of a hashmap with a TinyLFU admission
-// policy and a Sampled LFU eviction policy. You can use the same Cache instance
-// from as many goroutines as you want.
-type Cache struct {
-	// store is the central concurrent hashmap where key-value items are stored
-	store store
-	// policy determines what gets let in to the cache and what gets kicked out
-	policy policy
-	// getBuf is a custom ring buffer implementation that gets pushed to when
-	// keys are read
-	getBuf *ringBuffer
-	// setBuf is a buffer allowing us to batch/drop Sets during times of high
-	// contention
-	setBuf chan *item
-	// onEvict is called for item evictions
-	onEvict func(uint64, uint64, interface{}, int64)
-	// KeyToHash function is used to customize the key hashing algorithm.
-	// Each key will be hashed using the provided function. If keyToHash value
-	// is not set, the default keyToHash function is used.
-	keyToHash func(interface{}) (uint64, uint64)
-	// stop is used to stop the processItems goroutine
-	stop chan struct{}
-	// cost calculates cost from a value
-	cost func(value interface{}) int64
-	// Metrics contains a running log of important statistics like hits, misses,
-	// and dropped items
-	Metrics *Metrics
-}
 
 // Config is passed to NewCache for creating new Cache instances.
 type Config struct {
@@ -92,34 +56,49 @@ type Config struct {
 	// only set this flag to true when testing or throughput performance isn't a
 	// major factor.
 	Metrics bool
-	// OnEvict is called for every eviction and passes the hashed key, value,
-	// and cost to the function.
-	OnEvict func(key, conflict uint64, value interface{}, cost int64)
-	// KeyToHash function is used to customize the key hashing algorithm.
-	// Each key will be hashed using the provided function. If keyToHash value
-	// is not set, the default keyToHash function is used.
-	KeyToHash func(key interface{}) (uint64, uint64)
+	// OnEvict is called for every eviction and passes the hashed key and
+	// value to the function.
+	OnEvict func(key uint64, value interface{})
 	// Cost evaluates a value and outputs a corresponding cost. This function
 	// is ran after Set is called for a new item or an item update with a cost
 	// param of 0.
 	Cost func(value interface{}) int64
 }
 
-type itemFlag byte
-
 const (
-	itemNew itemFlag = iota
-	itemDelete
-	itemUpdate
+	// TODO: find the optimal value for this or make it configurable
+	setBufSize = 32 * 1024
 )
 
-// item is passed to setBuf so items can eventually be added to the cache
-type item struct {
-	flag     itemFlag
-	key      uint64
-	conflict uint64
-	value    interface{}
-	cost     int64
+type setEvent struct {
+	del  bool
+	key  uint64
+	cost int64
+}
+
+// Cache is a thread-safe implementation of a hashmap with a TinyLFU admission
+// policy and a Sampled LFU eviction policy. You can use the same Cache instance
+// from as many goroutines as you want.
+type Cache struct {
+	// store is the central concurrent hashmap where key-value items are stored
+	store *store
+	// policy determines what gets let in to the cache and what gets kicked out
+	policy *policy
+	// getBuf is a custom ring buffer implementation that gets pushed to when
+	// keys are read
+	getBuf *ringBuffer
+	// setBuf is a buffer allowing us to batch/drop Sets during times of high
+	// contention
+	setBuf chan setEvent
+	// onEvict is called for item evictions
+	onEvict func(uint64, interface{})
+	// stop is used to stop the processItems goroutine
+	stop chan struct{}
+	// cost calculates cost from a value
+	cost func(value interface{}) int64
+	// Metrics contains a running log of important statistics like hits, misses,
+	// and dropped items
+	Metrics *Metrics
 }
 
 // NewCache returns a new Cache instance and any configuration errors, if any.
@@ -134,17 +113,13 @@ func NewCache(config *Config) (*Cache, error) {
 	}
 	policy := newPolicy(config.NumCounters, config.MaxCost)
 	cache := &Cache{
-		store:     newStore(),
-		policy:    policy,
-		getBuf:    newRingBuffer(policy, config.BufferItems),
-		setBuf:    make(chan *item, setBufSize),
-		onEvict:   config.OnEvict,
-		keyToHash: config.KeyToHash,
-		stop:      make(chan struct{}),
-		cost:      config.Cost,
-	}
-	if cache.keyToHash == nil {
-		cache.keyToHash = z.KeyToHash
+		store:   newStore(),
+		policy:  policy,
+		getBuf:  newRingBuffer(policy, config.BufferItems),
+		setBuf:  make(chan setEvent, setBufSize),
+		onEvict: config.OnEvict,
+		stop:    make(chan struct{}),
+		cost:    config.Cost,
 	}
 	if config.Metrics {
 		cache.collectMetrics()
@@ -159,17 +134,16 @@ func NewCache(config *Config) (*Cache, error) {
 // Get returns the value (if any) and a boolean representing whether the
 // value was found or not. The value can be nil and the boolean can be true at
 // the same time.
-func (c *Cache) Get(key interface{}) (interface{}, bool) {
-	if c == nil || key == nil {
+func (c *Cache) Get(key uint64) (interface{}, bool) {
+	if c == nil {
 		return nil, false
 	}
-	keyHash, conflictHash := c.keyToHash(key)
-	c.getBuf.Push(keyHash)
-	value, ok := c.store.Get(keyHash, conflictHash)
+	c.getBuf.Push(key)
+	value, ok := c.store.GetValue(key)
 	if ok {
-		c.Metrics.add(hit, keyHash, 1)
+		c.Metrics.add(hit, key, 1)
 	} else {
-		c.Metrics.add(miss, keyHash, 1)
+		c.Metrics.add(miss, key, 1)
 	}
 	return value, ok
 }
@@ -183,44 +157,52 @@ func (c *Cache) Get(key interface{}) (interface{}, bool) {
 // To dynamically evaluate the items cost using the Config.Coster function, set
 // the cost parameter to 0 and Coster will be ran when needed in order to find
 // the items true cost.
-func (c *Cache) Set(key, value interface{}, cost int64) bool {
-	if c == nil || key == nil {
-		return false
+func (c *Cache) Set(key uint64, value interface{}, cost int64) {
+	if c == nil {
+		return
 	}
-	keyHash, conflictHash := c.keyToHash(key)
-	i := &item{
-		flag:     itemNew,
-		key:      keyHash,
-		conflict: conflictHash,
-		value:    value,
-		cost:     cost,
+	if cost == 0 && c.cost != nil {
+		cost = c.cost(value)
 	}
-	// attempt to immediately update hashmap value and set flag to update so the
-	// cost is eventually updated
-	if c.store.Update(keyHash, conflictHash, i.value) {
-		i.flag = itemUpdate
-	}
-	// attempt to send item to policy
-	select {
-	case c.setBuf <- i:
-		return true
-	default:
-		c.Metrics.add(dropSets, keyHash, 1)
-		return false
+	for {
+		i := c.store.GetOrNew(key)
+		i.Lock()
+		if i.dead {
+			i.Unlock()
+			continue
+		}
+
+		i.value.Store(value)
+		// Send event to channel while holding mutex, so we can keep the order of event log respect to
+		// the order of mutations on hash map. If we send envent after i.Unlock() we may have danling item in hash map:
+		// 	* Mutations is `A delete k -> B insert K`
+		//	* But the event log is `B insert K -> A delete K`
+		//	* After apply the event log, there are danling item in hash map which cannot be evicted.
+		// Delete item when apply delete event is not a good idea, because we may overwrite the following insert.
+		// Delay all hash map mutations to log replay seems a good idea, but it will result in a confusing behavior,
+		// that is you cannot get the item you just inserted.
+		c.setBuf <- setEvent{del: false, key: key, cost: cost}
+
+		i.Unlock()
+		return
 	}
 }
 
 // Del deletes the key-value item from the cache if it exists.
-func (c *Cache) Del(key interface{}) {
-	if c == nil || key == nil {
+func (c *Cache) Del(key uint64) {
+	if c == nil {
 		return
 	}
-	keyHash, conflictHash := c.keyToHash(key)
-	c.setBuf <- &item{
-		flag:     itemDelete,
-		key:      keyHash,
-		conflict: conflictHash,
+	i, ok := c.store.Get(key)
+	if !ok {
+		return
 	}
+	i.Lock()
+	if i.del(c.store) {
+		c.setBuf <- setEvent{del: true, key: key}
+		c.store.Del(key)
+	}
+	i.Unlock()
 }
 
 // Close stops all goroutines and closes all channels.
@@ -239,7 +221,7 @@ func (c *Cache) Clear() {
 	// block until processItems goroutine is returned
 	c.stop <- struct{}{}
 	// swap out the setBuf channel
-	c.setBuf = make(chan *item, setBufSize)
+	c.setBuf = make(chan setEvent, setBufSize)
 	// clear value hashmap and policy data
 	c.policy.Clear()
 	c.store.Clear()
@@ -255,34 +237,55 @@ func (c *Cache) Clear() {
 func (c *Cache) processItems() {
 	for {
 		select {
-		case i := <-c.setBuf:
-			// calculate item cost value if new or update
-			if i.cost == 0 && c.cost != nil && i.flag != itemDelete {
-				i.cost = c.cost(i.value)
+		case e := <-c.setBuf:
+			if e.del {
+				c.policy.Del(e.key)
+				continue
 			}
-			switch i.flag {
-			case itemNew:
-				victims, added := c.policy.Add(i.key, i.cost)
-				if added {
-					c.store.Set(i.key, i.conflict, i.value)
-					c.Metrics.add(keyAdd, i.key, 1)
-				}
-				for _, victim := range victims {
-					victim.conflict, victim.value = c.store.Del(victim.key, 0)
-					if c.onEvict != nil {
-						c.onEvict(victim.key, victim.conflict, victim.value, victim.cost)
-					}
-				}
-
-			case itemUpdate:
-				c.policy.Update(i.key, i.cost)
-
-			case itemDelete:
-				c.policy.Del(i.key) // Deals with metrics updates.
-				c.store.Del(i.key, i.conflict)
-			}
+			c.handleNewItem(e.key, e.cost)
 		case <-c.stop:
 			return
+		}
+	}
+}
+
+func (c *Cache) handleNewItem(key uint64, cost int64) {
+	itemInMap, ok := c.store.Get(key)
+	if !ok {
+		// This item dropped by admission policy,
+		// ignore this event or we may have danling item in policy.
+		return
+	}
+
+	// TODO: do evict after all events in current batch handled.
+	victims, added := c.policy.Add(key, cost)
+	if !added {
+		// Item dropped by admission policy, delete it from hash map.
+		// Otherwise this danling item will be kept in cache forever.
+		i, ok := c.store.Get(key)
+		if !ok || i != itemInMap {
+			return
+		}
+		i.Lock()
+		deleted := i.del(c.store)
+		i.Unlock()
+
+		if deleted && c.onEvict != nil {
+			c.onEvict(i.key, i.value)
+		}
+		return
+	}
+
+	for _, victim := range victims {
+		victim, ok = c.store.Get(victim.key)
+		if !ok {
+			continue
+		}
+		victim.Lock()
+		deleted := victim.del(c.store)
+		victim.Unlock()
+		if deleted && c.onEvict != nil {
+			c.onEvict(victim.key, victim.value)
 		}
 	}
 }
