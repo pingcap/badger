@@ -29,7 +29,6 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/DataDog/zstd"
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/surf"
@@ -426,8 +425,6 @@ func (t *Table) decompressData(data []byte) ([]byte, error) {
 		return data, nil
 	case options.Snappy:
 		return snappy.Decode(nil, data)
-	case options.ZSTD:
-		return zstd.Decompress(nil, data)
 	}
 	return nil, errors.New("Unsupported compression type")
 }
