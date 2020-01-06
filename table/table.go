@@ -306,16 +306,28 @@ func (t *Table) block(idx int) (block, error) {
 		return block{}, errors.New("block out of index")
 	}
 
+	if t.cache == nil {
+		return t.loadBlock(idx)
+	}
+
+	key := t.blockCacheKey(idx)
+	blk, err := t.cache.GetOrCompute(key, func() (interface{}, int64, error) {
+		b, e := t.loadBlock(idx)
+		if e != nil {
+			return nil, 0, e
+		}
+		return b, int64(len(b.data)), nil
+	})
+	if err != nil {
+		return block{}, err
+	}
+	return blk.(block), nil
+}
+
+func (t *Table) loadBlock(idx int) (block, error) {
 	var startOffset int
 	if idx > 0 {
 		startOffset = int(t.blockEndOffsets[idx-1])
-	}
-	if t.cache != nil {
-		key := t.blockCacheKey(idx)
-		blk, ok := t.cache.Get(key)
-		if ok && blk != nil {
-			return blk.(block), nil
-		}
 	}
 	blk := block{
 		offset: startOffset,
@@ -335,10 +347,6 @@ func (t *Table) block(idx int) (block, error) {
 			t.fd.Name(), blk.offset, dataLen)
 	}
 	blk.baseKey = t.getBlockBaseKey(idx)
-	if t.cache != nil {
-		key := t.blockCacheKey(idx)
-		t.cache.Set(key, blk, blk.size())
-	}
 	return blk, nil
 }
 

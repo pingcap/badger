@@ -42,6 +42,7 @@ func (i *item) del(s *store) bool {
 	return true
 }
 
+// TODO: implement a more powerful concurrent hash, such as cuckoo hash.
 type shardMap struct {
 	sync.RWMutex
 	data map[uint64]*item

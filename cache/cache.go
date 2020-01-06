@@ -187,21 +187,63 @@ func (c *Cache) Set(key uint64, value interface{}, cost int64) {
 	}
 }
 
-// Del deletes the key-value item from the cache if it exists.
-func (c *Cache) Del(key uint64) {
+// GetOrCompute returns the value of key. If there is no such key, it will compute the
+// value using the factory function `f`. If there are concurrent call on same key,
+// the factory function will be called only once.
+func (c *Cache) GetOrCompute(key uint64, f func() (interface{}, int64, error)) (interface{}, error) {
 	if c == nil {
-		return
+		return nil, nil
+	}
+	for {
+		i := c.store.GetOrNew(key)
+		if v := i.value.Load(); v != nil {
+			return v, nil
+		}
+
+		i.Lock()
+		if i.dead {
+			i.Unlock()
+			continue
+		}
+
+		if v := i.value.Load(); v != nil {
+			i.Unlock()
+			return v, nil
+		}
+
+		v, cost, err := f()
+		if err != nil {
+			i.Unlock()
+			return nil, err
+		}
+		i.value.Store(v)
+
+		if cost == 0 && c.cost != nil {
+			cost = c.cost(v)
+		}
+		c.setBuf <- setEvent{del: false, key: key, cost: cost}
+		i.Unlock()
+		return v, nil
+	}
+}
+
+// Del deletes the key-value item from the cache if it exists.
+func (c *Cache) Del(key uint64) interface{} {
+	if c == nil {
+		return nil
 	}
 	i, ok := c.store.Get(key)
 	if !ok {
-		return
+		return nil
 	}
 	i.Lock()
 	if i.del(c.store) {
 		c.setBuf <- setEvent{del: true, key: key}
 		c.store.Del(key)
 	}
+	v := i.value.Load()
 	i.Unlock()
+	return v
 }
 
 // Close stops all goroutines and closes all channels.

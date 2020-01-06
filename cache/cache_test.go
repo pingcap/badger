@@ -2,8 +2,10 @@ package cache
 
 import (
 	"math/rand"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -202,6 +204,66 @@ func TestCacheSet(t *testing.T) {
 	}
 	close(c.setBuf)
 	close(c.stop)
+}
+
+func TestCacheGetOrCompute(t *testing.T) {
+	c, err := NewCache(&Config{
+		NumCounters: 100,
+		MaxCost:     10,
+		BufferItems: 64,
+		Metrics:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := runtime.GOMAXPROCS(0)
+	start := make(chan struct{})
+	var done sync.WaitGroup
+	var cnt uint32
+	setFlags := make([]bool, p)
+	results := make([]int, p)
+
+	for n := 0; n < p; n++ {
+		done.Add(1)
+		go func(id int) {
+			<-start
+			var set bool
+			var result interface{}
+			for i := 0; i < 10; i++ {
+				result, _ = c.GetOrCompute(uint64(0), func() (interface{}, int64, error) {
+					set = true
+					atomic.AddUint32(&cnt, 1)
+					return id, 1, nil
+				})
+			}
+			if set {
+				setFlags[id] = true
+			}
+			results[id] = result.(int)
+			done.Done()
+		}(n)
+	}
+	close(start)
+	done.Wait()
+
+	if cnt != 1 {
+		t.Fatalf("the factory function is called %d times", cnt)
+	}
+	setter := -1
+	for id, flag := range setFlags {
+		if !flag {
+			continue
+		}
+		if setter != -1 {
+			t.Fatal("more than one setter success")
+		}
+		setter = id
+	}
+	for id, v := range results {
+		if v != setter {
+			t.Fatalf("%d got different result (%d != %d)", id, v, setter)
+		}
+	}
 }
 
 func TestCacheDel(t *testing.T) {
