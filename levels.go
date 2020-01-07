@@ -57,12 +57,12 @@ var (
 // referenced by the manifest.  idMap is a set of table file id's that were read from the directory
 // listing.
 func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
-	// 1. Check all files in manifest exist.
-	for id := range mf.Tables {
-		if _, ok := idMap[id]; !ok {
-			return fmt.Errorf("file does not exist for table %d", id)
-		}
-	}
+	// // 1. Check all files in manifest exist.
+	// for id := range mf.Tables {
+	// 	if _, ok := idMap[id]; !ok {
+	// 		return fmt.Errorf("file does not exist for table %d", id)
+	// 	}
+	// }
 
 	// 2. Delete files that shouldn't exist.
 	for id := range idMap {
@@ -116,7 +116,15 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 			flags |= y.ReadOnly
 		}
 
-		t, err := table.OpenTable(fname, tableManifest.Compression, kv.blockCache)
+		cfg := &table.OpenTableConfig{
+			ID:          fileID,
+			Path:        kv.opt.Dir,
+			Compression: tableManifest.Compression,
+			Cache:       kv.blockCache,
+			UseL2:       int(tableManifest.Level) >= kv.opt.L2StartLevel,
+			L2Cache:     kv.l2Cache,
+		}
+		t, err := table.OpenTable(cfg)
 		if err != nil {
 			closeAllTables(tables)
 			return nil, errors.Wrapf(err, "Opening table: %q", fname)
@@ -352,6 +360,8 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	topTables := cd.top
 	botTables := cd.bot
 
+	useL2 := cd.nextLevel.level >= lc.kv.opt.L2StartLevel
+
 	hasOverlap := lc.hasOverlapTable(cd)
 	log.Infof("Key range overlaps with lower levels: %v", hasOverlap)
 
@@ -480,6 +490,10 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 			numWrite++
 			bytesWrite += kvSize
 		}
+		if builder.Empty() {
+			fd.Close()
+			continue
+		}
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
 		log.Infof("LOG Compact. Iteration took: %v\n", time.Since(timeStart))
@@ -488,15 +502,24 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		}
 		fd.Close()
 		var tbl *table.Table
-		tbl, err = table.OpenTable(filename, lc.opt.CompressionPerLevel[cd.nextLevel.level], lc.kv.blockCache)
+		cfg := &table.OpenTableConfig{
+			ID:          fileID,
+			Path:        lc.kv.opt.Dir,
+			Compression: lc.opt.CompressionPerLevel[cd.nextLevel.level],
+			Cache:       lc.kv.blockCache,
+			UseL2:       useL2,
+			L2Cache:     lc.kv.l2Cache,
+		}
+		if useL2 {
+			if _, err = cfg.L2Cache.Add(cfg.ID, filename); err != nil {
+				return
+			}
+		}
+		tbl, err = table.OpenTable(cfg)
 		if err != nil {
 			return
 		}
-		if len(tbl.Smallest()) == 0 {
-			tbl.Delete()
-		} else {
-			newTables = append(newTables, tbl)
-		}
+		newTables = append(newTables, tbl)
 	}
 
 	stats := &y.CompactionStats{

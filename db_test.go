@@ -21,7 +21,6 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"math"
 	"math/rand"
 	"os"
@@ -35,8 +34,13 @@ import (
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
+	"github.com/ngaut/log"
 	"github.com/stretchr/testify/require"
 )
+
+func init() {
+	log.SetHighlighting(false)
+}
 
 var mmap = flag.Bool("vlog_mmap", true, "Specify if value log must be memory-mapped")
 
@@ -56,6 +60,9 @@ func getTestOptions(dir string) Options {
 	opt.ValueDir = dir
 	opt.SyncWrites = false
 	opt.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.ZSTD)
+	opt.L2StartLevel = 1
+	opt.L2Options.Size = 6 << 15
+	opt.L2Options.AvgSize = 4 << 15
 	return opt
 }
 
@@ -324,7 +331,7 @@ func TestGetMore(t *testing.T) {
 		data := func(i int) []byte {
 			return []byte(fmt.Sprintf("%b", i))
 		}
-		n := 10000
+		n := 20000
 
 		txn := db.NewTransaction(true)
 		for i := 0; i < n; i++ {

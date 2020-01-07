@@ -21,7 +21,6 @@ import (
 	"io/ioutil"
 	"math"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"unsafe"
 
 	"github.com/coocood/badger/fileutil"
+	"github.com/coocood/badger/l2"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
@@ -53,6 +53,7 @@ type Table struct {
 	sync.Mutex
 
 	fd        *os.File // Own fd.
+	filename  string
 	indexFd   *os.File
 	tableSize int // Initialized in OpenTable, using fd.Stat().
 
@@ -73,7 +74,8 @@ type Table struct {
 
 	compression options.CompressionType
 
-	cache *ristretto.Cache
+	l2Cache *l2.Cache
+	cache   *ristretto.Cache
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -83,48 +85,62 @@ func (t *Table) CompressionType() options.CompressionType {
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
-	if err := t.fd.Truncate(0); err != nil {
-		// This is very important to let the FS know that the file is deleted.
+	if err := deleteFile(t.indexFd); err != nil {
 		return err
 	}
-	filename := t.fd.Name()
-	if err := t.fd.Close(); err != nil {
+	if t.fd != nil {
+		return deleteFile(t.fd)
+	}
+	return t.l2Cache.Del(t.id, t.filename)
+}
+
+func deleteFile(fd *os.File) error {
+	if err := fd.Truncate(0); err != nil {
 		return err
 	}
-	if err := os.Remove(filename); err != nil {
+	filename := fd.Name()
+	if err := fd.Close(); err != nil {
 		return err
 	}
-	return os.Remove(filename + idxFileSuffix)
+	return os.Remove(filename)
+}
+
+type OpenTableConfig struct {
+	ID          uint64
+	Path        string
+	Compression options.CompressionType
+	Cache       *ristretto.Cache
+	UseL2       bool
+	L2Cache     *l2.Cache
 }
 
 // OpenTable assumes file has only one table and opens it.  Takes ownership of fd upon function
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(filename string, compression options.CompressionType, cache *ristretto.Cache) (*Table, error) {
-	id, ok := ParseFileID(filename)
-	if !ok {
-		return nil, errors.Errorf("Invalid filename: %s", filename)
-	}
-
-	// TODO: after we support cache of L2 storage, we will open block data file in cache manager.
-	fd, err := y.OpenExistingFile(filename, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	indexFd, err := y.OpenExistingFile(filename+idxFileSuffix, 0)
-	if err != nil {
-		return nil, err
-	}
+func OpenTable(cfg *OpenTableConfig) (*Table, error) {
+	filename := IDToFilename(cfg.ID)
+	path := filepath.Join(cfg.Path, filename)
 
 	t := &Table{
-		fd:          fd,
-		indexFd:     indexFd,
-		id:          id,
-		compression: compression,
-		cache:       cache,
+		id:          cfg.ID,
+		filename:    filename,
+		compression: cfg.Compression,
+		cache:       cfg.Cache,
+		l2Cache:     cfg.L2Cache,
 	}
+
+	var err error
+	if !cfg.UseL2 {
+		if t.fd, err = y.OpenExistingFile(path, 0); err != nil {
+			return nil, err
+		}
+	}
+	t.indexFd, err = y.OpenExistingFile(path+idxFileSuffix, 0)
+	if err != nil {
+		return nil, err
+	}
+
 	t.loadIndex()
 	return t, nil
 }
@@ -178,9 +194,16 @@ func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, boo
 	return it.Key(), it.Value(), true
 }
 
-func (t *Table) read(off int, sz int) ([]byte, error) {
-	res := make([]byte, sz)
-	_, err := t.fd.ReadAt(res, int64(off))
+func (t *Table) read(off int, sz int) (res []byte, err error) {
+	res = make([]byte, sz)
+	fd := t.fd
+	if fd == nil {
+		fd, err = t.l2Cache.Get(t.id, t.filename)
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, err = fd.ReadAt(res, int64(off))
 	return res, err
 }
 
@@ -266,16 +289,28 @@ func (t *Table) block(idx int) (block, error) {
 		return block{}, errors.New("block out of index")
 	}
 
+	if t.cache == nil {
+		return t.loadBlock(idx)
+	}
+
+	key := t.blockCacheKey(idx)
+	blk, err := t.cache.GetOrCompute(key, func() (interface{}, int64, error) {
+		b, e := t.loadBlock(idx)
+		if e != nil {
+			return nil, 0, e
+		}
+		return b, int64(len(b.data)), nil
+	})
+	if err != nil {
+		return block{}, err
+	}
+	return blk.(block), nil
+}
+
+func (t *Table) loadBlock(idx int) (block, error) {
 	var startOffset int
 	if idx > 0 {
 		startOffset = int(t.blockEndOffsets[idx-1])
-	}
-	if t.cache != nil {
-		key := t.blockCacheKey(idx)
-		blk, ok := t.cache.Get(key)
-		if ok && blk != nil {
-			return blk.(block), nil
-		}
 	}
 	blk := block{
 		offset: startOffset,
@@ -284,20 +319,16 @@ func (t *Table) block(idx int) (block, error) {
 	dataLen := endOffset - startOffset
 	var err error
 	if blk.data, err = t.read(blk.offset, dataLen); err != nil {
-		return block{}, errors.Wrapf(err,
-			"failed to read from file: %s at offset: %d, len: %d", t.fd.Name(), blk.offset, dataLen)
+		e := errors.Wrapf(err, "failed to read from file: %s at offset: %d, len: %d", t.filename, blk.offset, dataLen)
+		return block{}, e
 	}
 
 	blk.data, err = t.decompressData(blk.data)
 	if err != nil {
-		return block{}, errors.Wrapf(err,
-			"failed to decode compressed data in file: %s at offset: %d, len: %d",
-			t.fd.Name(), blk.offset, dataLen)
+		e := errors.Wrapf(err, "failed to decode compressed data in file: %s at offset: %d, len: %d", t.filename, blk.offset, dataLen)
+		return block{}, e
 	}
-	if t.cache != nil {
-		key := t.blockCacheKey(idx)
-		t.cache.Set(key, blk, blk.size())
-	}
+
 	return blk, nil
 }
 
@@ -394,7 +425,7 @@ func (t *Table) HasOverlap(start, end []byte, includeEnd bool) bool {
 
 // ParseFileID reads the file id out of a filename.
 func ParseFileID(name string) (uint64, bool) {
-	name = path.Base(name)
+	name = filepath.Base(name)
 	if !strings.HasSuffix(name, fileSuffix) {
 		return 0, false
 	}

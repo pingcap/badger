@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/coocood/badger/epoch"
+	"github.com/coocood/badger/l2"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/skl"
@@ -83,14 +84,13 @@ type DB struct {
 
 	limiter *rate.Limiter
 
-	blockCache *ristretto.Cache
-
 	metrics  *y.MetricsSet
 	lsmSize  int64
 	vlogSize int64
 
-	blobManger blobManager
-
+	blobManger  blobManager
+	blockCache  *ristretto.Cache
+	l2Cache     *l2.Cache
 	resourceMgr *epoch.ResourceManager
 }
 
@@ -184,7 +184,14 @@ func Open(opt Options) (db *DB, err error) {
 		opt.Truncate = false
 	}
 
-	for _, path := range []string{opt.Dir, opt.ValueDir} {
+	if opt.L2Options.CachePath == "" {
+		opt.L2Options.CachePath = filepath.Join(opt.Dir, "cache")
+	}
+	if opt.L2Options.StoragePath == "" {
+		opt.L2Options.StoragePath = filepath.Join(opt.Dir, "l2store")
+	}
+
+	for _, path := range []string{opt.Dir, opt.ValueDir, opt.L2Options.CachePath} {
 		dirExists, err := exists(path)
 		if err != nil {
 			return nil, y.Wrapf(err, "Invalid Dir: %q", path)
@@ -301,6 +308,16 @@ func Open(opt Options) (db *DB, err error) {
 	db.mt = <-db.memTableCh
 
 	db.resourceMgr = epoch.NewResourceManager(&db.minReadTsTracker)
+	db.l2Cache, err = l2.NewCache(&opt.L2Options, db.resourceMgr, func(name string) uint64 {
+		id, ok := table.ParseFileID(name)
+		if !ok {
+			panic("bad filename")
+		}
+		return id
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	// newLevelsController potentially loads files in directory.
 	if db.lc, err = newLevelsController(db, &manifest, db.resourceMgr, opt.TableBuilderOptions); err != nil {
@@ -473,7 +490,13 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]*table.Table, e
 			return nil, err
 		}
 
-		tbl, err := table.OpenTable(filename, spec.Compression, db.blockCache)
+		cfg := &table.OpenTableConfig{
+			ID:          id,
+			Path:        db.opt.Dir,
+			Compression: spec.Compression,
+			Cache:       db.blockCache,
+		}
+		tbl, err := table.OpenTable(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -936,7 +959,13 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.CompressionPerLevel[0], db.blockCache)
+		cfg := &table.OpenTableConfig{
+			ID:          fileID,
+			Path:        db.opt.Dir,
+			Compression: db.opt.TableBuilderOptions.CompressionPerLevel[0],
+			Cache:       db.blockCache,
+		}
+		tbl, err := table.OpenTable(cfg)
 		if err != nil {
 			log.Infof("ERROR while opening table: %v", err)
 			return err

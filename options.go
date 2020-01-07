@@ -17,6 +17,7 @@
 package badger
 
 import (
+	"github.com/coocood/badger/l2"
 	"github.com/coocood/badger/options"
 )
 
@@ -105,6 +106,9 @@ type Options struct {
 
 	ValueLogWriteOptions options.ValueLogWriterOptions
 
+	L2StartLevel int
+	L2Options    l2.Options
+
 	CompactionFilterFactory func(targetLevel int, smallest, biggest []byte) CompactionFilter
 }
 
@@ -179,6 +183,11 @@ var DefaultOptions = Options{
 	},
 	ValueLogWriteOptions: options.ValueLogWriterOptions{
 		WriteBufferSize: 2 * 1024 * 1024,
+	},
+	L2StartLevel: 8,
+	L2Options: l2.Options{
+		Size:    1 * 1024 * 1024 * 1024,
+		AvgSize: 64 << 20,
 	},
 }
 

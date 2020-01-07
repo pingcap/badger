@@ -183,7 +183,15 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)
 	f := buildTestTable(t, "k", 2)
-	t1, err := table.OpenTable(f.Name(), options.ZSTD, testCache())
+	id, ok := table.ParseFileID(f.Name())
+	require.True(t, ok)
+	cfg := &table.OpenTableConfig{
+		ID:          id,
+		Path:        filepath.Dir(f.Name()),
+		Compression: options.ZSTD,
+		Cache:       testCache(),
+	}
+	t1, err := table.OpenTable(cfg)
 	require.NoError(t, err)
 	defer t1.Delete()
 
@@ -207,7 +215,15 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lc.runCompactDef(0, cd, nil, g)
 
 	f = buildTestTable(t, "l", 2)
-	t2, err := table.OpenTable(f.Name(), options.ZSTD, testCache())
+	id, ok = table.ParseFileID(f.Name())
+	require.True(t, ok)
+	cfg = &table.OpenTableConfig{
+		ID:          id,
+		Path:        filepath.Dir(f.Name()),
+		Compression: options.ZSTD,
+		Cache:       testCache(),
+	}
+	t2, err := table.OpenTable(cfg)
 	require.NoError(t, err)
 	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)

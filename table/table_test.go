@@ -78,15 +78,16 @@ func generateKeyValues(prefix string, n int) [][]string {
 
 var compressionType = options.ZSTD
 
-func buildTestTable(t *testing.T, prefix string, n int) *os.File {
+func buildTestTable(t *testing.T, prefix string, n int) *Table {
 	return buildTable(t, generateKeyValues(prefix, n))
 }
 
 // keyValues is n by 2 where n is number of pairs.
-func buildTable(t *testing.T, keyValues [][]string) *os.File {
+func buildTable(t *testing.T, keyValues [][]string) *Table {
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
-
-	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	id := rand.Uint32()
+	dir := os.TempDir()
+	filename := NewFilename(uint64(id), dir)
 	f, err := y.OpenSyncedFile(filename, true)
 	if t != nil {
 		require.NoError(t, err)
@@ -109,16 +110,21 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	}
 	y.Check(b.Finish())
 	f.Close()
-	f, _ = y.OpenSyncedFile(filename, true)
-	return f
+	cfg := OpenTableConfig{
+		ID:          uint64(id),
+		Path:        dir,
+		Compression: compressionType,
+		Cache:       testCache(),
+	}
+	tbl, err := OpenTable(&cfg)
+	require.NoError(t, err)
+	return tbl
 }
 
 func TestTableIterator(t *testing.T) {
 	for _, n := range []int{99, 100, 101} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			f := buildTestTable(t, "key", n)
-			table, err := OpenTable(f.Name(), compressionType, testCache())
-			require.NoError(t, err)
+			table := buildTestTable(t, "key", n)
 			defer table.Delete()
 			it := table.NewIterator(false)
 			count := 0
@@ -135,7 +141,9 @@ func TestTableIterator(t *testing.T) {
 }
 
 func TestHashIndexTS(t *testing.T) {
-	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	id := rand.Uint32()
+	dir := os.TempDir()
+	filename := NewFilename(uint64(id), dir)
 	f, err := y.OpenSyncedFile(filename, true)
 	if t != nil {
 		require.NoError(t, err)
@@ -155,7 +163,8 @@ func TestHashIndexTS(t *testing.T) {
 	}
 	y.Check(b.Finish())
 	f.Close()
-	table, err := OpenTable(filename, compressionType, testCache())
+	table, err := OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: testCache()})
+	require.NoError(t, err)
 	keyHash := farm.Fingerprint64([]byte("key"))
 
 	rk, _, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10), keyHash)
@@ -172,9 +181,7 @@ func TestHashIndexTS(t *testing.T) {
 }
 
 func TestPointGet(t *testing.T) {
-	f := buildTestTable(t, "key", 8000)
-	table, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	table := buildTestTable(t, "key", 8000)
 	defer table.Delete()
 
 	for i := 0; i < 8000; i++ {
@@ -206,7 +213,9 @@ func TestPointGet(t *testing.T) {
 }
 
 func TestExternalTable(t *testing.T) {
-	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	id := rand.Uint32()
+	dir := os.TempDir()
+	filename := NewFilename(uint64(id), dir)
 	f, err := y.OpenSyncedFile(filename, true)
 	if t != nil {
 		require.NoError(t, err)
@@ -228,12 +237,12 @@ func TestExternalTable(t *testing.T) {
 	}
 	y.Check(b.Finish())
 	f.Close()
-	table, err := OpenTable(filename, compressionType, testCache())
+	table, err := OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: testCache()})
 	require.NoError(t, err)
 	require.NoError(t, table.SetGlobalTs(10))
 
 	require.NoError(t, table.Close())
-	table, err = OpenTable(filename, compressionType, testCache())
+	table, err = OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: testCache()})
 	require.NoError(t, err)
 	defer table.Delete()
 
@@ -252,9 +261,7 @@ func TestExternalTable(t *testing.T) {
 func TestSeekToFirst(t *testing.T) {
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			f := buildTestTable(t, "key", n)
-			table, err := OpenTable(f.Name(), compressionType, testCache())
-			require.NoError(t, err)
+			table := buildTestTable(t, "key", n)
 			defer table.Delete()
 			it := table.NewIterator(false)
 			it.seekToFirst()
@@ -269,9 +276,7 @@ func TestSeekToFirst(t *testing.T) {
 func TestSeekToLast(t *testing.T) {
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			f := buildTestTable(t, "key", n)
-			table, err := OpenTable(f.Name(), compressionType, testCache())
-			require.NoError(t, err)
+			table := buildTestTable(t, "key", n)
 			defer table.Delete()
 			it := table.NewIterator(false)
 			it.seekToLast()
@@ -289,9 +294,7 @@ func TestSeekToLast(t *testing.T) {
 }
 
 func TestSeek(t *testing.T) {
-	f := buildTestTable(t, "k", 10000)
-	table, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	table := buildTestTable(t, "k", 10000)
 	defer table.Delete()
 
 	it := table.NewIterator(false)
@@ -323,9 +326,7 @@ func TestSeek(t *testing.T) {
 }
 
 func TestSeekForPrev(t *testing.T) {
-	f := buildTestTable(t, "k", 10000)
-	table, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	table := buildTestTable(t, "k", 10000)
 	defer table.Delete()
 
 	it := table.NewIterator(false)
@@ -360,9 +361,7 @@ func TestIterateFromStart(t *testing.T) {
 	// Vary the number of elements added.
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			f := buildTestTable(t, "key", n)
-			table, err := OpenTable(f.Name(), compressionType, testCache())
-			require.NoError(t, err)
+			table := buildTestTable(t, "key", n)
 			defer table.Delete()
 			ti := table.NewIterator(false)
 			ti.reset()
@@ -386,9 +385,7 @@ func TestIterateFromEnd(t *testing.T) {
 	// Vary the number of elements added.
 	for _, n := range []int{99, 100, 101, 199, 200, 250, 9999, 10000} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			f := buildTestTable(t, "key", n)
-			table, err := OpenTable(f.Name(), compressionType, testCache())
-			require.NoError(t, err)
+			table := buildTestTable(t, "key", n)
 			defer table.Delete()
 			ti := table.NewIterator(false)
 			ti.reset()
@@ -409,9 +406,7 @@ func TestIterateFromEnd(t *testing.T) {
 }
 
 func TestTable(t *testing.T) {
-	f := buildTestTable(t, "key", 10000)
-	table, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	table := buildTestTable(t, "key", 10000)
 	defer table.Delete()
 	ti := table.NewIterator(false)
 	kid := 1010
@@ -435,9 +430,7 @@ func TestTable(t *testing.T) {
 }
 
 func TestIterateBackAndForth(t *testing.T) {
-	f := buildTestTable(t, "key", 10000)
-	table, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	table := buildTestTable(t, "key", 10000)
 	defer table.Delete()
 
 	seek := y.KeyWithTs([]byte(key("key", 1010)), 0)
@@ -475,9 +468,7 @@ func TestIterateBackAndForth(t *testing.T) {
 }
 
 func TestUniIterator(t *testing.T) {
-	f := buildTestTable(t, "key", 10000)
-	table, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	table := buildTestTable(t, "key", 10000)
 	defer table.Delete()
 	{
 		it := table.NewIterator(false)
@@ -505,13 +496,10 @@ func TestUniIterator(t *testing.T) {
 
 // Try having only one table.
 func TestConcatIteratorOneTable(t *testing.T) {
-	f := buildTable(t, [][]string{
+	tbl := buildTable(t, [][]string{
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
-
-	tbl, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
 	defer tbl.Delete()
 
 	it := NewConcatIterator([]*Table{tbl}, false)
@@ -526,17 +514,11 @@ func TestConcatIteratorOneTable(t *testing.T) {
 }
 
 func TestConcatIterator(t *testing.T) {
-	f := buildTestTable(t, "keya", 10000)
-	f2 := buildTestTable(t, "keyb", 10000)
-	f3 := buildTestTable(t, "keyc", 10000)
-	tbl, err := OpenTable(f.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	tbl := buildTestTable(t, "keya", 10000)
 	defer tbl.Delete()
-	tbl2, err := OpenTable(f2.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	tbl2 := buildTestTable(t, "keyb", 10000)
 	defer tbl2.Delete()
-	tbl3, err := OpenTable(f3.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	tbl3 := buildTestTable(t, "keyc", 10000)
 	defer tbl3.Delete()
 
 	{
@@ -604,20 +586,17 @@ func TestConcatIterator(t *testing.T) {
 }
 
 func TestMergingIterator(t *testing.T) {
-	f1 := buildTable(t, [][]string{
+	tbl1 := buildTable(t, [][]string{
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
-	f2 := buildTable(t, [][]string{
+	defer tbl1.Delete()
+	tbl2 := buildTable(t, [][]string{
 		{"k1", "b1"},
 		{"k2", "b2"},
 	})
-	tbl1, err := OpenTable(f1.Name(), compressionType, testCache())
-	require.NoError(t, err)
-	defer tbl1.Delete()
-	tbl2, err := OpenTable(f2.Name(), compressionType, testCache())
-	require.NoError(t, err)
 	defer tbl2.Delete()
+
 	it1 := tbl1.NewIterator(false)
 	it2 := NewConcatIterator([]*Table{tbl2}, false)
 	it := NewMergeIterator([]y.Iterator{it1, it2}, false)
@@ -643,20 +622,17 @@ func TestMergingIterator(t *testing.T) {
 }
 
 func TestMergingIteratorReversed(t *testing.T) {
-	f1 := buildTable(t, [][]string{
+	tbl1 := buildTable(t, [][]string{
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
-	f2 := buildTable(t, [][]string{
+	defer tbl1.Delete()
+	tbl2 := buildTable(t, [][]string{
 		{"k1", "b1"},
 		{"k2", "b2"},
 	})
-	tbl1, err := OpenTable(f1.Name(), compressionType, testCache())
-	require.NoError(t, err)
-	defer tbl1.Delete()
-	tbl2, err := OpenTable(f2.Name(), compressionType, testCache())
-	require.NoError(t, err)
 	defer tbl2.Delete()
+
 	it1 := tbl1.NewIterator(true)
 	it2 := NewConcatIterator([]*Table{tbl2}, true)
 	it := NewMergeIterator([]y.Iterator{it1, it2}, true)
@@ -683,17 +659,12 @@ func TestMergingIteratorReversed(t *testing.T) {
 
 // Take only the first iterator.
 func TestMergingIteratorTakeOne(t *testing.T) {
-	f1 := buildTable(t, [][]string{
+	t1 := buildTable(t, [][]string{
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
-	f2 := buildTable(t, [][]string{{"l1", "b1"}})
-
-	t1, err := OpenTable(f1.Name(), compressionType, testCache())
-	require.NoError(t, err)
 	defer t1.Delete()
-	t2, err := OpenTable(f2.Name(), compressionType, testCache())
-	require.NoError(t, err)
+	t2 := buildTable(t, [][]string{{"l1", "b1"}})
 	defer t2.Delete()
 
 	it1 := NewConcatIterator([]*Table{t1}, false)
@@ -729,17 +700,12 @@ func TestMergingIteratorTakeOne(t *testing.T) {
 
 // Take only the second iterator.
 func TestMergingIteratorTakeTwo(t *testing.T) {
-	f1 := buildTable(t, [][]string{{"l1", "b1"}})
-	f2 := buildTable(t, [][]string{
+	t1 := buildTable(t, [][]string{{"l1", "b1"}})
+	defer t1.Delete()
+	t2 := buildTable(t, [][]string{
 		{"k1", "a1"},
 		{"k2", "a2"},
 	})
-
-	t1, err := OpenTable(f1.Name(), compressionType, testCache())
-	require.NoError(t, err)
-	defer t1.Delete()
-	t2, err := OpenTable(f2.Name(), compressionType, testCache())
-	require.NoError(t, err)
 	defer t2.Delete()
 
 	it1 := NewConcatIterator([]*Table{t1}, false)
@@ -776,7 +742,9 @@ func TestMergingIteratorTakeTwo(t *testing.T) {
 
 func BenchmarkRead(b *testing.B) {
 	n := 5 << 20
-	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	id := rand.Uint32()
+	dir := os.TempDir()
+	filename := fmt.Sprintf("%s%s%d.sst", dir, string(os.PathSeparator), id)
 	f, err := y.OpenSyncedFile(filename, true)
 	y.Check(err)
 	builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
@@ -787,7 +755,7 @@ func BenchmarkRead(b *testing.B) {
 	}
 
 	y.Check(builder.Finish())
-	tbl, err := OpenTable(f.Name(), compressionType, testCache())
+	tbl, err := OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: testCache()})
 	y.Check(err)
 	defer tbl.Delete()
 
@@ -856,7 +824,9 @@ var cacheConfig = ristretto.Config{
 func BenchmarkPointGet(b *testing.B) {
 	ns := []int{1000, 10000, 100000, 1000000, 5000000, 10000000, 15000000}
 	for _, n := range ns {
-		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+		id := rand.Uint32()
+		dir := os.TempDir()
+		filename := fmt.Sprintf("%s%s%d.sst", dir, string(os.PathSeparator), id)
 		f, err := y.OpenSyncedFile(filename, true)
 		builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
 		keys := make([][]byte, n)
@@ -869,7 +839,7 @@ func BenchmarkPointGet(b *testing.B) {
 		}
 
 		y.Check(builder.Finish())
-		tbl, err := OpenTable(filename, compressionType, testCache())
+		tbl, err := OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: testCache()})
 		y.Check(err)
 		b.ResetTimer()
 
@@ -929,7 +899,9 @@ func BenchmarkPointGet(b *testing.B) {
 
 func BenchmarkReadAndBuild(b *testing.B) {
 	n := 5 << 20
-	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	id := rand.Uint32()
+	dir := os.TempDir()
+	filename := fmt.Sprintf("%s%s%d.sst", dir, string(os.PathSeparator), id)
 	f, err := y.OpenSyncedFile(filename, false)
 	builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
 	y.Check(err)
@@ -940,7 +912,7 @@ func BenchmarkReadAndBuild(b *testing.B) {
 	}
 
 	y.Check(builder.Finish())
-	tbl, err := OpenTable(f.Name(), compressionType, testCache())
+	tbl, err := OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: testCache()})
 	y.Check(err)
 	defer tbl.Delete()
 
@@ -976,7 +948,9 @@ func BenchmarkReadMerged(b *testing.B) {
 	require.NoError(b, err)
 
 	for i := 0; i < m; i++ {
-		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+		id := rand.Uint32()
+		dir := os.TempDir()
+		filename := fmt.Sprintf("%s%s%d.sst", dir, string(os.PathSeparator), id)
 		f, err := y.OpenSyncedFile(filename, true)
 		y.Check(err)
 		builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
@@ -988,7 +962,7 @@ func BenchmarkReadMerged(b *testing.B) {
 			y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
 		y.Check(builder.Finish())
-		tbl, err := OpenTable(f.Name(), compressionType, cache)
+		tbl, err := OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: cache})
 		y.Check(err)
 		tables = append(tables, tbl)
 		defer tbl.Delete()
@@ -1036,7 +1010,9 @@ func BenchmarkRandomRead(b *testing.B) {
 
 func getTableForBenchmarks(b *testing.B, count int, cache *ristretto.Cache) *Table {
 	rand.Seed(time.Now().Unix())
-	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	id := rand.Uint32()
+	dir := os.TempDir()
+	filename := fmt.Sprintf("%s%s%d.sst", dir, string(os.PathSeparator), id)
 	f, err := y.OpenSyncedFile(filename, false)
 	builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
 	require.NoError(b, err)
@@ -1048,7 +1024,7 @@ func getTableForBenchmarks(b *testing.B, count int, cache *ristretto.Cache) *Tab
 
 	err = builder.Finish()
 	require.NoError(b, err, "unable to write to file")
-	tbl, err := OpenTable(f.Name(), compressionType, cache)
+	tbl, err := OpenTable(&OpenTableConfig{ID: uint64(id), Path: dir, Compression: compressionType, Cache: cache})
 	require.NoError(b, err, "unable to open table")
 	return tbl
 }

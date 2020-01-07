@@ -32,5 +32,8 @@ require (
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 )
 
-// this fork has some performance tweak (e.g. surf package's test time, 600s -> 100s)
-replace github.com/stretchr/testify => github.com/bobotu/testify v1.3.1-0.20190730155233-067b303304a8
+replace (
+	github.com/dgraph-io/ristretto => github.com/bobotu/ristretto v0.0.2-0.20200109033742-6f8e99b06f2f
+	// this fork has some performance tweak (e.g. surf package's test time, 600s -> 100s)
+	github.com/stretchr/testify => github.com/bobotu/testify v1.3.1-0.20190730155233-067b303304a8
+)
