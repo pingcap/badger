@@ -198,6 +198,8 @@ func (s *levelHandler) tryAddLevel0Table(t *table.Table) bool {
 	// Need lock as we may be deleting the first table during a level 0 compaction.
 	s.Lock()
 	defer s.Unlock()
+	// Return false only if number of tables is more than number of
+	// ZeroTableStall. For on disk L0, we should just add the tables to the level.
 	if len(s.tables) >= s.db.opt.NumLevelZeroTablesStall {
 		return false
 	}

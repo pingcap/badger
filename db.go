@@ -134,7 +134,7 @@ func replayFunction(out *DB) func(Entry) error {
 	first := true
 	return func(e Entry) error { // Function for replaying.
 		if first {
-			log.Infof("First key=%s\n", e.Key)
+			log.Infof("First key=%s", e.Key)
 		}
 		first = false
 
@@ -787,7 +787,7 @@ func (db *DB) flushMemTable() *sync.WaitGroup {
 	db.mtbls.Store(newTbls)
 	ft := newFlushTask(mTbls.getMutable(), db.logOff)
 	db.flushChan <- ft
-	log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
+	log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d",
 		mTbls.getMutable().MemSize(), len(db.flushChan))
 
 	// New memtable is empty. We certainly have room.
@@ -891,7 +891,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 				LogOffset: ft.off.offset,
 			}
 			// Store badger head even if vptr is zero, need it for readTs
-			log.Infof("Storing offset: %+v\n", ft.off)
+			log.Infof("Storing offset: %+v", ft.off)
 		}
 
 		fileID := db.lc.reserveFileID()
