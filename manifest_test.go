@@ -30,7 +30,7 @@ import (
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
-	"github.com/dgraph-io/ristretto"
+	"github.com/bobotu/ristretto"
 	"github.com/stretchr/testify/require"
 )
 

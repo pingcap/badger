@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bobotu/ristretto"
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/l2"
 	"github.com/coocood/badger/options"
@@ -35,7 +36,6 @@ import (
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
-	"github.com/dgraph-io/ristretto"
 	"github.com/dgryski/go-farm"
 	"github.com/ncw/directio"
 	"github.com/ngaut/log"
@@ -90,7 +90,7 @@ type DB struct {
 
 	blobManger  blobManager
 	blockCache  *ristretto.Cache
-	l2Cache     *l2.Cache
+	l2          *l2.Storage
 	resourceMgr *epoch.ResourceManager
 }
 
@@ -260,7 +260,7 @@ func Open(opt Options) (db *DB, err error) {
 		NumCounters: int64(float64(opt.MaxCacheSize) * 0.05 * 2),
 		MaxCost:     int64(float64(opt.MaxCacheSize) * 0.95),
 		BufferItems: 64,
-		// Enable metrics once https://github.com/dgraph-io/ristretto/issues/92 is resolved.
+		// Enable metrics once https://github.com/bobotu/ristretto/issues/92 is resolved.
 		Metrics: false,
 	}
 	cache, err := ristretto.NewCache(&config)
@@ -308,13 +308,7 @@ func Open(opt Options) (db *DB, err error) {
 	db.mt = <-db.memTableCh
 
 	db.resourceMgr = epoch.NewResourceManager(&db.minReadTsTracker)
-	db.l2Cache, err = l2.NewCache(&opt.L2Options, db.resourceMgr, func(name string) uint64 {
-		id, ok := table.ParseFileID(name)
-		if !ok {
-			panic("bad filename")
-		}
-		return id
-	})
+	db.l2, err = l2.NewCache(&opt.L2Options, db.resourceMgr)
 	if err != nil {
 		return nil, err
 	}

@@ -1,8 +1,11 @@
 package l2
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/coocood/badger/y"
 )
 
 type storage interface {
@@ -25,17 +28,28 @@ func newDiskStorage(path string) (storage, error) {
 }
 
 func (s diskStorage) Put(path, name string) error {
-	src := filepath.Join(path, name)
-	dst := filepath.Join(s.path, name)
-	return os.Link(src, dst)
+	return s.copy(filepath.Join(s.path, name), filepath.Join(path, name))
 }
 
 func (s diskStorage) Get(name, path string) error {
-	src := filepath.Join(s.path, name)
-	dst := filepath.Join(path, name)
-	return os.Link(src, dst)
+	return s.copy(filepath.Join(path, name), filepath.Join(s.path, name))
 }
 
 func (s diskStorage) Del(name string) error {
 	return os.Remove(filepath.Join(s.path, name))
+}
+
+func (s diskStorage) copy(dst, src string) error {
+	r, err := y.OpenExistingFile(src, 0)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	w, err := y.OpenTruncFile(dst, false)
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	_, err = io.Copy(w, r)
+	return err
 }

@@ -38,10 +38,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func init() {
-	log.SetHighlighting(false)
-}
-
 var mmap = flag.Bool("vlog_mmap", true, "Specify if value log must be memory-mapped")
 
 func getTestCompression(tp options.CompressionType) []options.CompressionType {
@@ -571,7 +567,7 @@ func TestLoad(t *testing.T) {
 		n := 10000
 
 		{
-			kv, _ := Open(getTestOptions(dir))
+			kv, _ := Open(opt)
 			for i := 0; i < n; i++ {
 				if (i % 10000) == 0 {
 					fmt.Printf("Putting i=%d\n", i)
@@ -582,7 +578,7 @@ func TestLoad(t *testing.T) {
 			kv.Close()
 		}
 
-		kv, err := Open(getTestOptions(dir))
+		kv, err := Open(opt)
 		require.NoError(t, err)
 		require.Equal(t, uint64(10001), kv.orc.readTs())
 		for i := 0; i < n; i++ {
@@ -620,10 +616,13 @@ func TestLoad(t *testing.T) {
 	t.Run("Without compression", func(t *testing.T) {
 		opt := getTestOptions("")
 		opt.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.None)
+		println(opt.TableBuilderOptions.MaxLevels)
+		opt.L2StartLevel = opt.TableBuilderOptions.MaxLevels
 		testLoad(t, opt)
 	})
 	t.Run("With compression", func(t *testing.T) {
 		opt := getTestOptions("")
+		opt.L2StartLevel = opt.TableBuilderOptions.MaxLevels
 		testLoad(t, opt)
 	})
 }

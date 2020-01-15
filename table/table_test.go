@@ -29,7 +29,7 @@ import (
 
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
-	"github.com/dgraph-io/ristretto"
+	"github.com/bobotu/ristretto"
 	"github.com/dgryski/go-farm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"

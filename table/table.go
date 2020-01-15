@@ -34,7 +34,7 @@ import (
 	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
-	"github.com/dgraph-io/ristretto"
+	"github.com/bobotu/ristretto"
 	"github.com/golang/snappy"
 	"github.com/pingcap/errors"
 )
@@ -74,8 +74,8 @@ type Table struct {
 
 	compression options.CompressionType
 
-	l2Cache *l2.Cache
-	cache   *ristretto.Cache
+	l2    *l2.Storage
+	cache *ristretto.Cache
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -91,7 +91,7 @@ func (t *Table) Delete() error {
 	if t.fd != nil {
 		return deleteFile(t.fd)
 	}
-	return t.l2Cache.Del(t.id, t.filename)
+	return t.l2.Del(t.id)
 }
 
 func deleteFile(fd *os.File) error {
@@ -111,7 +111,7 @@ type OpenTableConfig struct {
 	Compression options.CompressionType
 	Cache       *ristretto.Cache
 	UseL2       bool
-	L2Cache     *l2.Cache
+	L2Cache     *l2.Storage
 }
 
 // OpenTable assumes file has only one table and opens it.  Takes ownership of fd upon function
@@ -127,7 +127,7 @@ func OpenTable(cfg *OpenTableConfig) (*Table, error) {
 		filename:    filename,
 		compression: cfg.Compression,
 		cache:       cfg.Cache,
-		l2Cache:     cfg.L2Cache,
+		l2:          cfg.L2Cache,
 	}
 
 	var err error
@@ -198,7 +198,7 @@ func (t *Table) read(off int, sz int) (res []byte, err error) {
 	res = make([]byte, sz)
 	fd := t.fd
 	if fd == nil {
-		fd, err = t.l2Cache.Get(t.id, t.filename)
+		fd, err = t.l2.Get(t.id)
 		if err != nil {
 			return nil, err
 		}

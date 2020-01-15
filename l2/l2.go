@@ -3,10 +3,11 @@ package l2
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 
+	"github.com/bobotu/ristretto"
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/y"
-	"github.com/dgraph-io/ristretto"
 	"github.com/ngaut/log"
 )
 
@@ -19,20 +20,20 @@ type Options struct {
 
 const savingSuffix = ".saving"
 
-type Cache struct {
+type Storage struct {
 	cache       *ristretto.Cache
 	resourceMgr *epoch.ResourceManager
 	storage     storage
 	opts        *Options
 }
 
-func NewCache(opts *Options, resourceMgr *epoch.ResourceManager, filenameToID func(string) uint64) (*Cache, error) {
+func NewCache(opts *Options, resourceMgr *epoch.ResourceManager) (*Storage, error) {
 	s, err := newDiskStorage(opts.StoragePath)
 	if err != nil {
 		return nil, err
 	}
 
-	c := &Cache{
+	c := &Storage{
 		resourceMgr: resourceMgr,
 		storage:     s,
 		opts:        opts,
@@ -51,14 +52,14 @@ func NewCache(opts *Options, resourceMgr *epoch.ResourceManager, filenameToID fu
 	}
 	c.cache = cache
 
-	if err := c.recoverCache(filenameToID); err != nil {
+	if err := c.recoverCache(); err != nil {
 		return nil, err
 	}
 
 	return c, nil
 }
 
-func (c *Cache) recoverCache(filenameToID func(string) uint64) error {
+func (c *Storage) recoverCache() error {
 	return filepath.Walk(c.opts.CachePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -71,7 +72,11 @@ func (c *Cache) recoverCache(filenameToID func(string) uint64) error {
 		if err != nil {
 			return err
 		}
-		c.cache.Set(filenameToID(info.Name()), f, info.Size())
+		id, err := filenameToID(info.Name())
+		if err != nil {
+			panic(err)
+		}
+		c.cache.Set(id, f, info.Size())
 
 		_, err = os.Stat(path + savingSuffix)
 		if err == nil || !os.IsNotExist(err) {
@@ -81,7 +86,7 @@ func (c *Cache) recoverCache(filenameToID func(string) uint64) error {
 	})
 }
 
-func (c *Cache) saveFileToStorage(name string) error {
+func (c *Storage) saveFileToStorage(name string) error {
 	path := filepath.Join(c.opts.CachePath, name)
 	tag := path + savingSuffix
 	tagF, err := os.Create(tag)
@@ -95,20 +100,21 @@ func (c *Cache) saveFileToStorage(name string) error {
 		if err := c.storage.Put(c.opts.CachePath, name); err != nil {
 			log.Error(err)
 		}
+		log.Errorf("put %s to storage", name)
 		os.Remove(tag)
 	}()
 
 	return nil
 }
 
-func (c *Cache) Add(id uint64, path string) (*os.File, error) {
-	filename := filepath.Base(path)
+func (c *Storage) Add(id uint64, path string) (*os.File, error) {
+	filename := idToFilename(id)
 	cacheFile := filepath.Join(c.opts.CachePath, filename)
 	if err := os.Link(path, cacheFile); err != nil {
 		return nil, err
 	}
 
-	if err := c.storage.Put(c.opts.CachePath, filename); err != nil {
+	if err := c.saveFileToStorage(filename); err != nil {
 		return nil, err
 	}
 
@@ -121,9 +127,9 @@ func (c *Cache) Add(id uint64, path string) (*os.File, error) {
 	return f, nil
 }
 
-func (c *Cache) Get(id uint64, filename string) (*os.File, error) {
+func (c *Storage) Get(id uint64) (*os.File, error) {
 	fd, err := c.cache.GetOrCompute(id, func() (interface{}, int64, error) {
-		f, err1 := c.get(filename)
+		f, err1 := c.get(idToFilename(id))
 		if err1 != nil {
 			return nil, 0, err1
 		}
@@ -136,9 +142,9 @@ func (c *Cache) Get(id uint64, filename string) (*os.File, error) {
 	return fd.(*os.File), nil
 }
 
-func (c *Cache) Del(id uint64, filename string) error {
+func (c *Storage) Del(id uint64) error {
 	job := &cleanupJob{
-		filename:  filename,
+		filename:  idToFilename(id),
 		cache:     c,
 		onlyCache: false,
 	}
@@ -153,7 +159,7 @@ func (c *Cache) Del(id uint64, filename string) error {
 	return nil
 }
 
-func (c *Cache) onEvict(id uint64, v interface{}) {
+func (c *Storage) onEvict(id uint64, v interface{}) {
 	fd := v.(*os.File)
 	job := &cleanupJob{
 		f:         fd,
@@ -169,7 +175,7 @@ func (c *Cache) onEvict(id uint64, v interface{}) {
 type cleanupJob struct {
 	f         *os.File
 	filename  string
-	cache     *Cache
+	cache     *Storage
 	onlyCache bool
 }
 
@@ -185,7 +191,7 @@ func (job *cleanupJob) Delete() error {
 	return nil
 }
 
-func (c *Cache) get(filename string) (*os.File, error) {
+func (c *Storage) get(filename string) (*os.File, error) {
 	cacheFile := filepath.Join(c.opts.CachePath, filename)
 	f, err := y.OpenExistingFile(cacheFile, 0)
 	if err == nil {
@@ -207,4 +213,12 @@ func filesize(f *os.File) int64 {
 		panic(err)
 	}
 	return stat.Size()
+}
+
+func idToFilename(id uint64) string {
+	return strconv.FormatUint(id, 16)
+}
+
+func filenameToID(filename string) (uint64, error) {
+	return strconv.ParseUint(filename, 16, 64)
 }

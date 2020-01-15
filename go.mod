@@ -4,9 +4,10 @@ go 1.13
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bobotu/ristretto v0.0.2-0.20200115030256-c7b04c3c39ab
 	github.com/coocood/bbloom v0.0.0-20190830030839-58deb6228d64
 	github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2
-	github.com/dgraph-io/ristretto v0.0.0-20191010170704-2ba187ef9534
+	github.com/dgraph-io/ristretto v0.0.1 // indirect
 	github.com/dgryski/go-farm v0.0.0-20190423205320-6a90982ecee2
 	github.com/dustin/go-humanize v1.0.0
 	github.com/gogo/protobuf v1.2.1 // indirect
@@ -32,8 +33,5 @@ require (
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 )
 
-replace (
-	github.com/dgraph-io/ristretto => github.com/bobotu/ristretto v0.0.2-0.20200109033742-6f8e99b06f2f
-	// this fork has some performance tweak (e.g. surf package's test time, 600s -> 100s)
-	github.com/stretchr/testify => github.com/bobotu/testify v1.3.1-0.20190730155233-067b303304a8
-)
+// this fork has some performance tweak (e.g. surf package's test time, 600s -> 100s)
+replace github.com/stretchr/testify => github.com/bobotu/testify v1.3.1-0.20190730155233-067b303304a8

@@ -122,7 +122,7 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 			Compression: tableManifest.Compression,
 			Cache:       kv.blockCache,
 			UseL2:       int(tableManifest.Level) >= kv.opt.L2StartLevel,
-			L2Cache:     kv.l2Cache,
+			L2Cache:     kv.l2,
 		}
 		t, err := table.OpenTable(cfg)
 		if err != nil {
@@ -508,12 +508,13 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 			Compression: lc.opt.CompressionPerLevel[cd.nextLevel.level],
 			Cache:       lc.kv.blockCache,
 			UseL2:       useL2,
-			L2Cache:     lc.kv.l2Cache,
+			L2Cache:     lc.kv.l2,
 		}
 		if useL2 {
 			if _, err = cfg.L2Cache.Add(cfg.ID, filename); err != nil {
 				return
 			}
+			os.Remove(filename)
 		}
 		tbl, err = table.OpenTable(cfg)
 		if err != nil {
