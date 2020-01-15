@@ -28,13 +28,13 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/bobotu/ristretto"
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/l2"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
-	"github.com/bobotu/ristretto"
 	"github.com/golang/snappy"
 	"github.com/pingcap/errors"
 )

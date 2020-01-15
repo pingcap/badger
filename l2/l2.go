@@ -100,7 +100,6 @@ func (c *Storage) saveFileToStorage(name string) error {
 		if err := c.storage.Put(c.opts.CachePath, name); err != nil {
 			log.Error(err)
 		}
-		log.Errorf("put %s to storage", name)
 		os.Remove(tag)
 	}()
 
