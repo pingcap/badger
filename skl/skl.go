@@ -247,32 +247,21 @@ func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool
 	}
 }
 
-// findSpliceForLevel returns (outBefore, outAfter) with outBefore.key <= key <= outAfter.key.
+// findSpliceForLevel returns (outBefore, outAfter, match) with outBefore.key < key <= outAfter.key.
 // The input "before" tells us where to start looking.
-// If we found a node with the same key, then we return outBefore = outAfter.
+// If we found a node with the same key, then we return match = true.
 // Otherwise, outBefore.key < key < outAfter.key.
-func (s *Skiplist) findSpliceForLevel(key []byte, before, after *node, level int) (*node, *node) {
+func (s *Skiplist) findSpliceForLevel(key []byte, before *node, level int) (*node, *node, bool) {
 	for {
 		// Assume before.key < key.
 		next := s.getNext(before, level)
 		if next == nil {
-			return before, next
+			return before, next, false
 		}
-		var cmp int
-		if next == after {
-			// We compared the same node on the upper level, no need to compare again.
-			cmp = -1
-		} else {
-			nextKey := next.key(s.arena)
-			cmp = y.CompareKeysWithVer(key, nextKey)
-		}
-		if cmp == 0 {
-			// Equality case.
-			return next, next
-		}
-		if cmp < 0 {
-			// before.key < key < next.key. We are done for this level.
-			return before, next
+		nextKey := next.key(s.arena)
+		cmp := y.CompareKeysWithVer(key, nextKey)
+		if cmp <= 0 {
+			return before, next, cmp == 0
 		}
 		before = next // Keep moving right on this level.
 	}
@@ -290,8 +279,56 @@ func (s *Skiplist) Put(key []byte, v y.ValueStruct) {
 // Hint is used to speed up sequential write.
 type Hint struct {
 	height int32
-	prev   [maxHeight + 1]*node
-	next   [maxHeight + 1]*node
+
+	// hitHeight is used to reduce cost of calculateRecomputeHeight.
+	// For random workload, comparing hint keys from bottom up is wasted work.
+	// So we record the hit height of the last operation, only grow recompute height from near that height.
+	hitHeight int32
+	prev      [maxHeight + 1]*node
+	next      [maxHeight + 1]*node
+}
+
+func (s *Skiplist) calculateRecomputeHeight(key []byte, hint *Hint, listHeight int32) int32 {
+	if hint.height < listHeight {
+		// Either splice is never used or list height has grown, we recompute all.
+		hint.prev[listHeight] = s.head
+		hint.next[listHeight] = nil
+		hint.height = int32(listHeight)
+		hint.hitHeight = hint.height
+		return listHeight
+	}
+	recomputeHeight := hint.hitHeight - 2
+	if recomputeHeight < 0 {
+		recomputeHeight = 0
+	}
+	for recomputeHeight < listHeight {
+		prevNode := hint.prev[recomputeHeight]
+		nextNode := hint.next[recomputeHeight]
+		prevNext := s.getNext(prevNode, int(recomputeHeight))
+		if prevNext != nextNode {
+			recomputeHeight++
+			continue
+		}
+		if prevNode != s.head &&
+			prevNode != nil &&
+			y.CompareKeysWithVer(key, prevNode.key(s.arena)) <= 0 {
+			// Key is before splice.
+			for prevNode == hint.prev[recomputeHeight] {
+				recomputeHeight++
+			}
+			continue
+		}
+		if nextNode != nil && y.CompareKeysWithVer(key, nextNode.key(s.arena)) > 0 {
+			// Key is after splice.
+			for nextNode == hint.next[recomputeHeight] {
+				recomputeHeight++
+			}
+			continue
+		}
+		break
+	}
+	hint.hitHeight = recomputeHeight
+	return recomputeHeight
 }
 
 // PutWithHint inserts the key-value pair with Hint for better sequential write performance.
@@ -311,51 +348,21 @@ func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
 		}
 		listHeight = s.getHeight()
 	}
-	recomputeHeight := int32(0)
 	spliceIsValid := hint != nil
 	if hint == nil {
 		hint = new(Hint)
 	}
-	if hint.height < listHeight {
-		// Either splice is never used or list height has grown, we recompute all.
-		hint.prev[listHeight] = s.head
-		hint.next[listHeight] = nil
-		hint.height = listHeight
-		recomputeHeight = listHeight
-	} else {
-		for recomputeHeight < listHeight {
-			prevNext := s.getNext(hint.prev[recomputeHeight], int(recomputeHeight))
-			if prevNext != hint.next[recomputeHeight] {
-				recomputeHeight++
-			} else if hint.prev[recomputeHeight] != s.head &&
-				hint.prev[recomputeHeight] != nil &&
-				y.CompareKeysWithVer(key, hint.prev[recomputeHeight].key(s.arena)) <= 0 {
-				// Key is before splice.
-				bad := hint.prev[recomputeHeight]
-				for bad == hint.prev[recomputeHeight] {
-					recomputeHeight++
-				}
-			} else if hint.next[recomputeHeight] != nil && y.CompareKeysWithVer(key, hint.next[recomputeHeight].key(s.arena)) > 0 {
-				// Key is after splice.
-				bad := hint.next[recomputeHeight]
-				for bad == hint.next[recomputeHeight] {
-					recomputeHeight++
-				}
-			} else {
-				break
-			}
-		}
-	}
+	recomputeHeight := s.calculateRecomputeHeight(key, hint, listHeight)
 	if recomputeHeight > 0 {
 		for i := recomputeHeight - 1; i >= 0; i-- {
-			hint.prev[i], hint.next[i] = s.findSpliceForLevel(key, hint.prev[i+1], hint.next[i+1], int(i))
-			if hint.prev[i] == hint.next[i] {
+			var match bool
+			hint.prev[i], hint.next[i], match = s.findSpliceForLevel(key, hint.prev[i+1], int(i))
+			if match {
 				// In place update.
-				match := hint.prev[i]
-				match.setValue(s.arena, v)
-				for i >= 0 {
-					hint.prev[i] = match
-					hint.next[i] = match
+				hint.next[i].setValue(s.arena, v)
+				for i > 0 {
+					hint.prev[i-1] = hint.prev[i]
+					hint.next[i-1] = hint.next[i]
 					i--
 				}
 				return
@@ -379,7 +386,7 @@ func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
 			// CAS failed. We need to recompute prev and next.
 			// It is unlikely to be helpful to try to use a different level as we redo the search,
 			// because it is unlikely that lots of nodes are inserted between prev[i] and next[i].
-			hint.prev[i], hint.next[i] = s.findSpliceForLevel(key, hint.prev[i], nil, i)
+			hint.prev[i], hint.next[i], _ = s.findSpliceForLevel(key, hint.prev[i], i)
 			if i > 0 {
 				spliceIsValid = false
 			}
@@ -388,10 +395,47 @@ func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
 	if spliceIsValid {
 		for i := 0; i < height; i++ {
 			hint.prev[i] = x
+			hint.next[i] = s.getNext(x, i)
 		}
 	} else {
 		hint.height = 0
 	}
+}
+
+func (s *Skiplist) GetWithHint(key []byte, hint *Hint) y.ValueStruct {
+	if hint == nil {
+		hint = new(Hint)
+	}
+	listHeight := s.getHeight()
+	recomputeHeight := s.calculateRecomputeHeight(key, hint, listHeight)
+	var n *node
+	if recomputeHeight > 0 {
+		for i := recomputeHeight - 1; i >= 0; i-- {
+			var match bool
+			hint.prev[i], hint.next[i], match = s.findSpliceForLevel(key, hint.prev[i+1], int(i))
+			if match {
+				n = hint.next[i]
+				for j := i; j >= 0; j-- {
+					hint.prev[j] = n
+					hint.next[j] = s.getNext(n, int(j))
+				}
+				break
+			}
+		}
+	} else {
+		n = hint.next[0]
+	}
+	if n == nil {
+		return y.ValueStruct{}
+	}
+	nextKey := s.arena.getKey(n.keyOffset, n.keySize)
+	if !y.SameKey(key, nextKey) {
+		return y.ValueStruct{}
+	}
+	valOffset, valSize := n.getValueOffset()
+	vs := s.arena.getVal(valOffset, valSize)
+	vs.Version = y.ParseTs(nextKey)
+	return vs
 }
 
 // Empty returns if the Skiplist is empty.

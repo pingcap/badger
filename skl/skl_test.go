@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -381,6 +382,31 @@ func TestPutWithHint(t *testing.T) {
 	require.True(t, cntGot == cnt)
 }
 
+func TestGetWithHint(t *testing.T) {
+	rand.Seed(time.Now().Unix())
+	l := NewSkiplist(arenaSize)
+	var keys [][]byte
+	sp := new(Hint)
+	for {
+		if l.arena.size() > arenaSize-256 {
+			break
+		}
+		key := randomKey()
+		keys = append(keys, key)
+		l.PutWithHint(key, y.ValueStruct{Value: key}, sp)
+	}
+	hint := new(Hint)
+	for _, key := range keys {
+		bytes.Equal(l.GetWithHint(key, hint).Value, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return bytes.Compare(keys[i], keys[j]) < 0
+	})
+	for _, key := range keys {
+		bytes.Equal(l.GetWithHint(key, hint).Value, key)
+	}
+}
+
 func TestPutLargeValue(t *testing.T) {
 	l := NewSkiplist(arenaSize)
 	key := randomKey()
@@ -455,5 +481,81 @@ func BenchmarkReadWriteMap(b *testing.B) {
 				}
 			})
 		})
+	}
+}
+
+// Standard test. Some fraction is read. Some fraction is write. Writes have
+// to go through mutex lock.
+func BenchmarkGetSequential(b *testing.B) {
+	size := 300000
+	keys, l, _ := buildKeysAndList(size)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := keys[i%size]
+		l.Get(key)
+	}
+}
+
+func BenchmarkGetWithHintSequential(b *testing.B) {
+	size := 300000
+	keys, l, hint := buildKeysAndList(size)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		key := keys[i%size]
+		l.GetWithHint(key, hint)
+	}
+}
+
+func buildKeysAndList(size int) ([][]byte, *Skiplist, *Hint) {
+	l := NewSkiplist(32 * 1024 * 1024)
+	keys := make([][]byte, size)
+	hint := new(Hint)
+	for i := 0; i < size; i++ {
+		keys[i] = y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0)
+	}
+	for i := 0; i < size; i++ {
+		key := keys[i]
+		l.PutWithHint(key, y.ValueStruct{Value: []byte{byte(i)}}, hint)
+	}
+	return keys, l, hint
+}
+
+func BenchmarkGetRandom(b *testing.B) {
+	size := 300000
+	keys, l, _ := buildKeysAndList(size)
+	b.ResetTimer()
+	r := rand.New(rand.NewSource(1))
+	for i := 0; i < b.N; i++ {
+		key := keys[r.Int()%size]
+		l.Get(key)
+	}
+}
+
+func BenchmarkGetWithHintRandom(b *testing.B) {
+	size := 300000
+	keys, l, hint := buildKeysAndList(size)
+	b.ResetTimer()
+	r := rand.New(rand.NewSource(1))
+	for i := 0; i < b.N; i++ {
+		key := keys[r.Int()%size]
+		l.GetWithHint(key, hint)
+	}
+}
+
+func BenchmarkPutWithHint(b *testing.B) {
+	l := NewSkiplist(16 * 1024 * 1024)
+	size := 100000
+	keys := make([][]byte, size)
+	for i := 0; i < size; i++ {
+		keys[i] = y.KeyWithTs([]byte(fmt.Sprintf("%05d", i)), 0)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hint := new(Hint)
+		l = NewSkiplist(16 * 1024 * 1024)
+		for j := 0; j < size; j++ {
+			key := keys[j]
+			l.PutWithHint(key, y.ValueStruct{Value: []byte{byte(j)}}, hint)
+		}
 	}
 }

@@ -149,7 +149,6 @@ func (mt *MergeIterator) FillValue(vs *y.ValueStruct) {
 	}
 }
 
-
 // NewMergeIterator creates a merge iterator
 func NewMergeIterator(iters []y.Iterator, reverse bool) y.Iterator {
 	if len(iters) == 0 {
