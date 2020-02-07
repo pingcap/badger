@@ -248,17 +248,21 @@ func Open(opt Options) (db *DB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 
-	config := ristretto.Config{
-		// Use 5% of cache memory for storing counters.
-		NumCounters: int64(float64(opt.MaxCacheSize) * 0.05 * 2),
-		MaxCost:     int64(float64(opt.MaxCacheSize) * 0.95),
-		BufferItems: 64,
-		// Enable metrics once https://github.com/dgraph-io/ristretto/issues/92 is resolved.
-		Metrics: false,
-	}
-	cache, err := ristretto.NewCache(&config)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create cache")
+	var cache *ristretto.Cache
+	if opt.MaxCacheSize != 0 {
+		config := ristretto.Config{
+			// Use 5% of cache memory for storing counters.
+			NumCounters: int64(float64(opt.MaxCacheSize) * 0.05 * 2),
+			MaxCost:     int64(float64(opt.MaxCacheSize) * 0.95),
+			BufferItems: 64,
+			// Enable metrics once https://github.com/dgraph-io/ristretto/issues/92 is resolved.
+			Metrics: false,
+		}
+		var err error
+		cache, err = ristretto.NewCache(&config)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to create cache")
+		}
 	}
 	db = &DB{
 		imm:           make([]*table.MemTable, 0, opt.NumMemtables),
@@ -594,7 +598,9 @@ func (db *DB) Close() (err error) {
 	}
 	log.Infof("Waiting for closer")
 	db.closers.updateSize.SignalAndWait()
-	db.blockCache.Close()
+	if db.blockCache != nil {
+		db.blockCache.Close()
+	}
 
 	if db.dirLockGuard != nil {
 		if guardErr := db.dirLockGuard.release(); err == nil {

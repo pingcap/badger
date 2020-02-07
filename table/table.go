@@ -65,6 +65,8 @@ type Table struct {
 	smallest, biggest []byte // Smallest and largest keys.
 	id                uint64 // file id, part of filename
 
+	mmap []byte // Memory mapped.
+
 	compacting int32
 
 	bf   *bbloom.Bloom
@@ -83,6 +85,9 @@ func (t *Table) CompressionType() options.CompressionType {
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
+	if len(t.mmap) != 0 {
+		y.Munmap(t.mmap)
+	}
 	if err := t.fd.Truncate(0); err != nil {
 		// This is very important to let the FS know that the file is deleted.
 		return err
@@ -125,7 +130,20 @@ func OpenTable(filename string, compression options.CompressionType, cache *rist
 		compression: compression,
 		cache:       cache,
 	}
-	t.loadIndex()
+	if err := t.loadIndex(); err != nil {
+		fd.Close()
+		indexFd.Close()
+		return nil, err
+	}
+
+	if cache == nil {
+		t.mmap, err = y.Mmap(fd, false, t.Size())
+		if err != nil {
+			fd.Close()
+			indexFd.Close()
+			return nil, y.Wrapf(err, "Unable to map file")
+		}
+	}
 	return t, nil
 }
 
@@ -179,6 +197,12 @@ func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, boo
 }
 
 func (t *Table) read(off int, sz int) ([]byte, error) {
+	if len(t.mmap) > 0 {
+		if len(t.mmap[off:]) < sz {
+			return nil, y.ErrEOF
+		}
+		return t.mmap[off : off+sz], nil
+	}
 	res := make([]byte, sz)
 	_, err := t.fd.ReadAt(res, int64(off))
 	return res, err
