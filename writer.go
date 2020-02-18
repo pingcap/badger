@@ -221,11 +221,12 @@ func newEntry(entry *Entry) table.Entry {
 }
 
 func (w *writeWorker) writeToLSM(entries []*Entry) error {
+	mTbls := w.mtbls.Load().(*memTables)
 	for len(entries) != 0 {
 		e := newEntry(entries[0])
-		free, err := w.ensureRoomForWrite(e.EstimateSize())
-		if err != nil {
-			return err
+		free := w.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize())
+		if free == w.opt.MaxTableSize {
+			mTbls = w.mtbls.Load().(*memTables)
 		}
 
 		es := make([]table.Entry, 0, len(entries))
@@ -246,9 +247,9 @@ func (w *writeWorker) writeToLSM(entries []*Entry) error {
 		w.updateOffset(entries[i-1].logOffset)
 		entries = entries[i:]
 
-		w.mt.PutToPendingList(es)
+		mTbls.getMutable().PutToPendingList(es)
 		w.mergeLSMCh <- mergeLSMTask{
-			mt:    w.mt,
+			mt:    mTbls.getMutable(),
 			guard: w.resourceMgr.Acquire(),
 		}
 	}

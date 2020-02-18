@@ -2,6 +2,7 @@ package badger
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/protos"
@@ -64,13 +65,13 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 
 	guard := w.resourceMgr.Acquire()
 	defer guard.Done()
-	it := w.mt.NewIterator(false)
+	mTbls := w.mtbls.Load().(*memTables)
+	y.Assert(mTbls.tables[0] != nil)
+	it := mTbls.getMutable().NewIterator(false)
 	for _, t := range task.tbls {
 		it.Seek(t.Smallest())
 		if it.Valid() && y.CompareKeysWithVer(it.Key(), y.KeyWithTs(t.Biggest(), 0)) <= 0 {
-			if wg, err = w.flushMemTable(); err != nil {
-				return
-			}
+			wg = w.flushMemTable()
 			break
 		}
 	}
@@ -163,7 +164,9 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 }
 
 func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
-	for _, mt := range w.imm {
+	tbls := w.mtbls.Load().(*memTables)
+	imms := tbls.tables[:atomic.LoadUint32(&tbls.length)]
+	for _, mt := range imms {
 		it := mt.NewIterator(false)
 		it.Seek(kr.left)
 		if !it.Valid() || y.CompareKeysWithVer(it.Key(), kr.right) <= 0 {

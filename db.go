@@ -56,15 +56,12 @@ type closers struct {
 // DB provides the various functions required to interact with Badger.
 // DB is thread-safe.
 type DB struct {
-	sync.RWMutex // Guards list of inmemory tables, not individual reads and writes.
-
 	dirLockGuard *directoryLockGuard
 	// nil if Dir and ValueDir are the same
 	valueDirGuard *directoryLockGuard
 
 	closers   closers
-	mt        *table.MemTable   // Our latest (actively written) in-memory table
-	imm       []*table.MemTable // Add here only AFTER pushing to flushChan.
+	mtbls     atomic.Value
 	opt       Options
 	manifest  *manifestFile
 	lc        *levelsController
@@ -94,6 +91,24 @@ type DB struct {
 	resourceMgr *epoch.ResourceManager
 }
 
+type memTables struct {
+	tables []*table.MemTable // tables from new to old, the first one is mutable.
+	length uint32            // The length is updated by the flusher.
+}
+
+func (tbls *memTables) getMutable() *table.MemTable {
+	return tbls.tables[0]
+}
+
+func newMemTables(mt *table.MemTable, old *memTables) *memTables {
+	newTbls := &memTables{}
+	newTbls.tables = make([]*table.MemTable, 1+atomic.LoadUint32(&old.length))
+	newTbls.tables[0] = mt
+	copy(newTbls.tables[1:], old.tables)
+	newTbls.length = uint32(len(newTbls.tables))
+	return newTbls
+}
+
 const (
 	kvWriteChCapacity = 1000
 )
@@ -109,8 +124,11 @@ func replayFunction(out *DB) func(Entry) error {
 
 	toLSM := func(nk []byte, vs y.ValueStruct) {
 		e := table.Entry{Key: nk, Value: vs}
-		out.ensureRoomForWrite(e.EstimateSize())
-		out.mt.PutToSkl(nk, vs)
+		mTbls := out.mtbls.Load().(*memTables)
+		if out.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize()) == out.opt.MaxTableSize {
+			mTbls = out.mtbls.Load().(*memTables)
+		}
+		mTbls.getMutable().PutToSkl(nk, vs)
 	}
 
 	first := true
@@ -265,7 +283,6 @@ func Open(opt Options) (db *DB, err error) {
 		}
 	}
 	db = &DB{
-		imm:           make([]*table.MemTable, 0, opt.NumMemtables),
 		flushChan:     make(chan *flushTask, opt.NumMemtables),
 		writeCh:       make(chan *request, kvWriteChCapacity),
 		memTableCh:    make(chan *table.MemTable, 1),
@@ -302,7 +319,7 @@ func Open(opt Options) (db *DB, err error) {
 	db.calculateSize()
 	db.closers.updateSize = y.NewCloser(1)
 	go db.updateSize(db.closers.updateSize)
-	db.mt = <-db.memTableCh
+	db.mtbls.Store(newMemTables(<-db.memTableCh, &memTables{}))
 
 	db.resourceMgr = epoch.NewResourceManager(&db.minReadTsTracker)
 
@@ -540,31 +557,11 @@ func (db *DB) Close() (err error) {
 	// and remove them completely, while the block / memtable writer is still
 	// trying to push stuff into the memtable. This will also resolve the value
 	// offset problem: as we push into memtable, we update value offsets there.
-	if !db.mt.Empty() {
+	mTbls := db.mtbls.Load().(*memTables)
+	if !mTbls.getMutable().Empty() {
 		log.Infof("Flushing memtable")
-		for {
-			pushedFlushTask := func() bool {
-				db.Lock()
-				defer db.Unlock()
-				y.Assert(db.mt != nil)
-				select {
-				case db.flushChan <- newFlushTask(db.mt, db.logOff):
-					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
-					db.mt = nil                    // Will segfault if we try writing!
-					log.Infof("pushed to flush chan\n")
-					return true
-				default:
-					// If we fail to push, we need to unlock and wait for a short while.
-					// The flushing operation needs to update s.imm. Otherwise, we have a deadlock.
-					// TODO: Think about how to do this more cleanly, maybe without any locks.
-				}
-				return false
-			}()
-			if pushedFlushTask {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
+		db.mtbls.Store(newMemTables(nil, mTbls))
+		db.flushChan <- newFlushTask(mTbls.getMutable(), db.logOff)
 	}
 	db.flushChan <- newFlushTask(nil, logOffset{}) // Tell flusher to quit.
 
@@ -649,21 +646,11 @@ func syncDir(dir string) error {
 	return errors.Wrapf(closeErr, "While closing directory: %s.", dir)
 }
 
-// getMemtables returns the current memtables and get references.
+// getMemtables returns the current memtables.
 func (db *DB) getMemTables() []*table.MemTable {
-	tables := make([]*table.MemTable, 1, 8)
-	db.RLock()
-	defer db.RUnlock()
-	// Get mutable memtable.
-	tables[0] = db.mt
-
-	// Get immutable memtables.
-	last := len(db.imm) - 1
-	for i := range db.imm {
-		immt := db.imm[last-i]
-		tables = append(tables, immt)
-	}
-	return tables
+	tbls := db.mtbls.Load().(*memTables)
+	l := atomic.LoadUint32(&tbls.length)
+	return tbls.tables[:l]
 }
 
 // get returns the value in memtable or disk for given key.
@@ -718,10 +705,10 @@ func (db *DB) multiGet(pairs []keyValuePair) {
 }
 
 func (db *DB) updateOffset(off logOffset) {
-	db.Lock()
 	y.Assert(!off.Less(db.logOff))
+	// We don't need to protect it by a lock because the value is never accessed
+	// by more than one goroutine at the same time.
 	db.logOff = off
-	db.Unlock()
 }
 
 var requestPool = sync.Pool{
@@ -784,39 +771,26 @@ func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 }
 
 // ensureRoomForWrite is always called serially.
-func (db *DB) ensureRoomForWrite(minSize int64) (int64, error) {
-	free := db.opt.MaxTableSize - db.mt.MemSize()
+func (db *DB) ensureRoomForWrite(mt *table.MemTable, minSize int64) int64 {
+	free := db.opt.MaxTableSize - mt.MemSize()
 	if free >= minSize {
-		return free, nil
+		return free
 	}
-	_, err := db.flushMemTable()
-	return db.opt.MaxTableSize, err
+	_ = db.flushMemTable()
+	return db.opt.MaxTableSize
 }
 
-func (db *DB) flushMemTable() (*sync.WaitGroup, error) {
-	newMemTable := <-db.memTableCh
-	for {
-		db.Lock()
-		ft := newFlushTask(db.mt, db.logOff)
-		select {
-		case db.flushChan <- ft:
-			log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
-				db.mt.MemSize(), len(db.flushChan))
-			// We manage to push this task. Let's modify imm.
-			db.imm = append(db.imm, db.mt)
-			db.mt = newMemTable
-			db.Unlock()
-			// New memtable is empty. We certainly have room.
-			return &ft.wg, nil
-		default:
-			db.Unlock()
-			// log.Warnf("Making room for writes")
-			// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
-			// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
-			// you will get a deadlock.
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+func (db *DB) flushMemTable() *sync.WaitGroup {
+	mTbls := db.mtbls.Load().(*memTables)
+	newTbls := newMemTables(<-db.memTableCh, mTbls)
+	db.mtbls.Store(newTbls)
+	ft := newFlushTask(mTbls.getMutable(), db.logOff)
+	db.flushChan <- ft
+	log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d\n",
+		mTbls.getMutable().MemSize(), len(db.flushChan))
+
+	// New memtable is empty. We certainly have room.
+	return &ft.wg
 }
 
 func arenaSize(opt Options) int64 {
@@ -951,13 +925,15 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if err != nil {
 			return err
 		}
-
-		// Update s.imm. Need a lock.
-		db.Lock()
-		y.Assert(ft.mt == db.imm[0]) //For now, single threaded.
-		db.imm = db.imm[1:]
+		mTbls := db.mtbls.Load().(*memTables)
+		// Update the length of mTbls.
+		for i, tbl := range mTbls.tables {
+			if tbl == ft.mt {
+				atomic.StoreUint32(&mTbls.length, uint32(i))
+				break
+			}
+		}
 		guard.Delete([]epoch.Resource{ft.mt})
-		db.Unlock()
 		guard.Done()
 		ft.wg.Done()
 	}

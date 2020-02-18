@@ -1615,8 +1615,7 @@ func TestIngestSplit(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	wg, err := db.flushMemTable()
-	require.NoError(t, err)
+	wg := db.flushMemTable()
 	wg.Wait()
 
 	l0 := db.lc.levels[0]
