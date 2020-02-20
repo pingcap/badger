@@ -573,21 +573,22 @@ func (db *DB) Close() (err error) {
 		db.closers.compactors.SignalAndWait()
 		log.Infof("Compaction finished")
 	}
-
-	// Force Compact L0
-	// We don't need to care about cstatus since no parallel compaction is running.
-	cd := compactDef{
-		thisLevel: db.lc.levels[0],
-		nextLevel: db.lc.levels[1],
-	}
-	guard := db.resourceMgr.Acquire()
-	defer guard.Done()
-	if db.lc.fillTablesL0(&cd) {
-		if err := db.lc.runCompactDef(0, cd, nil, guard); err != nil {
-			log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
+	if db.opt.CompactL0WhenClose {
+		// Force Compact L0
+		// We don't need to care about cstatus since no parallel compaction is running.
+		cd := compactDef{
+			thisLevel: db.lc.levels[0],
+			nextLevel: db.lc.levels[1],
 		}
-	} else {
-		log.Infof("fillTables failed for level zero. No compaction required")
+		guard := db.resourceMgr.Acquire()
+		defer guard.Done()
+		if db.lc.fillTablesL0(&cd) {
+			if err := db.lc.runCompactDef(0, cd, nil, guard); err != nil {
+				log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
+			}
+		} else {
+			log.Infof("fillTables failed for level zero. No compaction required")
+		}
 	}
 
 	if lcErr := db.lc.close(); err == nil {

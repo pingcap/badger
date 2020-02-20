@@ -106,6 +106,8 @@ type Options struct {
 	ValueLogWriteOptions options.ValueLogWriterOptions
 
 	CompactionFilterFactory func(targetLevel int, smallest, biggest []byte) CompactionFilter
+
+	CompactL0WhenClose bool
 }
 
 // CompactionFilter is an interface that user can implement to remove certain keys.
@@ -180,6 +182,7 @@ var DefaultOptions = Options{
 	ValueLogWriteOptions: options.ValueLogWriterOptions{
 		WriteBufferSize: 2 * 1024 * 1024,
 	},
+	CompactL0WhenClose: true,
 }
 
 // LSMOnlyOptions follows from DefaultOptions, but sets a higher ValueThreshold so values would
