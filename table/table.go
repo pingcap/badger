@@ -18,7 +18,6 @@ package table
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -65,7 +64,8 @@ type Table struct {
 	smallest, biggest []byte // Smallest and largest keys.
 	id                uint64 // file id, part of filename
 
-	mmap []byte // Memory mapped.
+	dataMmap  []byte
+	indexMmap []byte
 
 	compacting int32
 
@@ -85,8 +85,11 @@ func (t *Table) CompressionType() options.CompressionType {
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
-	if len(t.mmap) != 0 {
-		y.Munmap(t.mmap)
+	if len(t.dataMmap) != 0 {
+		y.Munmap(t.dataMmap)
+	}
+	if len(t.indexMmap) != 0 {
+		y.Munmap(t.indexMmap)
 	}
 	if err := t.fd.Truncate(0); err != nil {
 		// This is very important to let the FS know that the file is deleted.
@@ -131,16 +134,14 @@ func OpenTable(filename string, compression options.CompressionType, cache *rist
 		cache:       cache,
 	}
 	if err := t.loadIndex(); err != nil {
-		fd.Close()
-		indexFd.Close()
+		t.Close()
 		return nil, err
 	}
 
 	if cache == nil {
-		t.mmap, err = y.Mmap(fd, false, t.Size())
+		t.dataMmap, err = y.Mmap(fd, false, t.Size())
 		if err != nil {
-			fd.Close()
-			indexFd.Close()
+			t.Close()
 			return nil, y.Wrapf(err, "Unable to map file")
 		}
 	}
@@ -153,6 +154,9 @@ func (t *Table) Close() error {
 		t.fd.Close()
 	}
 	if t.indexFd != nil {
+		if len(t.indexMmap) != 0 {
+			y.Munmap(t.indexMmap)
+		}
 		t.indexFd.Close()
 	}
 	return nil
@@ -197,11 +201,11 @@ func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, boo
 }
 
 func (t *Table) read(off int, sz int) ([]byte, error) {
-	if len(t.mmap) > 0 {
-		if len(t.mmap[off:]) < sz {
+	if len(t.dataMmap) > 0 {
+		if len(t.dataMmap[off:]) < sz {
 			return nil, y.ErrEOF
 		}
-		return t.mmap[off : off+sz], nil
+		return t.dataMmap[off : off+sz], nil
 	}
 	res := make([]byte, sz)
 	_, err := t.fd.ReadAt(res, int64(off))
@@ -217,17 +221,25 @@ func (t *Table) readNoFail(off int, sz int) []byte {
 func (t *Table) loadIndex() error {
 	// TODO: now we simply keep all index data in memory.
 	// We can add a cache policy to evict unused index to avoid OOM later.
-	idxData, err := ioutil.ReadAll(t.indexFd)
+	fstat, err := t.indexFd.Stat()
 	if err != nil {
 		return err
 	}
+	idxData, err := y.Mmap(t.indexFd, false, fstat.Size())
+	if err != nil {
+		return err
+	}
+	t.indexMmap = idxData
 
 	t.globalTs = bytesToU64(idxData[:8])
 	idxData = idxData[8:]
 	if t.compression != options.None {
+		mmap := idxData
 		if idxData, err = t.decompressData(idxData); err != nil {
 			return err
 		}
+		y.Munmap(mmap)
+		t.indexMmap = nil
 	}
 
 	decoder := metaDecoder{buf: idxData}
