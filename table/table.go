@@ -402,6 +402,17 @@ func (t *Table) HasOverlap(start, end []byte, includeEnd bool) bool {
 	if t.surf != nil {
 		return t.surf.HasOverlap(start, end, includeEnd)
 	}
+
+	it := t.NewIterator(false)
+	it.Seek(start)
+	if !it.Valid() {
+		return false
+	}
+	if cmp := y.CompareKeysWithVer(it.Key(), end); cmp > 0 {
+		return false
+	} else if cmp == 0 {
+		return includeEnd
+	}
 	return true
 }
 
