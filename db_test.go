@@ -50,8 +50,9 @@ func getTestCompression(tp options.CompressionType) []options.CompressionType {
 
 func getTestOptions(dir string) Options {
 	opt := DefaultOptions
-	opt.MaxTableSize = 4 << 15 // Force more compaction.
-	opt.LevelOneSize = 4 << 15 // Force more compaction.
+	opt.MaxTableSize = 4 << 15    // Force more compaction.
+	opt.MaxMemTableSize = 4 << 15 // Force more compaction.
+	opt.LevelOneSize = 4 << 15    // Force more compaction.
 	opt.Dir = dir
 	opt.ValueDir = dir
 	opt.SyncWrites = false
@@ -1158,6 +1159,7 @@ func TestCompactionFilter(t *testing.T) {
 	opts := getTestOptions(dir)
 	opts.ValueThreshold = 8 * 1024
 	opts.MaxTableSize = 32 * 1024
+	opts.MaxMemTableSize = 32 * 1024
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
@@ -1293,6 +1295,7 @@ func TestIterateVLog(t *testing.T) {
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
 	opts.MaxTableSize = 1 << 20
+	opts.MaxMemTableSize = 1 << 20
 	opts.ValueLogFileSize = 1 << 20
 	opts.ValueThreshold = 1000
 	opts.ValueLogMaxNumFiles = 1000

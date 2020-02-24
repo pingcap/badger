@@ -17,6 +17,7 @@ func TestBlob(t *testing.T) {
 	opts := getTestOptions(dir)
 	opts.ValueThreshold = 20
 	opts.MaxTableSize = 4 * 1024
+	opts.MaxMemTableSize = 4 * 1024
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
@@ -70,6 +71,7 @@ func TestBlobGC(t *testing.T) {
 	opts := getTestOptions(dir)
 	opts.ValueThreshold = 20
 	opts.MaxTableSize = 6 * 1024
+	opts.MaxMemTableSize = 6 * 1024
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2

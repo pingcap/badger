@@ -46,7 +46,8 @@ type Options struct {
 	// 3. Flags that user might want to review
 	// ----------------------------------------
 	// The following affect all levels of LSM tree.
-	MaxTableSize int64 // Each table (or file) is at most this size.
+	MaxMemTableSize int64 // Each mem table is at most this size.
+	MaxTableSize    int64 // Each table file is at most this size.
 	// If value size >= this threshold, only store value offsets in tree.
 	// If set to 0, all values are stored in SST.
 	ValueThreshold int
@@ -77,9 +78,6 @@ type Options struct {
 
 	// Number of compaction workers to run concurrently.
 	NumCompactors int
-
-	// Max number of sub compaction, set 1 or 0 to disable sub compaction.
-	MaxSubCompaction int
 
 	// Transaction start and commit timestamps are manaVgedTxns by end-user. This
 	// is a private option used by ManagedDB.
@@ -145,13 +143,11 @@ const (
 // DefaultOptions sets a list of recommended options for good performance.
 // Feel free to modify these to suit your needs.
 var DefaultOptions = Options{
-	DoNotCompact: false,
-	LevelOneSize: 256 << 20,
-	// table.MemoryMap to mmap() the tables.
-	// table.Nothing to not preload the tables.
-	MaxTableSize:            64 << 20,
+	DoNotCompact:            false,
+	LevelOneSize:            256 << 20,
+	MaxMemTableSize:         64 << 20,
+	MaxTableSize:            8 << 20,
 	NumCompactors:           3,
-	MaxSubCompaction:        3,
 	NumLevelZeroTables:      5,
 	NumLevelZeroTablesStall: 10,
 	NumMemtables:            5,

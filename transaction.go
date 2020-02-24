@@ -245,7 +245,7 @@ func (txn *Txn) checkSize(e *Entry) error {
 	}
 	// Extra bytes for version in key.
 	size := int64(e.estimateSize()) + 10
-	if size >= txn.db.opt.MaxTableSize {
+	if size >= txn.db.opt.MaxMemTableSize {
 		return ErrTxnTooBig
 	}
 	txn.count++

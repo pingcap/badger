@@ -801,6 +801,7 @@ func TestArmV7Issue311Fix(t *testing.T) {
 	config.ValueLogFileSize = 16 << 20
 	config.LevelOneSize = 8 << 20
 	config.MaxTableSize = 2 << 20
+	config.MaxMemTableSize = 2 << 20
 	config.Dir = dir
 	config.ValueDir = dir
 	config.SyncWrites = false

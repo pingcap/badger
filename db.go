@@ -125,7 +125,7 @@ func replayFunction(out *DB) func(Entry) error {
 	toLSM := func(nk []byte, vs y.ValueStruct) {
 		e := table.Entry{Key: nk, Value: vs}
 		mTbls := out.mtbls.Load().(*memTables)
-		if out.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize()) == out.opt.MaxTableSize {
+		if out.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize()) == out.opt.MaxMemTableSize {
 			mTbls = out.mtbls.Load().(*memTables)
 		}
 		mTbls.getMutable().PutToSkl(nk, vs)
@@ -190,7 +190,7 @@ func replayFunction(out *DB) func(Entry) error {
 
 // Open returns a new DB object.
 func Open(opt Options) (db *DB, err error) {
-	opt.maxBatchSize = (15 * opt.MaxTableSize) / 100
+	opt.maxBatchSize = (15 * opt.MaxMemTableSize) / 100
 	opt.maxBatchCount = opt.maxBatchSize / int64(skl.MaxNodeSize)
 
 	if opt.ValueThreshold > math.MaxUint16-16 {
@@ -773,12 +773,12 @@ func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 
 // ensureRoomForWrite is always called serially.
 func (db *DB) ensureRoomForWrite(mt *table.MemTable, minSize int64) int64 {
-	free := db.opt.MaxTableSize - mt.MemSize()
+	free := db.opt.MaxMemTableSize - mt.MemSize()
 	if free >= minSize {
 		return free
 	}
 	_ = db.flushMemTable()
-	return db.opt.MaxTableSize
+	return db.opt.MaxMemTableSize
 }
 
 func (db *DB) flushMemTable() *sync.WaitGroup {
@@ -795,7 +795,7 @@ func (db *DB) flushMemTable() *sync.WaitGroup {
 }
 
 func arenaSize(opt Options) int64 {
-	return opt.MaxTableSize + opt.maxBatchCount*int64(skl.MaxNodeSize)
+	return opt.MaxMemTableSize + opt.maxBatchCount*int64(skl.MaxNodeSize)
 }
 
 // WriteLevel0Table flushes memtable. It drops deleteValues.

@@ -225,7 +225,7 @@ func (w *writeWorker) writeToLSM(entries []*Entry) error {
 	for len(entries) != 0 {
 		e := newEntry(entries[0])
 		free := w.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize())
-		if free == w.opt.MaxTableSize {
+		if free == w.opt.MaxMemTableSize {
 			mTbls = w.mtbls.Load().(*memTables)
 		}
 
