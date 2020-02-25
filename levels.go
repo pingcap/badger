@@ -175,11 +175,13 @@ func (lc *levelsController) startCompact(c *y.Closer) {
 	n := lc.kv.opt.NumCompactors
 	c.AddRunning(n - 1)
 	for i := 0; i < n; i++ {
-		go lc.runWorker(c)
+		// The first half compaction workers take level as priority, others take score
+		// as priority.
+		go lc.runWorker(c, i*2 >= n)
 	}
 }
 
-func (lc *levelsController) runWorker(c *y.Closer) {
+func (lc *levelsController) runWorker(c *y.Closer, scorePriority bool) {
 	defer c.Done()
 	if lc.kv.opt.DoNotCompact {
 		return
@@ -195,6 +197,11 @@ func (lc *levelsController) runWorker(c *y.Closer) {
 		case <-ticker.C:
 			guard := lc.resourceMgr.Acquire()
 			prios := lc.pickCompactLevels()
+			if scorePriority {
+				sort.Slice(prios, func(i, j int) bool {
+					return prios[i].score > prios[j].score
+				})
+			}
 			for _, p := range prios {
 				// TODO: Handle error.
 				didCompact, _ := lc.doCompact(p, guard)
