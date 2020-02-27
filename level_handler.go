@@ -18,7 +18,6 @@ package badger
 
 import (
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -97,7 +96,7 @@ func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, is
 	}
 	s.tables = newTables
 
-	assertTablesOrder(s.level, newTables)
+	assertTablesOrder(s.level, newTables, nil)
 	s.Unlock()
 
 	if !isMove {
@@ -109,7 +108,7 @@ func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, is
 	}
 }
 
-func assertTablesOrder(level int, tables []*table.Table) {
+func assertTablesOrder(level int, tables []*table.Table, cd *compactDef) {
 	if level == 0 {
 		return
 	}
@@ -120,6 +119,9 @@ func assertTablesOrder(level int, tables []*table.Table) {
 			y.CompareKeysWithVer(tables[i].Biggest(), tables[i+1].Biggest()) >= 0 {
 
 			var sb strings.Builder
+			if cd != nil {
+				fmt.Fprintf(&sb, "%s\n", cd)
+			}
 			fmt.Fprintf(&sb, "the order of level %d tables is invalid:\n", level)
 			for idx, tbl := range tables {
 				tag := "  "
@@ -128,7 +130,7 @@ func assertTablesOrder(level int, tables []*table.Table) {
 				}
 				fmt.Fprintf(&sb, "%s %v %v\n", tag, tbl.Smallest(), tbl.Biggest())
 			}
-			log.Fatal(sb.String())
+			panic(sb.String())
 		}
 	}
 }
@@ -143,7 +145,7 @@ func sortTables(tables []*table.Table) {
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
 func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, guard *epoch.Guard) {
 	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
-	assertTablesOrder(s.level, newTables)
+	assertTablesOrder(s.level, newTables, cd)
 
 	s.Lock() // We s.Unlock() below.
 
@@ -167,7 +169,7 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, g
 	tables = append(tables, cd.skippedTbls...)
 	tables = append(tables, s.tables[right:]...)
 	sortTables(tables)
-	assertTablesOrder(s.level, tables)
+	assertTablesOrder(s.level, tables, cd)
 	s.tables = tables
 	s.Unlock()
 	guard.Delete(toDelete)

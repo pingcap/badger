@@ -417,7 +417,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 		for i := len(newTables); i < len(lc.tables); i++ {
 			lc.tables[i] = nil
 		}
-		assertTablesOrder(level, newTables)
+		assertTablesOrder(level, newTables, nil)
 		lc.tables = newTables
 		lc.Unlock()
 	}
@@ -576,13 +576,13 @@ func (db *DB) Close() (err error) {
 	if db.opt.CompactL0WhenClose {
 		// Force Compact L0
 		// We don't need to care about cstatus since no parallel compaction is running.
-		cd := compactDef{
+		cd := &compactDef{
 			thisLevel: db.lc.levels[0],
 			nextLevel: db.lc.levels[1],
 		}
 		guard := db.resourceMgr.Acquire()
 		defer guard.Done()
-		if db.lc.fillTablesL0(&cd) {
+		if db.lc.fillTablesL0(cd) {
 			if err := db.lc.runCompactDef(0, cd, nil, guard); err != nil {
 				log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
 			}

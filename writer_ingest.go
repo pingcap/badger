@@ -137,12 +137,12 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints [][]byte) error {
 }
 
 func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingTables []*table.Table, splitHints [][]byte, guard *epoch.Guard) error {
-	cd := compactDef{
+	cd := &compactDef{
 		nextLevel: w.lc.levels[level],
 		top:       []*table.Table{tbl},
 		nextRange: getKeyRange(overlappingTables),
 	}
-	w.lc.fillBottomTables(&cd, overlappingTables)
+	w.lc.fillBottomTables(cd, overlappingTables)
 	newTables, err := w.lc.compactBuildTables(level-1, cd, w.limiter, splitHints)
 	if err != nil {
 		return err
@@ -159,7 +159,7 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 	if err := w.manifest.addChanges(changes, nil); err != nil {
 		return err
 	}
-	cd.nextLevel.replaceTables(newTables, &cd, guard)
+	cd.nextLevel.replaceTables(newTables, cd, guard)
 	return nil
 }
 

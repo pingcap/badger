@@ -188,30 +188,31 @@ func (lc *levelsController) runWorker(c *y.Closer, scorePriority bool) {
 	}
 
 	time.Sleep(time.Duration(rand.Int31n(1000)) * time.Millisecond)
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
 
 	for {
 		select {
-		// Can add a done channel or other stuff.
-		case <-ticker.C:
-			guard := lc.resourceMgr.Acquire()
-			prios := lc.pickCompactLevels()
-			if scorePriority {
-				sort.Slice(prios, func(i, j int) bool {
-					return prios[i].score > prios[j].score
-				})
-			}
-			for _, p := range prios {
-				// TODO: Handle error.
-				didCompact, _ := lc.doCompact(p, guard)
-				if didCompact {
-					break
-				}
-			}
-			guard.Done()
 		case <-c.HasBeenClosed():
 			return
+		default:
+		}
+		guard := lc.resourceMgr.Acquire()
+		prios := lc.pickCompactLevels()
+		if scorePriority {
+			sort.Slice(prios, func(i, j int) bool {
+				return prios[i].score > prios[j].score
+			})
+		}
+		var didCompact bool
+		for _, p := range prios {
+			// TODO: Handle error.
+			didCompact, _ = lc.doCompact(p, guard)
+			if didCompact {
+				break
+			}
+		}
+		guard.Done()
+		if !didCompact {
+			time.Sleep(time.Second * 3)
 		}
 	}
 }
@@ -270,7 +271,7 @@ func (lc *levelsController) pickCompactLevels() (prios []compactionPriority) {
 	return prios
 }
 
-func (lc *levelsController) hasOverlapTable(cd compactDef) bool {
+func (lc *levelsController) hasOverlapTable(cd *compactDef) bool {
 	kr := getKeyRange(cd.top)
 	for i := cd.nextLevel.level + 1; i < len(lc.levels); i++ {
 		lh := lc.levels[i]
@@ -355,7 +356,7 @@ func overSkipTables(key []byte, skippedTables []*table.Table) (newSkippedTables 
 }
 
 // compactBuildTables merge topTables and botTables to form a list of new tables.
-func (lc *levelsController) compactBuildTables(level int, cd compactDef,
+func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 	limiter *rate.Limiter, splitHints [][]byte) (newTables []*table.Table, err error) {
 	topTables := cd.top
 	botTables := cd.bot
@@ -372,8 +373,7 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	if level == 0 {
 		iters = appendIteratorsReversed(iters, topTables, false)
 	} else {
-		y.Assert(len(topTables) == 1)
-		iters = []y.Iterator{topTables[0].NewIterator(false)}
+		iters = []y.Iterator{table.NewConcatIterator(topTables, false)}
 	}
 
 	// Next level has level>=1 and we can use ConcatIterator as key ranges do not overlap.
@@ -399,7 +399,6 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 	var builder *table.Builder
 	var bytesRead, bytesWrite, numRead, numWrite int
 	for it.Valid() {
-		timeStart := time.Now()
 		fileID := lc.reserveFileID()
 		filename := table.NewFilename(fileID, lc.kv.opt.Dir)
 		var fd *os.File
@@ -490,7 +489,6 @@ func (lc *levelsController) compactBuildTables(level int, cd compactDef,
 		}
 		// It was true that it.Valid() at least once in the loop above, which means we
 		// called Add() at least once, and builder is not Empty().
-		log.Infof("LOG Compact. Iteration took: %v", time.Since(timeStart))
 		if err = builder.Finish(); err != nil {
 			return
 		}
@@ -559,7 +557,18 @@ type compactDef struct {
 	thisRange keyRange
 	nextRange keyRange
 
-	thisSize int64
+	topSize     int64
+	topLeftIdx  int
+	topRightIdx int
+	botSize     int64
+	botLeftIdx  int
+	botRightIdx int
+}
+
+func (cd *compactDef) String() string {
+	return fmt.Sprintf("%d top:[%d:%d](%d), bot:[%d:%d](%d), skip:%d, write_amp:%.2f",
+		cd.thisLevel.level, cd.topLeftIdx, cd.topRightIdx, cd.topSize,
+		cd.botLeftIdx, cd.botRightIdx, cd.botSize, len(cd.skippedTbls), float64(cd.topSize+cd.botSize)/float64(cd.topSize))
 }
 
 func (cd *compactDef) lockLevels() {
@@ -608,13 +617,22 @@ func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 
 	cd.top = make([]*table.Table, len(cd.thisLevel.tables))
 	copy(cd.top, cd.thisLevel.tables)
+	for _, t := range cd.top {
+		cd.topSize += t.Size()
+	}
+	cd.topRightIdx = len(cd.top)
 
 	cd.thisRange = infRange
 
 	kr := getKeyRange(cd.top)
 	left, right := cd.nextLevel.overlappingTables(levelHandlerRLocked{}, kr)
 	overlappingTables := cd.nextLevel.tables[left:right]
+	cd.botLeftIdx = left
+	cd.botRightIdx = right
 	lc.fillBottomTables(cd, overlappingTables)
+	for _, t := range cd.bot {
+		cd.botSize += t.Size()
+	}
 
 	if len(overlappingTables) == 0 { // the bottom-most level
 		cd.nextRange = kr
@@ -656,6 +674,8 @@ func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables [
 	}
 }
 
+const maxCompactionExpandSize = 1 << 30 // 1GB
+
 func (lc *levelsController) fillTables(cd *compactDef) bool {
 	cd.lockLevels()
 	defer cd.unlockLevels()
@@ -663,55 +683,138 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 	if len(cd.thisLevel.tables) == 0 {
 		return false
 	}
+	this := make([]*table.Table, len(cd.thisLevel.tables))
+	copy(this, cd.thisLevel.tables)
+	next := make([]*table.Table, len(cd.nextLevel.tables))
+	copy(next, cd.nextLevel.tables)
 
-	tbls := make([]*table.Table, len(cd.thisLevel.tables))
-	copy(tbls, cd.thisLevel.tables)
-
-	// Find the biggest table, and compact that first.
-	// TODO: Try other table picking strategies.
-	sort.Slice(tbls, func(i, j int) bool {
-		return tbls[i].Size() > tbls[j].Size()
-	})
-
-	for _, t := range tbls {
-		cd.thisSize = t.Size()
-		cd.thisRange = keyRange{
-			left:  t.Smallest(),
-			right: t.Biggest(),
-		}
-		if lc.cstatus.overlapsWith(cd.thisLevel.level, cd.thisRange) {
+	// First pick one table has max topSize/bottomSize ratio.
+	var candidateRatio float64
+	for i, t := range this {
+		if lc.isCompacting(cd.thisLevel.level, t) {
 			continue
 		}
-		cd.top = []*table.Table{t}
-		cd.bot = cd.bot[:0]
-		cd.skippedTbls = cd.skippedTbls[:0]
-		left, right := cd.nextLevel.overlappingTables(levelHandlerRLocked{}, cd.thisRange)
-		overlappingTables := cd.nextLevel.tables[left:right]
-		lc.fillBottomTables(cd, overlappingTables)
-
-		if len(overlappingTables) == 0 {
-			cd.bot = []*table.Table{}
-			cd.nextRange = cd.thisRange
-			if !lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd) {
-				continue
-			}
-			return true
-		}
-		cd.nextRange = getKeyRange(overlappingTables)
-
-		if lc.cstatus.overlapsWith(cd.nextLevel.level, cd.nextRange) {
+		left, right := getTablesInRange(next, t.Smallest(), t.Biggest())
+		if lc.isCompacting(cd.nextLevel.level, next[left:right]...) {
 			continue
 		}
-
-		if !lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd) {
-			continue
+		botSize := sumTableSize(next[left:right])
+		ratio := calcRatio(t.Size(), botSize)
+		if ratio > candidateRatio {
+			candidateRatio = ratio
+			cd.topLeftIdx = i
+			cd.topRightIdx = i + 1
+			cd.top = this[cd.topLeftIdx:cd.topRightIdx:cd.topRightIdx]
+			cd.topSize = t.Size()
+			cd.botLeftIdx = left
+			cd.botRightIdx = right
+			cd.botSize = botSize
 		}
-		return true
 	}
-	return false
+	if len(cd.top) == 0 {
+		return false
+	}
+	bots := next[cd.botLeftIdx:cd.botRightIdx:cd.botRightIdx]
+	// Expand to left to include more tops as long as the ratio doesn't decrease and the total size
+	// do not exceeds maxCompactionExpandSize.
+	for i := cd.topLeftIdx - 1; i >= 0; i-- {
+		t := this[i]
+		if lc.isCompacting(cd.thisLevel.level, t) {
+			break
+		}
+		left, right := getTablesInRange(next, t.Smallest(), t.Biggest())
+		if right < cd.botLeftIdx {
+			// A bottom table is skipped, we can compact in another run.
+			break
+		}
+		if lc.isCompacting(cd.nextLevel.level, next[left:cd.botLeftIdx]...) {
+			break
+		}
+		newTopSize := t.Size() + cd.topSize
+		newBotSize := sumTableSize(next[left:cd.botLeftIdx]) + cd.botSize
+		newRatio := calcRatio(newTopSize, newBotSize)
+		if newRatio > candidateRatio && (newTopSize+newBotSize) < maxCompactionExpandSize {
+			cd.top = append([]*table.Table{t}, cd.top...)
+			cd.topLeftIdx--
+			bots = append(next[left:cd.botLeftIdx:cd.botLeftIdx], bots...)
+			cd.botLeftIdx = left
+			cd.topSize = newTopSize
+			cd.botSize = newBotSize
+		} else {
+			break
+		}
+	}
+	// Expand to right to include more tops as long as the ratio doesn't decrease and the total size
+	// do not exceeds maxCompactionExpandSize.
+	for i := cd.topRightIdx; i < len(this); i++ {
+		t := this[i]
+		if lc.isCompacting(cd.thisLevel.level, t) {
+			break
+		}
+		left, right := getTablesInRange(next, t.Smallest(), t.Biggest())
+		if left > cd.botRightIdx {
+			// A bottom table is skipped, we can compact in another run.
+			break
+		}
+		if lc.isCompacting(cd.nextLevel.level, next[cd.botRightIdx:right]...) {
+			break
+		}
+		newTopSize := t.Size() + cd.topSize
+		newBotSize := sumTableSize(next[cd.botRightIdx:right]) + cd.botSize
+		newRatio := calcRatio(newTopSize, newBotSize)
+		if newRatio > candidateRatio && (newTopSize+newBotSize) < maxCompactionExpandSize {
+			cd.top = append(cd.top, t)
+			cd.topRightIdx++
+			bots = append(bots, next[cd.botRightIdx:right]...)
+			cd.botRightIdx = right
+			cd.topSize = newTopSize
+			cd.botSize = newBotSize
+		} else {
+			break
+		}
+	}
+	cd.thisRange = keyRange{left: cd.top[0].Smallest(), right: cd.top[len(cd.top)-1].Biggest()}
+	if len(bots) > 0 {
+		cd.nextRange = keyRange{left: bots[0].Smallest(), right: bots[len(bots)-1].Biggest()}
+	} else {
+		cd.nextRange = cd.thisRange
+	}
+	lc.fillBottomTables(cd, bots)
+	for _, t := range cd.skippedTbls {
+		cd.botSize -= t.Size()
+	}
+	return lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd)
 }
 
-func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Limiter, guard *epoch.Guard) error {
+func sumTableSize(tables []*table.Table) int64 {
+	var size int64
+	for _, t := range tables {
+		size += t.Size()
+	}
+	return size
+}
+
+func calcRatio(topSize, botSize int64) float64 {
+	if botSize == 0 {
+		return float64(topSize)
+	}
+	return float64(topSize) / float64(botSize)
+}
+
+func (lc *levelsController) isCompacting(level int, tables ...*table.Table) bool {
+	if len(tables) == 0 {
+		return false
+	}
+	kr := keyRange{
+		left:  tables[0].Smallest(),
+		right: tables[len(tables)-1].Biggest(),
+	}
+	y.Assert(len(kr.left) > 0)
+	y.Assert(len(kr.right) > 0)
+	return lc.cstatus.overlapsWith(level, kr)
+}
+
+func (lc *levelsController) runCompactDef(l int, cd *compactDef, limiter *rate.Limiter, guard *epoch.Guard) error {
 	timeStart := time.Now()
 
 	thisLevel := cd.thisLevel
@@ -732,9 +835,10 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 	if l > 0 && len(cd.bot) == 0 && len(cd.skippedTbls) == 0 {
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.top
-		changeSet = protos.ManifestChangeSet{Changes: []*protos.ManifestChange{
-			newMoveDownChange(newTables[0].ID(), cd.nextLevel.level),
-		}}
+		changeSet = protos.ManifestChangeSet{}
+		for _, t := range newTables {
+			changeSet.Changes = append(changeSet.Changes, newMoveDownChange(t.ID(), cd.nextLevel.level))
+		}
 		topMove = true
 	} else {
 		var err error
@@ -742,7 +846,7 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 		if err != nil {
 			return err
 		}
-		changeSet = buildChangeSet(&cd, newTables)
+		changeSet = buildChangeSet(cd, newTables)
 	}
 
 	// We write to the manifest _before_ we delete files (and after we created files)
@@ -752,14 +856,14 @@ func (lc *levelsController) runCompactDef(l int, cd compactDef, limiter *rate.Li
 
 	// See comment earlier in this function about the ordering of these ops, and the order in which
 	// we access levels when reading.
-	nextLevel.replaceTables(newTables, &cd, guard)
+	nextLevel.replaceTables(newTables, cd, guard)
 	thisLevel.deleteTables(cd.top, guard, topMove)
 
 	// Note: For level 0, while doCompact is running, it is possible that new tables are added.
 	// However, the tables are added only to the end, so it is ok to just delete the first table.
 
-	log.Infof("LOG Compact %d->%d, del %d tables, add %d tables, took %v",
-		l, l+1, len(cd.top)+len(cd.bot), len(newTables), time.Since(timeStart))
+	log.Infof("LOG Compact %s, del %d tables, add %d tables, took %v",
+		cd, len(cd.top)+len(cd.bot), len(newTables), time.Since(timeStart))
 	return nil
 }
 
@@ -768,7 +872,7 @@ func (lc *levelsController) doCompact(p compactionPriority, guard *epoch.Guard) 
 	l := p.level
 	y.Assert(l+1 < lc.kv.opt.TableBuilderOptions.MaxLevels) // Sanity check.
 
-	cd := compactDef{
+	cd := &compactDef{
 		thisLevel: lc.levels[l],
 		nextLevel: lc.levels[l+1],
 	}
@@ -778,19 +882,19 @@ func (lc *levelsController) doCompact(p compactionPriority, guard *epoch.Guard) 
 	// While picking tables to be compacted, both levels' tables are expected to
 	// remain unchanged.
 	if l == 0 {
-		if !lc.fillTablesL0(&cd) {
+		if !lc.fillTablesL0(cd) {
 			log.Infof("fillTables failed for level: %d", l)
 			return false, nil
 		}
 	} else {
-		if !lc.fillTables(&cd) {
+		if !lc.fillTables(cd) {
 			log.Infof("fillTables failed for level: %d", l)
 			return false, nil
 		}
 	}
 	defer lc.cstatus.delete(cd) // Remove the ranges from compaction status.
 
-	log.Infof("Running compaction: %d", cd.thisLevel.level)
+	log.Infof("Running compaction: %s", cd)
 	if err := lc.runCompactDef(l, cd, lc.kv.limiter, guard); err != nil {
 		// This compaction couldn't be done successfully.
 		log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)

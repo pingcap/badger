@@ -164,12 +164,12 @@ func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd compactDef)
 
 	thisLevel.ranges = append(thisLevel.ranges, cd.thisRange)
 	nextLevel.ranges = append(nextLevel.ranges, cd.nextRange)
-	thisLevel.deltaSize += cd.thisSize
+	thisLevel.deltaSize += cd.topSize
 	cd.markTablesCompacting()
 	return true
 }
 
-func (cs *compactStatus) delete(cd compactDef) {
+func (cs *compactStatus) delete(cd *compactDef) {
 	cs.Lock()
 	defer cs.Unlock()
 
@@ -179,7 +179,7 @@ func (cs *compactStatus) delete(cd compactDef) {
 	thisLevel := cs.levels[level]
 	nextLevel := cs.levels[level+1]
 
-	thisLevel.deltaSize -= cd.thisSize
+	thisLevel.deltaSize -= cd.topSize
 	found := thisLevel.remove(cd.thisRange)
 	found = nextLevel.remove(cd.nextRange) && found
 
