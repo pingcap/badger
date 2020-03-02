@@ -80,6 +80,7 @@ func (w *writeWorker) runFlusher(lc *y.Closer) {
 			}
 			w.writeLSMCh <- t
 		case <-lc.HasBeenClosed():
+			close(w.writeLSMCh)
 			return
 		}
 	}
@@ -164,16 +165,15 @@ func (w *writeWorker) closeWriteVLog() {
 	if err != nil {
 		w.done(reqs, err)
 	} else {
-		if err := w.vlog.curWriter.Sync(); err != nil {
-			w.done(reqs, err)
-		} else {
-			w.writeLSMCh <- postLogTask{
-				logFile: w.vlog.currentLogFile().fd,
-				reqs:    reqs,
-			}
-		}
+		err = w.vlog.curWriter.Sync()
+		// The store is closed, we don't need to write LSM.
+		w.done(reqs, err)
 	}
-	close(w.writeLSMCh)
+	if !w.opt.SyncWrites {
+		close(w.writeLSMCh)
+	} else {
+		// The channel would be closed by the flusher.
+	}
 }
 
 // writeLSM is called serially by only one goroutine.
