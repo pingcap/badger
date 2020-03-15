@@ -114,9 +114,9 @@ func assertTablesOrder(level int, tables []*table.Table, cd *compactDef) {
 	}
 
 	for i := 0; i < len(tables)-1; i++ {
-		if y.CompareKeysWithVer(tables[i].Smallest(), tables[i].Biggest()) > 0 ||
-			y.CompareKeysWithVer(tables[i].Smallest(), tables[i+1].Smallest()) >= 0 ||
-			y.CompareKeysWithVer(tables[i].Biggest(), tables[i+1].Biggest()) >= 0 {
+		if tables[i].Smallest().Compare(tables[i].Biggest()) > 0 ||
+			tables[i].Smallest().Compare(tables[i+1].Smallest()) >= 0 ||
+			tables[i].Biggest().Compare(tables[i+1].Biggest()) >= 0 {
 
 			var sb strings.Builder
 			if cd != nil {
@@ -137,7 +137,7 @@ func assertTablesOrder(level int, tables []*table.Table, cd *compactDef) {
 
 func sortTables(tables []*table.Table) {
 	sort.Slice(tables, func(i, j int) bool {
-		return y.CompareKeysWithVer(tables[i].Smallest(), tables[j].Smallest()) < 0
+		return tables[i].Smallest().Compare(tables[j].Smallest()) < 0
 	})
 }
 
@@ -223,7 +223,7 @@ func (s *levelHandler) addTable(t *table.Table) {
 	}
 
 	i := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeysWithVer(s.tables[i].Smallest(), t.Biggest()) >= 0
+		return s.tables[i].Smallest().Compare(t.Biggest()) >= 0
 	})
 	if i == len(s.tables) {
 		s.tables = append(s.tables, t)
@@ -252,7 +252,7 @@ func (s *levelHandler) close() error {
 }
 
 // getTablesForKey acquires a read-lock to access s.tables. It returns a list of tables.
-func (s *levelHandler) getTablesForKey(key []byte) []*table.Table {
+func (s *levelHandler) getTablesForKey(key y.Key) []*table.Table {
 	s.RLock()
 	defer s.RUnlock()
 
@@ -293,10 +293,10 @@ func (s *levelHandler) getLevel0Tables() []*table.Table {
 	return out
 }
 
-func (s *levelHandler) getLevelNTable(key []byte) *table.Table {
+func (s *levelHandler) getLevelNTable(key y.Key) *table.Table {
 	// For level >= 1, we can do a binary search as key range does not overlap.
 	idx := sort.Search(len(s.tables), func(i int) bool {
-		return y.CompareKeysWithVer(s.tables[i].Biggest(), key) >= 0
+		return s.tables[i].Biggest().Compare(key) >= 0
 	})
 	if idx >= len(s.tables) {
 		// Given key is strictly > than every element we have.
@@ -307,12 +307,12 @@ func (s *levelHandler) getLevelNTable(key []byte) *table.Table {
 }
 
 // get returns value for a given key or the key after that. If not found, return nil.
-func (s *levelHandler) get(key []byte, keyHash uint64) y.ValueStruct {
+func (s *levelHandler) get(key y.Key, keyHash uint64) y.ValueStruct {
 	tables := s.getTablesForKey(key)
 	return s.getInTables(key, keyHash, tables)
 }
 
-func (s *levelHandler) getInTables(key []byte, keyHash uint64, tables []*table.Table) y.ValueStruct {
+func (s *levelHandler) getInTables(key y.Key, keyHash uint64, tables []*table.Table) y.ValueStruct {
 	for _, table := range tables {
 		result := s.getInTable(key, keyHash, table)
 		if result.Valid() {
@@ -322,7 +322,7 @@ func (s *levelHandler) getInTables(key []byte, keyHash uint64, tables []*table.T
 	return y.ValueStruct{}
 }
 
-func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table) (result y.ValueStruct) {
+func (s *levelHandler) getInTable(key y.Key, keyHash uint64, table *table.Table) (result y.ValueStruct) {
 	s.metrics.NumLSMGets.Inc()
 	resultKey, resultVs, ok := table.PointGet(key, keyHash)
 	if !ok {
@@ -332,17 +332,17 @@ func (s *levelHandler) getInTable(key []byte, keyHash uint64, table *table.Table
 			s.metrics.NumLSMBloomFalsePositive.Inc()
 			return
 		}
-		if !y.SameKey(key, it.Key()) {
+		if !key.SameUserKey(it.Key()) {
 			s.metrics.NumLSMBloomFalsePositive.Inc()
 			return
 		}
 		resultKey, resultVs = it.Key(), it.Value()
-	} else if resultKey == nil {
+	} else if resultKey.IsEmpty() {
 		s.metrics.NumLSMBloomFalsePositive.Inc()
 		return
 	}
 	result = resultVs
-	result.Version = y.ParseTs(resultKey)
+	result.Version = resultKey.Version
 	return
 }
 
@@ -362,7 +362,7 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 			if pair.found {
 				continue
 			}
-			if y.CompareKeysWithVer(pair.key, table.Smallest()) < 0 || y.CompareKeysWithVer(pair.key, table.Biggest()) > 0 {
+			if pair.key.Compare(table.Smallest()) < 0 || pair.key.Compare(table.Biggest()) > 0 {
 				continue
 			}
 			val := s.getInTable(pair.key, pair.hash, table)
@@ -394,7 +394,7 @@ func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Tabl
 
 // appendIterators appends iterators to an array of iterators, for merging.
 // Note: This obtains references for the table handlers. Remember to close these iterators.
-func (s *levelHandler) appendIterators(iters []y.Iterator, opts IteratorOptions) []y.Iterator {
+func (s *levelHandler) appendIterators(iters []y.Iterator, opts *IteratorOptions) []y.Iterator {
 	s.RLock()
 	defer s.RUnlock()
 
@@ -425,12 +425,12 @@ func (s *levelHandler) overlappingTables(_ levelHandlerRLocked, kr keyRange) (in
 	return getTablesInRange(s.tables, kr.left, kr.right)
 }
 
-func getTablesInRange(tbls []*table.Table, start, end []byte) (int, int) {
+func getTablesInRange(tbls []*table.Table, start, end y.Key) (int, int) {
 	left := sort.Search(len(tbls), func(i int) bool {
-		return y.CompareKeysWithVer(start, tbls[i].Biggest()) <= 0
+		return start.Compare(tbls[i].Biggest()) <= 0
 	})
 	right := sort.Search(len(tbls), func(i int) bool {
-		return y.CompareKeysWithVer(end, tbls[i].Smallest()) < 0
+		return end.Compare(tbls[i].Smallest()) < 0
 	})
 	return left, right
 }

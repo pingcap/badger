@@ -17,6 +17,8 @@
 package skl
 
 import (
+	"encoding/binary"
+	"math"
 	"sync/atomic"
 	"unsafe"
 
@@ -88,12 +90,13 @@ func (s *Arena) putVal(v y.ValueStruct) uint32 {
 	return m
 }
 
-func (s *Arena) putKey(key []byte) uint32 {
-	l := uint32(len(key))
+func (s *Arena) putKey(key y.Key) uint32 {
+	l := uint32(key.Len())
 	n := atomic.AddUint32(&s.n, l)
 	y.Assert(int(n) <= len(s.buf))
 	m := n - l
-	y.Assert(len(key) == copy(s.buf[m:n], key))
+	copy(s.buf[m:], key.UserKey)
+	binary.BigEndian.PutUint64(s.buf[n-8:], math.MaxUint64-key.Version)
 	return m
 }
 
@@ -108,8 +111,11 @@ func (s *Arena) getNode(offset uint32) *node {
 }
 
 // getKey returns byte slice at offset.
-func (s *Arena) getKey(offset uint32, size uint16) []byte {
-	return s.buf[offset : offset+uint32(size)]
+func (s *Arena) getKey(offset uint32, size uint16) (k y.Key) {
+	rawKey := s.buf[offset : offset+uint32(size)]
+	k.UserKey = rawKey[:len(rawKey)-8]
+	k.Version = math.MaxUint64 - binary.BigEndian.Uint64(rawKey[len(rawKey)-8:])
+	return
 }
 
 // getVal returns byte slice at offset. The given size should be just the value

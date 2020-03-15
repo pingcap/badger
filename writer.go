@@ -215,7 +215,7 @@ func newEntry(entry *Entry) table.Entry {
 			Value:    entry.Value,
 			Meta:     entry.meta,
 			UserMeta: entry.UserMeta,
-			Version:  y.ParseTs(entry.Key),
+			Version:  entry.Key.Version,
 		},
 	}
 }

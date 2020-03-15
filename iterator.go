@@ -33,13 +33,12 @@ import (
 type Item struct {
 	err      error
 	db       *DB
-	key      []byte
+	key      y.Key
 	vptr     []byte
 	meta     byte // We need to store meta to know about bitValuePointer.
 	userMeta []byte
 	slice    *y.Slice
 	next     *Item
-	version  uint64
 	txn      *Txn
 }
 
@@ -53,19 +52,19 @@ func (item *Item) String() string {
 // Key is only valid as long as item is valid, or transaction is valid.  If you need to use it
 // outside its validity, please use KeyCopy
 func (item *Item) Key() []byte {
-	return item.key
+	return item.key.UserKey
 }
 
 // KeyCopy returns a copy of the key of the item, writing it to dst slice.
 // If nil is passed, or capacity of dst isn't sufficient, a new slice would be allocated and
 // returned.
 func (item *Item) KeyCopy(dst []byte) []byte {
-	return y.SafeCopy(dst, item.key)
+	return y.SafeCopy(dst, item.key.UserKey)
 }
 
 // Version returns the commit timestamp of the item.
 func (item *Item) Version() uint64 {
-	return item.version
+	return item.key.Version
 }
 
 // IsEmpty checks if the value is empty.
@@ -142,7 +141,7 @@ func (item *Item) EstimatedSize() int64 {
 	if !item.hasValue() {
 		return 0
 	}
-	return int64(len(item.key) + len(item.vptr))
+	return int64(item.key.Len() + len(item.vptr))
 }
 
 // UserMeta returns the userMeta set by the user. Typically, this byte, optionally set by the user
@@ -162,17 +161,15 @@ type IteratorOptions struct {
 	AllVersions bool // Fetch all valid versions of the same key.
 
 	// StartKey and EndKey are used to prune non-overlapping table iterators.
-	// They are not boundary limits.
-	StartKey       []byte
-	startKeyWithTS []byte
-	EndKey         []byte
-	endKeyWithTS   []byte
+	// They are not boundary limits, the EndKey is exclusive.
+	StartKey y.Key
+	EndKey   y.Key
 
 	internalAccess bool // Used to allow internal access to badger keys.
 }
 
 func (opts *IteratorOptions) hasRange() bool {
-	return len(opts.startKeyWithTS) > 0 && len(opts.endKeyWithTS) > 0
+	return !opts.StartKey.IsEmpty() && !opts.EndKey.IsEmpty()
 }
 
 func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
@@ -182,10 +179,10 @@ func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
 	if !opts.hasRange() {
 		return true
 	}
-	if y.CompareKeysWithVer(opts.endKeyWithTS, it.entries[0].Key) <= 0 {
+	if opts.EndKey.Compare(it.entries[0].Key) <= 0 {
 		return false
 	}
-	if y.CompareKeysWithVer(opts.startKeyWithTS, it.entries[len(it.entries)-1].Key) > 0 {
+	if opts.StartKey.Compare(it.entries[len(it.entries)-1].Key) > 0 {
 		return false
 	}
 	return true
@@ -199,11 +196,11 @@ func (opts *IteratorOptions) OverlapMemTable(t *table.MemTable) bool {
 		return true
 	}
 	iter := t.NewIterator(false)
-	iter.Seek(opts.startKeyWithTS)
+	iter.Seek(opts.StartKey)
 	if !iter.Valid() {
 		return false
 	}
-	if y.CompareKeysWithVer(iter.Key(), opts.endKeyWithTS) >= 0 {
+	if iter.Key().Compare(opts.EndKey) >= 0 {
 		return false
 	}
 	return true
@@ -213,7 +210,7 @@ func (opts *IteratorOptions) OverlapTable(t *table.Table) bool {
 	if !opts.hasRange() {
 		return true
 	}
-	return t.HasOverlap(opts.startKeyWithTS, opts.endKeyWithTS, false)
+	return t.HasOverlap(opts.StartKey, opts.EndKey, false)
 }
 
 func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table {
@@ -225,7 +222,7 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 	}
 	startIdx := sort.Search(len(tables), func(i int) bool {
 		t := tables[i]
-		return y.CompareKeysWithVer(opts.startKeyWithTS, t.Biggest()) <= 0
+		return opts.StartKey.Compare(t.Biggest()) <= 0
 	})
 	if startIdx == len(tables) {
 		return nil
@@ -233,7 +230,7 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 	tables = tables[startIdx:]
 	endIdx := sort.Search(len(tables), func(i int) bool {
 		t := tables[i]
-		return y.CompareKeysWithVer(t.Smallest(), opts.endKeyWithTS) >= 0
+		return t.Smallest().Compare(opts.EndKey) >= 0
 	})
 	tables = tables[:endIdx]
 	overlapTables := make([]*table.Table, 0, 8)
@@ -262,7 +259,7 @@ type Iterator struct {
 	itBuf Item
 	vs    y.ValueStruct
 
-	lastKey []byte // Used to skip over multiple versions of the same key.
+	lastUserKey []byte // Used to skip over multiple versions of the same key.
 }
 
 // NewIterator returns a new iterator. Depending upon the options, either only keys, or both
@@ -272,11 +269,11 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 	atomic.AddInt32(&txn.numIterators, 1)
 
 	tables := txn.db.getMemTables()
-	if len(opt.StartKey) > 0 {
-		opt.startKeyWithTS = y.KeyWithTs(opt.StartKey, math.MaxUint64)
+	if !opt.StartKey.IsEmpty() {
+		opt.StartKey.Version = math.MaxUint64
 	}
-	if len(opt.EndKey) > 0 {
-		opt.endKeyWithTS = y.KeyWithTs(opt.EndKey, math.MaxUint64)
+	if !opt.EndKey.IsEmpty() {
+		opt.EndKey.Version = math.MaxUint64
 	}
 	var iters []y.Iterator
 	if itr := txn.newPendingWritesIterator(opt.Reverse); opt.OverlapPending(itr) {
@@ -287,7 +284,7 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 			iters = append(iters, tables[i].NewIterator(opt.Reverse))
 		}
 	}
-	iters = txn.db.lc.appendIterators(iters, opt) // This will increment references.
+	iters = txn.db.lc.appendIterators(iters, &opt) // This will increment references.
 	res := &Iterator{
 		txn:    txn,
 		iitr:   table.NewMergeIterator(iters, opt.Reverse),
@@ -317,7 +314,7 @@ func (it *Iterator) Valid() bool { return it.item != nil }
 // ValidForPrefix returns false when iteration is done
 // or when the current key is not prefixed by the specified prefix.
 func (it *Iterator) ValidForPrefix(prefix []byte) bool {
-	return it.item != nil && bytes.HasPrefix(it.item.key, prefix)
+	return it.item != nil && bytes.HasPrefix(it.item.key.UserKey, prefix)
 }
 
 // Close would close the iterator. It is important to call this when you're done with iteration.
@@ -340,23 +337,21 @@ func (it *Iterator) Next() {
 func (it *Iterator) parseItemForward() {
 	iitr := it.iitr
 	for iitr.Valid() {
-		keyWithTS := iitr.Key()
-		if !it.opt.internalAccess && keyWithTS[0] == '!' {
+		key := iitr.Key()
+		if !it.opt.internalAccess && key.UserKey[0] == '!' {
 			iitr.Next()
 			continue
 		}
-		version := y.ParseTs(keyWithTS)
-		if version > it.readTs {
+		if key.Version > it.readTs {
 			iitr.Next()
 			continue
 		}
-		key := y.ParseKey(keyWithTS)
 		if !it.opt.AllVersions {
-			if possibleSameKey(it.lastKey, key) && bytes.Equal(it.lastKey, key) {
+			if possibleSameKey(it.lastUserKey, key.UserKey) && bytes.Equal(it.lastUserKey, key.UserKey) {
 				iitr.Next()
 				continue
 			}
-			it.lastKey = y.SafeCopy(it.lastKey, key)
+			it.lastUserKey = y.SafeCopy(it.lastUserKey, key.UserKey)
 			iitr.FillValue(&it.vs)
 			if isDeleted(it.vs.Meta) {
 				iitr.Next()
@@ -366,7 +361,6 @@ func (it *Iterator) parseItemForward() {
 			iitr.FillValue(&it.vs)
 		}
 		item := &it.itBuf
-		item.version = version
 		item.key = key
 		item.meta = it.vs.Meta
 		item.userMeta = it.vs.UserMeta
@@ -407,14 +401,13 @@ func (it *Iterator) parseItemReverseOnce() bool {
 	key := mi.Key()
 
 	// Skip badger keys.
-	if !it.opt.internalAccess && key[0] == '!' {
+	if !it.opt.internalAccess && key.UserKey[0] == '!' {
 		mi.Next()
 		return false
 	}
 
 	// Skip any versions which are beyond the readTs.
-	version := y.ParseTs(key)
-	if version > it.readTs {
+	if key.Version > it.readTs {
 		mi.Next()
 		return false
 	}
@@ -450,9 +443,8 @@ FILL:
 	}
 
 	// Reverse direction.
-	nextTs := y.ParseTs(mi.Key())
-	mik := y.ParseKey(mi.Key())
-	if nextTs <= it.readTs && bytes.Equal(mik, item.key) {
+	mik := mi.Key()
+	if mik.Version <= it.readTs && mik.SameUserKey(item.key) {
 		// This is a valid potential candidate.
 		goto FILL
 	}
@@ -463,11 +455,8 @@ FILL:
 
 func (it *Iterator) fill(item *Item) {
 	item.meta = it.vs.Meta
-	item.userMeta = it.vs.UserMeta
-
-	key := it.iitr.Key()
-	item.version = y.ParseTs(key)
-	item.key = y.SafeCopy(item.key, y.ParseKey(key))
+	item.userMeta = y.SafeCopy(item.userMeta, it.vs.UserMeta)
+	item.key.Copy(it.iitr.Key())
 	item.vptr = y.SafeCopy(item.vptr, it.vs.Value)
 }
 
@@ -486,10 +475,9 @@ func (it *Iterator) parseItemReverse() {
 // greater than provided if iterating in the forward direction. Behavior would be reversed is
 // iterating backwards.
 func (it *Iterator) Seek(key []byte) {
-	it.lastKey = it.lastKey[:0]
+	it.lastUserKey = it.lastUserKey[:0]
 	if !it.opt.Reverse {
-		key = y.KeyWithTs(key, it.txn.readTs)
-		it.iitr.Seek(key)
+		it.iitr.Seek(y.KeyWithTs(key, it.txn.readTs))
 		it.parseItemForward()
 		return
 	}
@@ -499,8 +487,7 @@ func (it *Iterator) Seek(key []byte) {
 		it.parseItemReverse()
 		return
 	}
-	key = y.KeyWithTs(key, 0)
-	it.iitr.Seek(key)
+	it.iitr.Seek(y.KeyWithTs(key, 0))
 	it.parseItemReverse()
 }
 
@@ -508,7 +495,7 @@ func (it *Iterator) Seek(key []byte) {
 // smallest key if iterating forward, and largest if iterating backward. It does not keep track of
 // whether the cursor started with a Seek().
 func (it *Iterator) Rewind() {
-	it.lastKey = it.lastKey[:0]
+	it.lastUserKey = it.lastUserKey[:0]
 	if !it.opt.Reverse {
 		it.iitr.Rewind()
 		it.parseItemForward()

@@ -27,7 +27,6 @@ import (
 
 	"github.com/coocood/badger"
 	"github.com/coocood/badger/table"
-	"github.com/coocood/badger/y"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 )
@@ -82,10 +81,8 @@ func tableInfo(dir, valueDir string) error {
 
 	tables := db.Tables()
 	for _, t := range tables {
-		lk, lv := y.ParseKey(t.Left), y.ParseTs(t.Left)
-		rk, rv := y.ParseKey(t.Right), y.ParseTs(t.Right)
-		fmt.Printf("SSTable [L%d, %03d] [%20X, v%-10d -> %20X, v%-10d]\n",
-			t.Level, t.ID, lk, lv, rk, rv)
+		fmt.Printf("SSTable [L%d, %03d] [%20X -> %20X]\n",
+			t.Level, t.ID, t.Left, t.Right)
 	}
 	return nil
 }

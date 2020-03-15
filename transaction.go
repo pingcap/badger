@@ -18,6 +18,7 @@ package badger
 
 import (
 	"bytes"
+	"github.com/ngaut/log"
 	"math"
 	"sort"
 	"strconv"
@@ -176,10 +177,9 @@ func (pi *pendingWritesIterator) Rewind() {
 	pi.nextIdx = 0
 }
 
-func (pi *pendingWritesIterator) Seek(key []byte) {
-	key = y.ParseKey(key)
+func (pi *pendingWritesIterator) Seek(key y.Key) {
 	pi.nextIdx = sort.Search(len(pi.entries), func(idx int) bool {
-		cmp := bytes.Compare(pi.entries[idx].Key, key)
+		cmp := pi.entries[idx].Key.Compare(key)
 		if !pi.reversed {
 			return cmp >= 0
 		}
@@ -187,10 +187,10 @@ func (pi *pendingWritesIterator) Seek(key []byte) {
 	})
 }
 
-func (pi *pendingWritesIterator) Key() []byte {
+func (pi *pendingWritesIterator) Key() y.Key {
 	y.Assert(pi.Valid())
 	entry := pi.entries[pi.nextIdx]
-	return y.KeyWithTs(entry.Key, pi.readTs)
+	return y.KeyWithTs(entry.Key.UserKey, pi.readTs)
 }
 
 func (pi *pendingWritesIterator) Value() y.ValueStruct {
@@ -226,7 +226,7 @@ func (txn *Txn) newPendingWritesIterator(reversed bool) *pendingWritesIterator {
 	}
 	// Number of pending writes per transaction shouldn't be too big in general.
 	sort.Slice(entries, func(i, j int) bool {
-		cmp := bytes.Compare(entries[i].Key, entries[j].Key)
+		cmp := entries[i].Key.Compare(entries[j].Key)
 		if !reversed {
 			return cmp < 0
 		}
@@ -259,7 +259,7 @@ func (txn *Txn) checkSize(e *Entry) error {
 // transaction.
 func (txn *Txn) Set(key, val []byte) error {
 	e := &Entry{
-		Key:   key,
+		Key:   y.KeyWithTs(key, 0),
 		Value: val,
 	}
 	return txn.SetEntry(e)
@@ -270,12 +270,12 @@ func (txn *Txn) Set(key, val []byte) error {
 // interpret the value or store other contextual bits corresponding to the
 // key-value pair.
 func (txn *Txn) SetWithMeta(key, val []byte, meta byte) error {
-	e := &Entry{Key: key, Value: val, UserMeta: []byte{meta}}
+	e := &Entry{Key: y.KeyWithTs(key, 0), Value: val, UserMeta: []byte{meta}}
 	return txn.SetEntry(e)
 }
 
 func (txn *Txn) SetWithMetaSlice(key, val, meta []byte) error {
-	e := &Entry{Key: key, Value: val, UserMeta: meta}
+	e := &Entry{Key: y.KeyWithTs(key, 0), Value: val, UserMeta: meta}
 	return txn.SetEntry(e)
 }
 
@@ -284,10 +284,10 @@ func (txn *Txn) modify(e *Entry) error {
 		return ErrReadOnlyTxn
 	} else if txn.discarded {
 		return ErrDiscardedTxn
-	} else if len(e.Key) == 0 {
+	} else if e.Key.IsEmpty() {
 		return ErrEmptyKey
-	} else if len(e.Key) > maxKeySize {
-		return exceedsMaxKeySizeError(e.Key)
+	} else if e.Key.Len() > maxKeySize {
+		return exceedsMaxKeySizeError(e.Key.UserKey)
 	} else if int64(len(e.Value)) > txn.db.opt.ValueLogFileSize {
 		return exceedsMaxValueSizeError(e.Value, txn.db.opt.ValueLogFileSize)
 	}
@@ -295,9 +295,9 @@ func (txn *Txn) modify(e *Entry) error {
 		return err
 	}
 
-	fp := farm.Fingerprint64(e.Key) // Avoid dealing with byte arrays.
+	fp := farm.Fingerprint64(e.Key.UserKey) // Avoid dealing with byte arrays.
 	txn.writes = append(txn.writes, fp)
-	txn.pendingWrites[string(e.Key)] = e
+	txn.pendingWrites[string(e.Key.UserKey)] = e
 	return nil
 }
 
@@ -312,7 +312,7 @@ func (txn *Txn) SetEntry(e *Entry) error {
 // see the deletion.
 func (txn *Txn) Delete(key []byte) error {
 	e := &Entry{
-		Key:  key,
+		Key:  y.KeyWithTs(key, 0),
 		meta: bitDelete,
 	}
 	return txn.modify(e)
@@ -329,7 +329,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 
 	item = new(Item)
 	if txn.update {
-		if e, has := txn.pendingWrites[string(key)]; has && bytes.Equal(key, e.Key) {
+		if e, has := txn.pendingWrites[string(key)]; has && bytes.Equal(key, e.Key.UserKey) {
 			if isDeleted(e.meta) {
 				return nil, ErrKeyNotFound
 			}
@@ -337,8 +337,8 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 			item.meta = e.meta
 			item.vptr = e.Value
 			item.userMeta = e.UserMeta
-			item.key = key
-			item.version = txn.readTs
+			item.key.UserKey = key
+			item.key.Version = txn.readTs
 			// We probably don't need to set db on item here.
 			return item, nil
 		}
@@ -351,14 +351,15 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	seek := y.KeyWithTs(key, txn.readTs)
 	vs := txn.db.get(seek)
 	if !vs.Valid() {
+		log.Info("not found a")
 		return nil, ErrKeyNotFound
 	}
 	if isDeleted(vs.Meta) {
 		return nil, ErrKeyNotFound
 	}
 
-	item.key = key
-	item.version = vs.Version
+	item.key.UserKey = key
+	item.key.Version = vs.Version
 	item.meta = vs.Meta
 	item.userMeta = vs.UserMeta
 	item.db = txn.db
@@ -368,7 +369,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 }
 
 type keyValuePair struct {
-	key   []byte
+	key   y.Key
 	hash  uint64
 	val   y.ValueStruct
 	found bool
@@ -396,8 +397,10 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 	for i, pair := range keyValuePairs {
 		if pair.found && !isDeleted(pair.val.Meta) {
 			items[i] = &Item{
-				key:      keys[i],
-				version:  pair.val.Version,
+				key: y.Key{
+					UserKey: keys[i],
+					Version: pair.val.Version,
+				},
 				meta:     pair.val.Meta,
 				userMeta: pair.val.UserMeta,
 				db:       txn.db,
@@ -459,7 +462,7 @@ func (txn *Txn) Commit() error {
 		entries = append(entries, e)
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return bytes.Compare(entries[i].Key, entries[j].Key) < 0
+		return entries[i].Key.Compare(entries[j].Key) < 0
 	})
 
 	state := txn.db.orc
@@ -472,7 +475,7 @@ func (txn *Txn) Commit() error {
 	for _, e := range entries {
 		// Suffix the keys with commit ts, so the key versions are sorted in
 		// descending order of commit timestamp.
-		e.Key = y.KeyWithTs(e.Key, commitTs)
+		e.Key.Version = commitTs
 	}
 	e := &Entry{
 		Key:   y.KeyWithTs(txnKey, commitTs),

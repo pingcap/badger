@@ -1278,16 +1278,16 @@ func TestShouldFinishFile(t *testing.T) {
 	}
 	guard := &Guard{Prefix: []byte("k"), MatchLen: 3, MinSize: 64}
 	for _, tt := range tests1 {
-		finish := shouldFinishFile(tt.key, tt.lastKey, guard, 100, 100)
+		finish := shouldFinishFile(y.KeyWithTs(tt.key, 0), y.KeyWithTs(tt.lastKey, 0), guard, 100, 100)
 		require.Equal(t, tt.finish, finish)
 	}
 	// A guard prefix change always finish the file even if the MinSize has not been reached.
-	require.Equal(t, shouldFinishFile([]byte("l11"), []byte("k11"), guard, 1, 100), true)
+	require.Equal(t, shouldFinishFile(y.KeyWithTs([]byte("l11"), 0), y.KeyWithTs([]byte("k11"), 0), guard, 1, 100), true)
 	// guard prefix match, but matchLen changed, must reach MinSize to finish file.
-	require.Equal(t, shouldFinishFile([]byte("k12"), []byte("k11"), guard, 1, 100), false)
-	require.Equal(t, shouldFinishFile([]byte("k12"), []byte("k11"), guard, 65, 100), true)
+	require.Equal(t, shouldFinishFile(y.KeyWithTs([]byte("k12"), 0), y.KeyWithTs([]byte("k11"), 0), guard, 1, 100), false)
+	require.Equal(t, shouldFinishFile(y.KeyWithTs([]byte("k12"), 0), y.KeyWithTs([]byte("k11"), 0), guard, 65, 100), true)
 	// table max size has reached always finish the file.
-	require.Equal(t, shouldFinishFile([]byte("k111"), []byte("k110"), guard, 33, 32), true)
+	require.Equal(t, shouldFinishFile(y.KeyWithTs([]byte("k111"), 0), y.KeyWithTs([]byte("k110"), 0), guard, 33, 32), true)
 }
 
 func TestIterateVLog(t *testing.T) {
@@ -1315,7 +1315,7 @@ func TestIterateVLog(t *testing.T) {
 	var iterKeys [][]byte
 	var iterVals [][]byte
 	err = db.IterateVLog(0, func(e Entry) {
-		key := y.SafeCopy(nil, y.ParseKey(e.Key))
+		key := y.SafeCopy(nil, e.Key.UserKey)
 		iterKeys = append(iterKeys, key)
 		iterVals = append(iterVals, y.SafeCopy(nil, e.Value))
 	})
@@ -1337,7 +1337,7 @@ func TestIterateVLog(t *testing.T) {
 	iterKeys = iterKeys[:0]
 	iterVals = iterVals[:0]
 	err = db.IterateVLog(offset, func(e Entry) {
-		key := y.SafeCopy(nil, y.ParseKey(e.Key))
+		key := y.SafeCopy(nil, e.Key.UserKey)
 		iterKeys = append(iterKeys, key)
 		iterVals = append(iterVals, y.SafeCopy(nil, e.Value))
 	})
@@ -1399,7 +1399,7 @@ func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
 	builder := table.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions, options.ZSTD)
 
 	for i, k := range keys {
-		err := builder.Add(k, y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})
+		err := builder.Add(y.KeyWithTs(k, 0), y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})
 		require.NoError(t, err)
 	}
 	require.NoError(t, builder.Finish())

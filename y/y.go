@@ -19,7 +19,9 @@ package y
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
+	"io"
 	"math"
 	"os"
 	"sync"
@@ -101,55 +103,22 @@ func Copy(a []byte) []byte {
 }
 
 // KeyWithTs generates a new key by appending ts to key.
-func KeyWithTs(key []byte, ts uint64) []byte {
-	out := make([]byte, len(key)+8)
-	copy(out, key)
-	binary.BigEndian.PutUint64(out[len(key):], math.MaxUint64-ts)
-	return out
-}
-
-// ParseTs parses the timestamp from the key bytes.
-func ParseTs(key []byte) uint64 {
-	if len(key) <= 8 {
-		return 0
+func KeyWithTs(key []byte, ts uint64) Key {
+	return Key{
+		UserKey: key,
+		Version: ts,
 	}
-	return math.MaxUint64 - binary.BigEndian.Uint64(key[len(key)-8:])
-}
-
-// CompareKeysWithVer checks the key without timestamp and checks the timestamp if keyNoTs
-// is same.
-// a<timestamp> would be sorted higher than aa<timestamp> if we use bytes.compare
-// All keys should have timestamp.
-func CompareKeysWithVer(key1 []byte, key2 []byte) int {
-	if len(key1) == len(key2) {
-		return bytes.Compare(key1, key2)
-	}
-	origKey1Len := len(key1) - 8
-	origkey2Len := len(key2) - 8
-	return bytes.Compare(key1[:origKey1Len], key2[:origkey2Len])
 }
 
 // ParseKey parses the actual key from the key bytes.
-func ParseKey(key []byte) []byte {
-	if key == nil {
-		return nil
+func ParseKey(keyBytes []byte) Key {
+	if keyBytes == nil {
+		return Key{}
 	}
-
-	return key[:len(key)-8]
-}
-
-// SameKey checks for key equality ignoring the version timestamp suffix.
-func SameKey(src, dst []byte) bool {
-	if len(src) != len(dst) {
-		return false
+	return Key{
+		UserKey: keyBytes[:len(keyBytes)-8],
+		Version: math.MaxUint64 - binary.BigEndian.Uint64(keyBytes[len(keyBytes)-8:]),
 	}
-	srcKey := ParseKey(src)
-	dstKey := ParseKey(dst)
-	lastIdx := len(srcKey) - 1
-	if srcKey[lastIdx] != dstKey[lastIdx] {
-		return false
-	}
-	return bytes.Equal(srcKey, dstKey)
 }
 
 // Slice holds a reusable buf, will reallocate if you request a larger size than ever before.
@@ -212,4 +181,74 @@ func (lc *Closer) Wait() {
 func (lc *Closer) SignalAndWait() {
 	lc.Signal()
 	lc.Wait()
+}
+
+// Key is the struct for user key with version.
+type Key struct {
+	UserKey []byte
+	Version uint64
+}
+
+func (k Key) Compare(k2 Key) int {
+	cmp := bytes.Compare(k.UserKey, k2.UserKey)
+	if cmp != 0 {
+		return cmp
+	}
+	if k.Version > k2.Version {
+		// Greater version is considered smaller because we need to iterate keys from newer to older.
+		return -1
+	} else if k.Version < k2.Version {
+		return 1
+	}
+	return 0
+}
+
+func (k Key) Equal(k2 Key) bool {
+	if !bytes.Equal(k.UserKey, k2.UserKey) {
+		return false
+	}
+	return k.Version == k2.Version
+}
+
+func (k Key) IsEmpty() bool {
+	return len(k.UserKey) == 0
+}
+
+func (k *Key) Copy(k2 Key) {
+	k.UserKey = append(k.UserKey[:0], k2.UserKey...)
+	k.Version = k2.Version
+}
+
+func (k *Key) Reset() {
+	k.UserKey = k.UserKey[:0]
+}
+
+func (k Key) Len() int {
+	return len(k.UserKey) + 8
+}
+
+func (k Key) AppendTo(buf []byte) []byte {
+	buf = append(buf, k.UserKey...)
+	var uBuf [8]byte
+	binary.BigEndian.PutUint64(uBuf[:], math.MaxUint64-k.Version)
+	return append(buf, uBuf[:]...)
+}
+
+func (k Key) WriteTo(w io.Writer) error {
+	_, err := w.Write(k.UserKey)
+	if err != nil {
+		return err
+	}
+	var uBuf [8]byte
+	binary.BigEndian.PutUint64(uBuf[:], math.MaxUint64-k.Version)
+	_, err = w.Write(uBuf[:])
+	return err
+}
+
+func (k Key) SameUserKey(k2 Key) bool {
+	return bytes.Equal(k.UserKey, k2.UserKey)
+}
+
+func (k Key) String() string {
+	return fmt.Sprintf("%x(%d)", k.UserKey, k.Version)
 }

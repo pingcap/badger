@@ -305,15 +305,15 @@ func (ds *DiscardStats) String() string {
 	return fmt.Sprintf("numSkips:%d, skippedBytes:%d", ds.numSkips, ds.skippedBytes)
 }
 
-func shouldFinishFile(key, lastKey []byte, guard *Guard, currentSize, maxSize int64) bool {
-	if len(lastKey) == 0 {
+func shouldFinishFile(key, lastKey y.Key, guard *Guard, currentSize, maxSize int64) bool {
+	if lastKey.IsEmpty() {
 		return false
 	}
 	if guard != nil {
-		if !bytes.HasPrefix(key, guard.Prefix) {
+		if !bytes.HasPrefix(key.UserKey, guard.Prefix) {
 			return true
 		}
-		if !matchGuard(key, lastKey, guard) {
+		if !matchGuard(key.UserKey, lastKey.UserKey, guard) {
 			if maxSize > guard.MinSize {
 				maxSize = guard.MinSize
 			}
@@ -342,11 +342,11 @@ func searchGuard(key []byte, guards []Guard) *Guard {
 	return maxMatchGuard
 }
 
-func overSkipTables(key []byte, skippedTables []*table.Table) (newSkippedTables []*table.Table, over bool) {
+func overSkipTables(key y.Key, skippedTables []*table.Table) (newSkippedTables []*table.Table, over bool) {
 	var i int
 	for i < len(skippedTables) {
 		t := skippedTables[i]
-		if y.CompareKeysWithVer(key, t.Biggest()) > 0 {
+		if key.Compare(t.Biggest()) > 0 {
 			i++
 		} else {
 			break
@@ -357,7 +357,7 @@ func overSkipTables(key []byte, skippedTables []*table.Table) (newSkippedTables 
 
 // compactBuildTables merge topTables and botTables to form a list of new tables.
 func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
-	limiter *rate.Limiter, splitHints [][]byte) (newTables []*table.Table, err error) {
+	limiter *rate.Limiter, splitHints []y.Key) (newTables []*table.Table, err error) {
 	topTables := cd.top
 	botTables := cd.bot
 
@@ -390,12 +390,12 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 	var filter CompactionFilter
 	var guards []Guard
 	if lc.kv.opt.CompactionFilterFactory != nil {
-		filter = lc.kv.opt.CompactionFilterFactory(level+1, cd.smallest(), cd.biggest())
+		filter = lc.kv.opt.CompactionFilterFactory(level+1, cd.smallest().UserKey, cd.biggest().UserKey)
 		guards = filter.Guards()
 	}
 	skippedTbls := cd.skippedTbls
 
-	var lastKey, skipKey []byte
+	var lastKey, skipKey y.Key
 	var builder *table.Builder
 	var bytesRead, bytesWrite, numRead, numWrite int
 	for it.Valid() {
@@ -411,24 +411,24 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 		} else {
 			builder.Reset(fd)
 		}
-		lastKey = lastKey[:0]
-		guard := searchGuard(it.Key(), guards)
+		lastKey.Reset()
+		guard := searchGuard(it.Key().UserKey, guards)
 		for ; it.Valid(); it.Next() {
 			numRead++
 			vs := it.Value()
 			key := it.Key()
-			kvSize := int(vs.EncodedSize()) + len(key)
+			kvSize := int(vs.EncodedSize()) + key.Len()
 			bytesRead += kvSize
 			// See if we need to skip this key.
-			if len(skipKey) > 0 {
-				if y.SameKey(key, skipKey) {
+			if !skipKey.IsEmpty() {
+				if key.SameUserKey(skipKey) {
 					discardStats.collect(vs)
 					continue
 				} else {
-					skipKey = skipKey[:0]
+					skipKey.Reset()
 				}
 			}
-			if !y.SameKey(key, lastKey) {
+			if !key.SameUserKey(lastKey) {
 				// Only break if we are on a different key, and have reached capacity. We want
 				// to ensure that all versions of the key are stored in the same sstable, and
 				// not divided across multiple tables at the same level.
@@ -442,23 +442,21 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 				if shouldFinishFile(key, lastKey, guard, int64(builder.EstimateSize()), lc.kv.opt.MaxTableSize) {
 					break
 				}
-				if len(splitHints) != 0 && y.CompareKeysWithVer(key, splitHints[0]) >= 0 {
+				if len(splitHints) != 0 && key.Compare(splitHints[0]) >= 0 {
 					splitHints = splitHints[1:]
-					for len(splitHints) > 0 && y.CompareKeysWithVer(key, splitHints[0]) >= 0 {
+					for len(splitHints) > 0 && key.Compare(splitHints[0]) >= 0 {
 						splitHints = splitHints[1:]
 					}
 					break
 				}
-				lastKey = y.SafeCopy(lastKey, key)
+				lastKey.Copy(key)
 			}
-
-			version := y.ParseTs(key)
 
 			// Only consider the versions which are below the minReadTs, otherwise, we might end up discarding the
 			// only valid version for a running transaction.
-			if version <= safeTs {
+			if key.Version <= safeTs {
 				// key is the latest readable version of this key, so we simply discard all the rest of the versions.
-				skipKey = y.SafeCopy(skipKey, key)
+				skipKey.Copy(key)
 
 				if isDeleted(vs.Meta) {
 					// If this key range has overlap with lower levels, then keep the deletion
@@ -468,7 +466,7 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 						continue
 					}
 				} else if filter != nil {
-					switch filter.Filter(key, vs.Value, vs.UserMeta) {
+					switch filter.Filter(key.UserKey, vs.Value, vs.UserMeta) {
 					case DecisionMarkTombstone:
 						discardStats.collect(vs)
 						if hasOverlap {
@@ -498,7 +496,7 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 		if err != nil {
 			return
 		}
-		if len(tbl.Smallest()) == 0 {
+		if tbl.Smallest().IsEmpty() {
 			tbl.Delete()
 		} else {
 			newTables = append(newTables, tbl)
@@ -581,15 +579,15 @@ func (cd *compactDef) unlockLevels() {
 	cd.thisLevel.RUnlock()
 }
 
-func (cd *compactDef) smallest() []byte {
-	if len(cd.bot) > 0 && bytes.Compare(cd.nextRange.left, cd.thisRange.left) < 0 {
+func (cd *compactDef) smallest() y.Key {
+	if len(cd.bot) > 0 && cd.nextRange.left.Compare(cd.thisRange.left) < 0 {
 		return cd.nextRange.left
 	}
 	return cd.thisRange.left
 }
 
-func (cd *compactDef) biggest() []byte {
-	if len(cd.bot) > 0 && bytes.Compare(cd.nextRange.right, cd.thisRange.right) > 0 {
+func (cd *compactDef) biggest() y.Key {
+	if len(cd.bot) > 0 && cd.nextRange.right.Compare(cd.thisRange.right) > 0 {
 		return cd.nextRange.right
 	}
 	return cd.thisRange.right
@@ -809,8 +807,8 @@ func (lc *levelsController) isCompacting(level int, tables ...*table.Table) bool
 		left:  tables[0].Smallest(),
 		right: tables[len(tables)-1].Biggest(),
 	}
-	y.Assert(len(kr.left) > 0)
-	y.Assert(len(kr.right) > 0)
+	y.Assert(!kr.left.IsEmpty())
+	y.Assert(!kr.right.IsEmpty())
 	return lc.cstatus.overlapsWith(level, kr)
 }
 
@@ -960,7 +958,7 @@ func (s *levelsController) close() error {
 }
 
 // get returns the found value if any. If not found, we return nil.
-func (s *levelsController) get(key []byte, keyHash uint64) y.ValueStruct {
+func (s *levelsController) get(key y.Key, keyHash uint64) y.ValueStruct {
 	// It's important that we iterate the levels from 0 on upward.  The reason is, if we iterated
 	// in opposite order, or in parallel (naively calling all the h.RLock() in some order) we could
 	// read level L's tables post-compaction and level L+1's tables pre-compaction.  (If we do
@@ -971,6 +969,7 @@ func (s *levelsController) get(key []byte, keyHash uint64) y.ValueStruct {
 	for _, h := range s.levels {
 		vs := h.get(key, keyHash) // Calls h.RLock() and h.RUnlock().
 		if vs.Valid() {
+			log.Info("got in level", h.level)
 			return vs
 		}
 	}
@@ -996,7 +995,7 @@ func appendIteratorsReversed(out []y.Iterator, th []*table.Table, reversed bool)
 // appendIterators appends iterators to an array of iterators, for merging.
 // Note: This obtains references for the table handlers. Remember to close these iterators.
 func (s *levelsController) appendIterators(
-	iters []y.Iterator, opts IteratorOptions) []y.Iterator {
+	iters []y.Iterator, opts *IteratorOptions) []y.Iterator {
 	// Just like with get, it's important we iterate the levels from 0 on upward, to avoid missing
 	// data when there's a compaction.
 	for _, level := range s.levels {
@@ -1018,8 +1017,8 @@ func (lc *levelsController) getTableInfo() (result []TableInfo) {
 			info := TableInfo{
 				ID:    t.ID(),
 				Level: l.level,
-				Left:  t.Smallest(),
-				Right: t.Biggest(),
+				Left:  t.Smallest().UserKey,
+				Right: t.Biggest().UserKey,
 			}
 			result = append(result, info)
 		}

@@ -103,9 +103,9 @@ func TestChecksums(t *testing.T) {
 
 	// Use a vlog with K0=V0 and a (corrupted) second transaction(k1,k2)
 	buf := createVlog(t, []*Entry{
-		{Key: k0, Value: y.Copy(v0)},
-		{Key: k1, Value: y.Copy(v1)},
-		{Key: k2, Value: y.Copy(v2)},
+		{Key: y.KeyWithTs(k0, 0), Value: y.Copy(v0)},
+		{Key: y.KeyWithTs(k1, 0), Value: y.Copy(v1)},
+		{Key: y.KeyWithTs(k2, 0), Value: y.Copy(v2)},
 	})
 	buf[len(buf)-1]++ // Corrupt last byte
 	require.NoError(t, ioutil.WriteFile(vlogFilePath(dir, 0), buf, 0777))
@@ -187,9 +187,9 @@ func TestPartialAppendToValueLog(t *testing.T) {
 	// Create truncated vlog to simulate a partial append.
 	// k0 - single transaction, k1 and k2 in another transaction
 	buf := createVlog(t, []*Entry{
-		{Key: k0, Value: y.Copy(v0)},
-		{Key: k1, Value: y.Copy(v1)},
-		{Key: k2, Value: y.Copy(v2)},
+		{Key: y.KeyWithTs(k0, 0), Value: y.Copy(v0)},
+		{Key: y.KeyWithTs(k1, 0), Value: y.Copy(v1)},
+		{Key: y.KeyWithTs(k2, 0), Value: y.Copy(v2)},
 	})
 	buf = buf[:len(buf)-6]
 	require.NoError(t, ioutil.WriteFile(vlogFilePath(dir, 0), buf, 0777))
@@ -246,9 +246,9 @@ func TestReadOnlyOpenWithPartialAppendToValueLog(t *testing.T) {
 	// Create truncated vlog to simulate a partial append.
 	// k0 - single transaction, k1 and k2 in another transaction
 	buf := createVlog(t, []*Entry{
-		{Key: k0, Value: v0},
-		{Key: k1, Value: v1},
-		{Key: k2, Value: v2},
+		{Key: y.KeyWithTs(k0, 0), Value: v0},
+		{Key: y.KeyWithTs(k1, 0), Value: v1},
+		{Key: y.KeyWithTs(k2, 0), Value: v2},
 	})
 	buf = buf[:len(buf)-6]
 	require.NoError(t, ioutil.WriteFile(vlogFilePath(dir, 0), buf, 0777))
@@ -269,11 +269,11 @@ func createVlog(t *testing.T, entries []*Entry) []byte {
 	opts.ValueLogFileSize = 100 * 1024 * 1024 // 100Mb
 	kv, err := Open(opts)
 	require.NoError(t, err)
-	txnSet(t, kv, entries[0].Key, entries[0].Value, entries[0].meta)
+	txnSet(t, kv, entries[0].Key.UserKey, entries[0].Value, entries[0].meta)
 	entries = entries[1:]
 	txn := kv.NewTransaction(true)
 	for _, entry := range entries {
-		require.NoError(t, txn.SetWithMeta(entry.Key, entry.Value, entry.meta))
+		require.NoError(t, txn.SetWithMeta(entry.Key.UserKey, entry.Value, entry.meta))
 	}
 	require.NoError(t, txn.Commit())
 	require.NoError(t, kv.Close())
@@ -290,7 +290,7 @@ func createVlog(t *testing.T, entries []*Entry) []byte {
 			break
 		}
 		require.NoError(t, err)
-		offset += headerBufSize + len(e.Key) + len(e.Value) + 4
+		offset += headerBufSize + len(e.Key.UserKey) + len(e.Value) + 4
 	}
 	return buf[:offset]
 }

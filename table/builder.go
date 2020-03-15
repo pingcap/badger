@@ -76,8 +76,8 @@ type Builder struct {
 	// The offsets are relative to the start of the block.
 	entryEndOffsets []uint32
 
-	smallest []byte
-	biggest  []byte
+	smallest y.Key
+	biggest  y.Key
 
 	hashEntries []hashEntry
 	bloomFpr    float64
@@ -143,8 +143,8 @@ func (b *Builder) resetBuffers() {
 	b.hashEntries = b.hashEntries[:0]
 	b.surfKeys = nil
 	b.surfVals = nil
-	b.smallest = b.smallest[:0]
-	b.biggest = b.biggest[:0]
+	b.smallest.UserKey = b.smallest.UserKey[:0]
+	b.biggest.UserKey = b.biggest.UserKey[:0]
 }
 
 // Close closes the TableBuilder.
@@ -154,74 +154,70 @@ func (b *Builder) Close() {}
 func (b *Builder) Empty() bool { return b.writtenLen+len(b.buf) == 0 }
 
 // keyDiff returns a suffix of newKey that is different from b.blockBaseKey.
-func (b Builder) keyDiff(newKey []byte) []byte {
-	for i := 0; i < len(newKey) && i < len(b.blockBaseKey); i++ {
-		if newKey[i] != b.blockBaseKey[i] {
-			return newKey[i:]
+func (b Builder) keyDiff(newKey y.Key) y.Key {
+	var i int
+	for i = 0; i < len(newKey.UserKey) && i < len(b.blockBaseKey); i++ {
+		if newKey.UserKey[i] != b.blockBaseKey[i] {
+			break
 		}
 	}
+	newKey.UserKey = newKey.UserKey[i:]
 	return newKey
 }
 
-func (b *Builder) addIndex(key []byte) {
-	keyNoTs := key
-	if !b.isExternal {
-		keyNoTs = y.ParseKey(key)
+func (b *Builder) addIndex(key y.Key) {
+	if b.smallest.IsEmpty() {
+		b.smallest.Copy(key)
 	}
-
-	if len(b.smallest) == 0 {
-		b.smallest = append(b.smallest, key...)
+	if b.biggest.SameUserKey(key) {
+		return
 	}
+	b.biggest.Copy(key)
 
-	if len(b.biggest) > 0 {
-		prev := b.biggest
-		if !b.isExternal {
-			prev = y.ParseKey(b.biggest)
-		}
-		cmp := bytes.Compare(keyNoTs, prev)
-		y.Assert(cmp >= 0)
-		if cmp == 0 {
-			return
-		}
-	}
-	b.biggest = y.SafeCopy(b.biggest, key)
-
-	keyHash := farm.Fingerprint64(keyNoTs)
+	keyHash := farm.Fingerprint64(key.UserKey)
 	// It is impossible that a single table contains 16 million keys.
 	y.Assert(len(b.baseKeysEndOffs) < maxBlockCnt)
 
 	pos := entryPosition{uint16(len(b.baseKeysEndOffs)), uint8(b.counter)}
 	if b.useSuRF {
-		b.surfKeys = append(b.surfKeys, y.SafeCopy(nil, keyNoTs))
+		b.surfKeys = append(b.surfKeys, y.SafeCopy(nil, key.UserKey))
 		b.surfVals = append(b.surfVals, pos.encode())
 	} else {
 		b.hashEntries = append(b.hashEntries, hashEntry{pos, keyHash})
 	}
 }
 
-func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
+func (b *Builder) addHelper(key y.Key, v y.ValueStruct) {
 	// Add key to bloom filter.
-	if len(key) > 0 {
+	if len(key.UserKey) > 0 {
 		b.addIndex(key)
 	}
 
 	// diffKey stores the difference of key with blockBaseKey.
-	var diffKey []byte
+	var diffKey y.Key
 	if len(b.blockBaseKey) == 0 {
 		// Make a copy. Builder should not keep references. Otherwise, caller has to be very careful
 		// and will have to make copies of keys every time they add to builder, which is even worse.
-		b.blockBaseKey = append(b.blockBaseKey[:0], key...)
-		diffKey = key
+		b.blockBaseKey = append(b.blockBaseKey, key.UserKey...)
+		diffKey.Version = key.Version
 	} else {
 		diffKey = b.keyDiff(key)
 	}
 
 	h := header{
-		baseLen: uint16(len(key) - len(diffKey)),
-		diffLen: uint16(len(diffKey)),
+		baseLen: uint16(key.Len() - diffKey.Len()),
+	}
+	if b.isExternal {
+		h.diffLen = uint16(len(diffKey.UserKey))
+	} else {
+		h.diffLen = uint16(diffKey.Len())
 	}
 	b.buf = append(b.buf, h.Encode()...)
-	b.buf = append(b.buf, diffKey...) // We only need to store the key difference.
+	if b.isExternal {
+		b.buf = append(b.buf, diffKey.UserKey...)
+	} else {
+		b.buf = diffKey.AppendTo(b.buf) // We only need to store the key difference.
+	}
 	b.buf = v.EncodeTo(b.buf)
 	b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
 	b.counter++ // Increment number of keys added for this current block.
@@ -261,7 +257,7 @@ func (b *Builder) finishBlock() error {
 
 // Add adds a key-value pair to the block.
 // If doNotRestart is true, we will not restart even if b.counter >= restartInterval.
-func (b *Builder) Add(key []byte, value y.ValueStruct) error {
+func (b *Builder) Add(key y.Key, value y.ValueStruct) error {
 	if b.shouldFinishBlock(key, value) {
 		if err := b.finishBlock(); err != nil {
 			return err
@@ -271,16 +267,20 @@ func (b *Builder) Add(key []byte, value y.ValueStruct) error {
 	return nil // Currently, there is no meaningful error.
 }
 
-func (b *Builder) shouldFinishBlock(key []byte, value y.ValueStruct) bool {
+func (b *Builder) shouldFinishBlock(key y.Key, value y.ValueStruct) bool {
 	// If there is no entry till now, we will return false.
 	if len(b.entryEndOffsets) == 0 {
+		return false
+	}
+	if bytes.Equal(b.blockBaseKey, key.UserKey) {
+		// make sure each block base key is different.
 		return false
 	}
 
 	// We should include current entry also in size, that's why +1 to len(b.entryOffsets).
 	entriesOffsetsSize := uint32((len(b.entryEndOffsets)+1)*4 + 4)
 	estimatedSize := uint32(len(b.buf)) + uint32(6 /*header size for entry*/) +
-		uint32(len(key)) + uint32(value.EncodedSize()) + entriesOffsetsSize
+		uint32(key.Len()) + value.EncodedSize() + entriesOffsetsSize
 
 	return estimatedSize > uint32(b.opt.BlockSize)
 }
@@ -327,19 +327,18 @@ func (b *Builder) Finish() error {
 	b.w.Reset(idxFile)
 
 	// Don't compress the global ts, because it may be updated during ingest.
-	ts := uint64(math.MaxUint64)
+	ts := uint64(0)
 	if b.isExternal {
-		// External builder doesn't append ts to the keys, the output sst should has a non-MaxUint64 global ts.
-		ts = math.MaxUint64 - 1
+		// External builder doesn't append ts to the keys, the output sst should has a non-zero global ts.
+		ts = 1
 	}
 	if err := b.w.Append(u64ToBytes(ts)); err != nil {
 		return err
 	}
 
 	encoder := metaEncoder{b.buf}
-
-	encoder.append(b.smallest, idSmallest)
-	encoder.append(b.biggest, idBiggest)
+	encoder.append(b.smallest.UserKey, idSmallest)
+	encoder.append(b.biggest.UserKey, idBiggest)
 	encoder.append(u32SliceToBytes(b.baseKeysEndOffs), idBaseKeysEndOffs)
 	encoder.append(b.baseKeysBuf, idBaseKeys)
 	encoder.append(u32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)

@@ -61,7 +61,7 @@ type Table struct {
 	baseKeysEndOffs []uint32
 
 	// The following are initialized once and const.
-	smallest, biggest []byte // Smallest and largest keys.
+	smallest, biggest y.Key  // Smallest and largest keys.
 	id                uint64 // file id, part of filename
 
 	dataMmap  []byte
@@ -166,16 +166,16 @@ func (t *Table) Close() error {
 // If it find an hash collision the last return value will be false,
 // which means caller should fallback to seek search. Otherwise it value will be true.
 // If the hash index does not contain such an element the returned key will be nil.
-func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, bool) {
+func (t *Table) PointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool) {
 	if t.bf != nil && !t.bf.Has(keyHash) {
-		return nil, y.ValueStruct{}, true
+		return y.Key{}, y.ValueStruct{}, true
 	}
 
 	blkIdx, offset := uint32(resultFallback), uint8(0)
 	if t.hIdx != nil {
 		blkIdx, offset = t.hIdx.lookup(keyHash)
 	} else if t.surf != nil {
-		v, ok := t.surf.Get(y.ParseKey(key))
+		v, ok := t.surf.Get(key.UserKey)
 		if !ok {
 			blkIdx = resultNoEntry
 		} else {
@@ -185,17 +185,17 @@ func (t *Table) PointGet(key []byte, keyHash uint64) ([]byte, y.ValueStruct, boo
 		}
 	}
 	if blkIdx == resultFallback {
-		return nil, y.ValueStruct{}, false
+		return y.Key{}, y.ValueStruct{}, false
 	}
 	if blkIdx == resultNoEntry {
-		return nil, y.ValueStruct{}, true
+		return y.Key{}, y.ValueStruct{}, true
 	}
 
 	it := t.NewIterator(false)
 	it.seekFromOffset(int(blkIdx), int(offset), key)
 
-	if !it.Valid() || !y.SameKey(key, it.Key()) {
-		return nil, y.ValueStruct{}, true
+	if !it.Valid() || !key.SameUserKey(it.Key()) {
+		return y.Key{}, y.ValueStruct{}, true
 	}
 	return it.Key(), it.Value(), true
 }
@@ -247,16 +247,10 @@ func (t *Table) loadIndex() error {
 		switch decoder.currentId() {
 		case idSmallest:
 			if k := decoder.decode(); len(k) != 0 {
-				if !t.HasGlobalTs() {
-					k = y.ParseKey(k)
-				}
 				t.smallest = y.KeyWithTs(k, math.MaxUint64)
 			}
 		case idBiggest:
 			if k := decoder.decode(); len(k) != 0 {
-				if !t.HasGlobalTs() {
-					k = y.ParseKey(k)
-				}
 				t.biggest = y.KeyWithTs(k, 0)
 			}
 		case idBaseKeysEndOffs:
@@ -288,12 +282,22 @@ func (t *Table) loadIndex() error {
 }
 
 type block struct {
-	offset int
-	data   []byte
+	offset  int
+	data    []byte
+	baseKey []byte
 }
 
 func (b *block) size() int64 {
 	return int64(intSize + len(b.data))
+}
+
+func (t *Table) getBlockBaseKey(idx int) []byte {
+	baseKeyStartOff := 0
+	if idx > 0 {
+		baseKeyStartOff = int(t.baseKeysEndOffs[idx-1])
+	}
+	baseKeyEndOff := t.baseKeysEndOffs[idx]
+	return t.baseKeys[baseKeyStartOff:baseKeyEndOff]
 }
 
 func (t *Table) block(idx int) (block, error) {
@@ -330,6 +334,7 @@ func (t *Table) block(idx int) (block, error) {
 			"failed to decode compressed data in file: %s at offset: %d, len: %d",
 			t.fd.Name(), blk.offset, dataLen)
 	}
+	blk.baseKey = t.getBlockBaseKey(idx)
 	if t.cache != nil {
 		key := t.blockCacheKey(idx)
 		t.cache.Set(key, blk, blk.size())
@@ -337,10 +342,10 @@ func (t *Table) block(idx int) (block, error) {
 	return blk, nil
 }
 
-func (t *Table) approximateOffset(it *Iterator, key []byte) int {
-	if y.CompareKeysWithVer(t.Biggest(), key) < 0 {
+func (t *Table) approximateOffset(it *Iterator, key y.Key) int {
+	if t.Biggest().Compare(key) < 0 {
 		return int(t.blockEndOffsets[len(t.blockEndOffsets)-1])
-	} else if y.CompareKeysWithVer(t.Smallest(), key) > 0 {
+	} else if t.Smallest().Compare(key) > 0 {
 		return 0
 	}
 	blk := it.seekBlock(key)
@@ -352,19 +357,18 @@ func (t *Table) approximateOffset(it *Iterator, key []byte) int {
 
 // HasGlobalTs returns table does set global ts.
 func (t *Table) HasGlobalTs() bool {
-	return t.globalTs != math.MaxUint64
+	return t.globalTs != 0
 }
 
 // SetGlobalTs update the global ts of external ingested tables.
 func (t *Table) SetGlobalTs(ts uint64) error {
-	encodeTs := math.MaxUint64 - ts
-	if _, err := t.indexFd.WriteAt(u64ToBytes(encodeTs), 0); err != nil {
+	if _, err := t.indexFd.WriteAt(u64ToBytes(ts), 0); err != nil {
 		return err
 	}
 	if err := fileutil.Fsync(t.indexFd); err != nil {
 		return err
 	}
-	t.globalTs = encodeTs
+	t.globalTs = ts
 	return nil
 }
 
@@ -389,10 +393,10 @@ func (t *Table) blockCacheKey(idx int) uint64 {
 func (t *Table) Size() int64 { return int64(t.blockEndOffsets[len(t.blockEndOffsets)-1]) }
 
 // Smallest is its smallest key, or nil if there are none
-func (t *Table) Smallest() []byte { return t.smallest }
+func (t *Table) Smallest() y.Key { return t.smallest }
 
 // Biggest is its biggest key, or nil if there are none
-func (t *Table) Biggest() []byte { return t.biggest }
+func (t *Table) Biggest() y.Key { return t.biggest }
 
 // Filename is NOT the file name.  Just kidding, it is.
 func (t *Table) Filename() string { return t.fd.Name() }
@@ -400,19 +404,19 @@ func (t *Table) Filename() string { return t.fd.Name() }
 // ID is the table's ID number (used to make the file name).
 func (t *Table) ID() uint64 { return t.id }
 
-func (t *Table) HasOverlap(start, end []byte, includeEnd bool) bool {
-	if y.CompareKeysWithVer(start, t.Biggest()) > 0 {
+func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
+	if start.Compare(t.Biggest()) > 0 {
 		return false
 	}
 
-	if cmp := y.CompareKeysWithVer(end, t.Smallest()); cmp < 0 {
+	if cmp := end.Compare(t.Smallest()); cmp < 0 {
 		return false
 	} else if cmp == 0 {
 		return includeEnd
 	}
 
 	if t.surf != nil {
-		return t.surf.HasOverlap(start, end, includeEnd)
+		return t.surf.HasOverlap(start.UserKey, end.UserKey, includeEnd)
 	}
 
 	it := t.NewIterator(false)
@@ -420,7 +424,7 @@ func (t *Table) HasOverlap(start, end []byte, includeEnd bool) bool {
 	if !it.Valid() {
 		return false
 	}
-	if cmp := y.CompareKeysWithVer(it.Key(), end); cmp > 0 {
+	if cmp := it.Key().Compare(end); cmp > 0 {
 		return false
 	} else if cmp == 0 {
 		return includeEnd

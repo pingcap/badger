@@ -94,12 +94,12 @@ func (s *Skiplist) Delete() {
 
 func (s *Skiplist) valid() bool { return s.arena != nil }
 
-func newNode(arena *Arena, key []byte, v y.ValueStruct, height int) *node {
+func newNode(arena *Arena, key y.Key, v y.ValueStruct, height int) *node {
 	// The base level is already allocated in the node struct.
 	offset := arena.putNode(height)
 	node := arena.getNode(offset)
 	node.keyOffset = arena.putKey(key)
-	node.keySize = uint16(len(key))
+	node.keySize = uint16(len(key.UserKey) + 8)
 	node.height = uint16(height)
 	node.value = encodeValue(arena.putVal(v), v.EncodedSize())
 	return node
@@ -116,7 +116,7 @@ func decodeValue(value uint64) (valOffset uint32, valSize uint32) {
 // NewSkiplist makes a new empty skiplist, with a given arena size
 func NewSkiplist(arenaSize int64) *Skiplist {
 	arena := newArena(arenaSize)
-	head := newNode(arena, nil, y.ValueStruct{}, maxHeight)
+	head := newNode(arena, y.Key{}, y.ValueStruct{}, maxHeight)
 	return &Skiplist{
 		height: 1,
 		head:   head,
@@ -129,7 +129,7 @@ func (n *node) getValueOffset() (uint32, uint32) {
 	return decodeValue(value)
 }
 
-func (n *node) key(arena *Arena) []byte {
+func (n *node) key(arena *Arena) y.Key {
 	return arena.getKey(n.keyOffset, n.keySize)
 }
 
@@ -172,7 +172,7 @@ func (s *Skiplist) getNext(nd *node, height int) *node {
 // If less=false, it finds leftmost node such that node.key > key (if allowEqual=false) or
 // node.key >= key (if allowEqual=true).
 // Returns the node found. The bool returned is true if the node has key equal to given key.
-func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool) {
+func (s *Skiplist) findNear(key y.Key, less bool, allowEqual bool) (*node, bool) {
 	x := s.head
 	level := int(s.getHeight() - 1)
 	var afterNode *node
@@ -202,7 +202,7 @@ func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool
 			cmp = -1
 		} else {
 			nextKey := next.key(s.arena)
-			cmp = y.CompareKeysWithVer(key, nextKey)
+			cmp = key.Compare(nextKey)
 		}
 		if cmp > 0 {
 			// x.key < next.key < key. We can continue to move right.
@@ -251,7 +251,7 @@ func (s *Skiplist) findNear(key []byte, less bool, allowEqual bool) (*node, bool
 // The input "before" tells us where to start looking.
 // If we found a node with the same key, then we return match = true.
 // Otherwise, outBefore.key < key < outAfter.key.
-func (s *Skiplist) findSpliceForLevel(key []byte, before *node, level int) (*node, *node, bool) {
+func (s *Skiplist) findSpliceForLevel(key y.Key, before *node, level int) (*node, *node, bool) {
 	for {
 		// Assume before.key < key.
 		next := s.getNext(before, level)
@@ -259,7 +259,7 @@ func (s *Skiplist) findSpliceForLevel(key []byte, before *node, level int) (*nod
 			return before, next, false
 		}
 		nextKey := next.key(s.arena)
-		cmp := y.CompareKeysWithVer(key, nextKey)
+		cmp := key.Compare(nextKey)
 		if cmp <= 0 {
 			return before, next, cmp == 0
 		}
@@ -272,7 +272,7 @@ func (s *Skiplist) getHeight() int32 {
 }
 
 // Put inserts the key-value pair.
-func (s *Skiplist) Put(key []byte, v y.ValueStruct) {
+func (s *Skiplist) Put(key y.Key, v y.ValueStruct) {
 	s.PutWithHint(key, v, nil)
 }
 
@@ -288,7 +288,7 @@ type Hint struct {
 	next      [maxHeight + 1]*node
 }
 
-func (s *Skiplist) calculateRecomputeHeight(key []byte, hint *Hint, listHeight int32) int32 {
+func (s *Skiplist) calculateRecomputeHeight(key y.Key, hint *Hint, listHeight int32) int32 {
 	if hint.height < listHeight {
 		// Either splice is never used or list height has grown, we recompute all.
 		hint.prev[listHeight] = s.head
@@ -311,14 +311,14 @@ func (s *Skiplist) calculateRecomputeHeight(key []byte, hint *Hint, listHeight i
 		}
 		if prevNode != s.head &&
 			prevNode != nil &&
-			y.CompareKeysWithVer(key, prevNode.key(s.arena)) <= 0 {
+			key.Compare(prevNode.key(s.arena)) <= 0 {
 			// Key is before splice.
 			for prevNode == hint.prev[recomputeHeight] {
 				recomputeHeight++
 			}
 			continue
 		}
-		if nextNode != nil && y.CompareKeysWithVer(key, nextNode.key(s.arena)) > 0 {
+		if nextNode != nil && key.Compare(nextNode.key(s.arena)) > 0 {
 			// Key is after splice.
 			for nextNode == hint.next[recomputeHeight] {
 				recomputeHeight++
@@ -332,7 +332,7 @@ func (s *Skiplist) calculateRecomputeHeight(key []byte, hint *Hint, listHeight i
 }
 
 // PutWithHint inserts the key-value pair with Hint for better sequential write performance.
-func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
+func (s *Skiplist) PutWithHint(key y.Key, v y.ValueStruct, hint *Hint) {
 	// Since we allow overwrite, we may not need to create a new node. We might not even need to
 	// increase the height. Let's defer these actions.
 	listHeight := s.getHeight()
@@ -402,7 +402,7 @@ func (s *Skiplist) PutWithHint(key []byte, v y.ValueStruct, hint *Hint) {
 	}
 }
 
-func (s *Skiplist) GetWithHint(key []byte, hint *Hint) y.ValueStruct {
+func (s *Skiplist) GetWithHint(key y.Key, hint *Hint) y.ValueStruct {
 	if hint == nil {
 		hint = new(Hint)
 	}
@@ -429,12 +429,12 @@ func (s *Skiplist) GetWithHint(key []byte, hint *Hint) y.ValueStruct {
 		return y.ValueStruct{}
 	}
 	nextKey := s.arena.getKey(n.keyOffset, n.keySize)
-	if !y.SameKey(key, nextKey) {
+	if !key.SameUserKey(nextKey) {
 		return y.ValueStruct{}
 	}
 	valOffset, valSize := n.getValueOffset()
 	vs := s.arena.getVal(valOffset, valSize)
-	vs.Version = y.ParseTs(nextKey)
+	vs.Version = nextKey.Version
 	return vs
 }
 
@@ -466,20 +466,20 @@ func (s *Skiplist) findLast() *node {
 
 // Get gets the value associated with the key. It returns a valid value if it finds equal or earlier
 // version of the same key.
-func (s *Skiplist) Get(key []byte) y.ValueStruct {
+func (s *Skiplist) Get(key y.Key) y.ValueStruct {
 	n, _ := s.findNear(key, false, true) // findGreaterOrEqual.
 	if n == nil {
 		return y.ValueStruct{}
 	}
 
 	nextKey := s.arena.getKey(n.keyOffset, n.keySize)
-	if !y.SameKey(key, nextKey) {
+	if !key.SameUserKey(nextKey) {
 		return y.ValueStruct{}
 	}
 
 	valOffset, valSize := n.getValueOffset()
 	vs := s.arena.getVal(valOffset, valSize)
-	vs.Version = y.ParseTs(nextKey)
+	vs.Version = nextKey.Version
 	return vs
 }
 
@@ -503,7 +503,7 @@ type Iterator struct {
 func (s *Iterator) Valid() bool { return s.n != nil }
 
 // Key returns the key at the current position.
-func (s *Iterator) Key() []byte {
+func (s *Iterator) Key() y.Key {
 	return s.list.arena.getKey(s.n.keyOffset, s.n.keySize)
 }
 
@@ -532,12 +532,12 @@ func (s *Iterator) Prev() {
 }
 
 // Seek advances to the first entry with a key >= target.
-func (s *Iterator) Seek(target []byte) {
+func (s *Iterator) Seek(target y.Key) {
 	s.n, _ = s.list.findNear(target, false, true) // find >=.
 }
 
 // SeekForPrev finds an entry with key <= target.
-func (s *Iterator) SeekForPrev(target []byte) {
+func (s *Iterator) SeekForPrev(target y.Key) {
 	s.n, _ = s.list.findNear(target, true, true) // find <=.
 }
 
@@ -588,7 +588,7 @@ func (s *UniIterator) Rewind() {
 }
 
 // Seek implements y.Interface
-func (s *UniIterator) Seek(key []byte) {
+func (s *UniIterator) Seek(key y.Key) {
 	if !s.reversed {
 		s.iter.Seek(key)
 	} else {
@@ -597,7 +597,7 @@ func (s *UniIterator) Seek(key []byte) {
 }
 
 // Key implements y.Interface
-func (s *UniIterator) Key() []byte { return s.iter.Key() }
+func (s *UniIterator) Key() y.Key { return s.iter.Key() }
 
 // Value implements y.Interface
 func (s *UniIterator) Value() y.ValueStruct { return s.iter.Value() }

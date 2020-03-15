@@ -1,7 +1,6 @@
 package table
 
 import (
-	"bytes"
 	"sort"
 	"sync/atomic"
 	"unsafe"
@@ -11,12 +10,12 @@ import (
 )
 
 type Entry struct {
-	Key   []byte
+	Key   y.Key
 	Value y.ValueStruct
 }
 
 func (e *Entry) EstimateSize() int64 {
-	return int64(len(e.Key) + int(e.Value.EncodedSize()) + skl.EstimateNodeSize)
+	return int64(e.Key.Len() + int(e.Value.EncodedSize()) + skl.EstimateNodeSize)
 }
 
 type MemTable struct {
@@ -37,7 +36,7 @@ func (mt *MemTable) Empty() bool {
 	return atomic.LoadPointer(&mt.pendingList) == nil && mt.skl.Empty()
 }
 
-func (mt *MemTable) Get(key []byte) y.ValueStruct {
+func (mt *MemTable) Get(key y.Key) y.ValueStruct {
 	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
 	for curr != nil {
 		if v, ok := curr.get(key); ok {
@@ -77,7 +76,7 @@ func (mt *MemTable) MemSize() int64 {
 }
 
 // PutToSkl directly insert entry into SkipList.
-func (mt *MemTable) PutToSkl(key []byte, v y.ValueStruct) {
+func (mt *MemTable) PutToSkl(key y.Key, v y.ValueStruct) {
 	mt.skl.Put(key, v)
 }
 
@@ -134,7 +133,7 @@ func newListNode(entries []Entry) *listNode {
 		n.memSize += sz
 	}
 	for _, e := range entries {
-		e.Value.Version = y.ParseTs(e.Key)
+		e.Value.Version = e.Key.Version
 	}
 	return n
 }
@@ -155,11 +154,11 @@ func (n *listNode) mergeToSkl(skl *skl.Skiplist) {
 	n.putToSkl(skl, n.entries)
 }
 
-func (n *listNode) get(key []byte) (y.ValueStruct, bool) {
+func (n *listNode) get(key y.Key) (y.ValueStruct, bool) {
 	i := sort.Search(len(n.entries), func(i int) bool {
-		return y.CompareKeysWithVer(n.entries[i].Key, key) >= 0
+		return n.entries[i].Key.Compare(key) >= 0
 	})
-	if i < len(n.entries) && y.SameKey(key, n.entries[i].Key) {
+	if i < len(n.entries) && key.SameUserKey(n.entries[i].Key) {
 		return n.entries[i].Value, true
 	}
 	return y.ValueStruct{}, false
@@ -191,18 +190,18 @@ func (it *listNodeIterator) Rewind() {
 	}
 }
 
-func (it *listNodeIterator) Seek(key []byte) {
+func (it *listNodeIterator) Seek(key y.Key) {
 	it.idx = sort.Search(len(it.n.entries), func(i int) bool {
-		return y.CompareKeysWithVer(it.n.entries[i].Key, key) >= 0
+		return it.n.entries[i].Key.Compare(key) >= 0
 	})
 	if it.reversed {
-		if !it.Valid() || !bytes.Equal(it.Key(), key) {
+		if !it.Valid() || !it.Key().Equal(key) {
 			it.idx--
 		}
 	}
 }
 
-func (it *listNodeIterator) Key() []byte { return it.n.entries[it.idx].Key }
+func (it *listNodeIterator) Key() y.Key { return it.n.entries[it.idx].Key }
 
 func (it *listNodeIterator) Value() y.ValueStruct { return it.n.entries[it.idx].Value }
 

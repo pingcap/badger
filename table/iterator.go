@@ -18,7 +18,6 @@ package table
 
 import (
 	"bytes"
-	"encoding/binary"
 	"io"
 	"sort"
 
@@ -26,16 +25,14 @@ import (
 	"github.com/coocood/badger/y"
 )
 
-var maxGlobalTs = [8]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-
 type blockIterator struct {
 	data    []byte
 	idx     int
 	err     error
 	baseKey []byte
 
-	globalTs [8]byte
-	key      []byte
+	globalTs uint64
+	key      y.Key
 	val      []byte
 
 	lastBaseLen     uint16
@@ -45,9 +42,9 @@ type blockIterator struct {
 func (itr *blockIterator) setBlock(b block) {
 	itr.err = nil
 	itr.idx = 0
-	itr.baseKey = itr.baseKey[:0]
+	itr.baseKey = b.baseKey
 	itr.lastBaseLen = 0
-	itr.key = itr.key[:0]
+	itr.key.Reset()
 	itr.val = itr.val[:0]
 	itr.data = b.data
 	itr.loadEntryEndOffsets()
@@ -74,10 +71,10 @@ func (itr *blockIterator) loadEntryEndOffsets() {
 
 // Seek brings us to the first block element that is >= input key.
 // The binary search will begin at `start`, you can use it to skip some items.
-func (itr *blockIterator) seek(key []byte) {
+func (itr *blockIterator) seek(key y.Key) {
 	foundEntryIdx := sort.Search(len(itr.entryEndOffsets), func(idx int) bool {
 		itr.setIdx(idx)
-		return y.CompareKeysWithVer(itr.key, key) >= 0
+		return itr.key.Compare(key) >= 0
 	})
 	itr.setIdx(foundEntryIdx)
 }
@@ -105,25 +102,23 @@ func (itr *blockIterator) setIdx(i int) {
 		startOffset = int(itr.entryEndOffsets[i-1])
 	}
 
-	if len(itr.baseKey) == 0 {
-		var baseHeader header
-		baseHeader.Decode(itr.data)
-		itr.baseKey = itr.data[headerSize : headerSize+baseHeader.diffLen]
-	}
-
 	endOffset := int(itr.entryEndOffsets[i])
 	entryData := itr.data[startOffset:endOffset]
 	var h header
 	h.Decode(entryData)
 	if h.baseLen > itr.lastBaseLen {
-		itr.key = append(itr.key[:itr.lastBaseLen], itr.baseKey[itr.lastBaseLen:h.baseLen]...)
+		itr.key.UserKey = append(itr.key.UserKey[:itr.lastBaseLen], itr.baseKey[itr.lastBaseLen:h.baseLen]...)
 	}
 	itr.lastBaseLen = h.baseLen
 	valueOff := headerSize + int(h.diffLen)
-	diffKey := entryData[headerSize:valueOff]
-	itr.key = append(itr.key[:h.baseLen], diffKey...)
-	if itr.globalTs != maxGlobalTs {
-		itr.key = append(itr.key, itr.globalTs[:]...)
+	diffKeyBytes := entryData[headerSize:valueOff]
+	if itr.globalTs != 0 {
+		itr.key.UserKey = append(itr.key.UserKey[:h.baseLen], diffKeyBytes...)
+		itr.key.Version = itr.globalTs
+	} else {
+		diffKey := y.ParseKey(diffKeyBytes)
+		itr.key.UserKey = append(itr.key.UserKey[:h.baseLen], diffKey.UserKey...)
+		itr.key.Version = diffKey.Version
 	}
 	itr.val = entryData[valueOff:]
 }
@@ -152,7 +147,7 @@ type Iterator struct {
 // NewIterator returns a new iterator of the Table
 func (t *Table) NewIterator(reversed bool) *Iterator {
 	it := &Iterator{t: t, reversed: reversed}
-	binary.BigEndian.PutUint64(it.bi.globalTs[:], t.globalTs)
+	it.bi.globalTs = t.globalTs
 	if t.surf != nil {
 		it.surf = t.surf.NewIterator()
 	}
@@ -203,7 +198,7 @@ func (itr *Iterator) seekToLast() {
 	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekHelper(blockIdx int, key []byte) {
+func (itr *Iterator) seekHelper(blockIdx int, key y.Key) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx)
 	if err != nil {
@@ -215,7 +210,7 @@ func (itr *Iterator) seekHelper(blockIdx int, key []byte) {
 	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
+func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key y.Key) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx)
 	if err != nil {
@@ -224,34 +219,21 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	}
 	itr.bi.setBlock(block)
 	itr.bi.setIdx(offset)
-	if y.CompareKeysWithVer(itr.bi.key, key) >= 0 {
+	if itr.bi.key.Compare(key) >= 0 {
 		return
 	}
 	itr.bi.seek(key)
 	itr.err = itr.bi.err
 }
 
-func (itr *Iterator) seekBlock(key []byte) int {
+func (itr *Iterator) seekBlock(key y.Key) int {
 	return sort.Search(len(itr.t.blockEndOffsets), func(idx int) bool {
-		baseKeyStartOff := 0
-		if idx > 0 {
-			baseKeyStartOff = int(itr.t.baseKeysEndOffs[idx-1])
-		}
-		baseKeyEndOff := itr.t.baseKeysEndOffs[idx]
-		baseKey := itr.t.baseKeys[baseKeyStartOff:baseKeyEndOff]
-		if itr.bi.globalTs != maxGlobalTs {
-			cmp := bytes.Compare(baseKey, y.ParseKey(key))
-			if cmp != 0 {
-				return cmp > 0
-			}
-			return bytes.Compare(itr.bi.globalTs[:], key[len(key)-8:]) > 0
-		}
-		return y.CompareKeysWithVer(baseKey, key) > 0
+		return bytes.Compare(itr.t.getBlockBaseKey(idx), key.UserKey) > 0
 	})
 }
 
 // seekFrom brings us to a key that is >= input key.
-func (itr *Iterator) seekFrom(key []byte) {
+func (itr *Iterator) seekFrom(key y.Key) {
 	itr.err = nil
 	itr.reset()
 
@@ -284,7 +266,7 @@ func (itr *Iterator) seekFrom(key []byte) {
 }
 
 // seek will reset iterator and seek to >= key.
-func (itr *Iterator) seek(key []byte) {
+func (itr *Iterator) seek(key y.Key) {
 	itr.err = nil
 	itr.reset()
 
@@ -294,7 +276,7 @@ func (itr *Iterator) seek(key []byte) {
 	}
 
 	sit := itr.surf
-	sit.Seek(y.ParseKey(key))
+	sit.Seek(key.UserKey)
 	if !sit.Valid() {
 		itr.err = io.EOF
 		return
@@ -306,10 +288,10 @@ func (itr *Iterator) seek(key []byte) {
 }
 
 // seekForPrev will reset iterator and seek to <= key.
-func (itr *Iterator) seekForPrev(key []byte) {
+func (itr *Iterator) seekForPrev(key y.Key) {
 	// TODO: Optimize this. We shouldn't have to take a Prev step.
 	itr.seekFrom(key)
-	if !bytes.Equal(itr.Key(), key) {
+	if !itr.Key().Equal(key) {
 		itr.prev()
 	}
 }
@@ -372,12 +354,8 @@ func (itr *Iterator) prev() {
 }
 
 // Key follows the y.Iterator interface
-func (itr *Iterator) Key() []byte {
+func (itr *Iterator) Key() y.Key {
 	return itr.bi.key
-}
-
-func (itr *Iterator) RawKey() []byte {
-	return y.ParseKey(itr.bi.key)
 }
 
 // Value follows the y.Iterator interface
@@ -410,7 +388,7 @@ func (itr *Iterator) Rewind() {
 }
 
 // Seek follows the y.Iterator interface
-func (itr *Iterator) Seek(key []byte) {
+func (itr *Iterator) Seek(key y.Key) {
 	if !itr.reversed {
 		itr.seek(key)
 	} else {
@@ -472,7 +450,7 @@ func (s *ConcatIterator) Valid() bool {
 }
 
 // Key implements y.Interface
-func (s *ConcatIterator) Key() []byte {
+func (s *ConcatIterator) Key() y.Key {
 	return s.cur.Key()
 }
 
@@ -486,16 +464,16 @@ func (s *ConcatIterator) FillValue(vs *y.ValueStruct) {
 }
 
 // Seek brings us to element >= key if reversed is false. Otherwise, <= key.
-func (s *ConcatIterator) Seek(key []byte) {
+func (s *ConcatIterator) Seek(key y.Key) {
 	var idx int
 	if !s.reversed {
 		idx = sort.Search(len(s.tables), func(i int) bool {
-			return y.CompareKeysWithVer(s.tables[i].Biggest(), key) >= 0
+			return s.tables[i].Biggest().Compare(key) >= 0
 		})
 	} else {
 		n := len(s.tables)
 		idx = n - 1 - sort.Search(n, func(i int) bool {
-			return y.CompareKeysWithVer(s.tables[n-1-i].Smallest(), key) <= 0
+			return s.tables[n-1-i].Smallest().Compare(key) <= 0
 		})
 	}
 	if idx >= len(s.tables) || idx < 0 {

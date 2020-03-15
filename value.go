@@ -135,7 +135,8 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
 
 	e := &Entry{}
 	e.offset = r.recordOffset
-	e.Key = r.k[:kl]
+	e.Key.UserKey = r.k[:kl]
+	e.Key.Version = h.ver
 	e.Value = r.v[:vl]
 	if h.umlen > 0 {
 		if cap(r.um) < int(h.umlen) {
@@ -150,7 +151,7 @@ func (r *safeRead) Entry(reader *bufio.Reader) (*Entry, error) {
 		}
 	}
 
-	if _, err = io.ReadFull(tee, e.Key); err != nil {
+	if _, err = io.ReadFull(tee, r.k[:kl]); err != nil {
 		if err == io.EOF {
 			err = errTruncate
 		}
@@ -206,10 +207,10 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 			continue
 		}
 
-		read.recordOffset += uint32(headerBufSize + len(e.Key) + len(e.Value) + len(e.UserMeta) + 4) // len(crcBuf)
+		read.recordOffset += uint32(headerBufSize + len(e.Key.UserKey) + len(e.Value) + len(e.UserMeta) + 4) // len(crcBuf)
 
 		if e.meta&bitTxn > 0 {
-			txnTs := y.ParseTs(e.Key)
+			txnTs := e.Key.Version
 			if lastCommit == 0 {
 				lastCommit = txnTs
 			}

@@ -115,14 +115,14 @@ const (
 
 func replayFunction(out *DB) func(Entry) error {
 	type txnEntry struct {
-		nk []byte
+		nk y.Key
 		v  y.ValueStruct
 	}
 
 	var txn []txnEntry
 	var lastCommit uint64
 
-	toLSM := func(nk []byte, vs y.ValueStruct) {
+	toLSM := func(nk y.Key, vs y.ValueStruct) {
 		e := table.Entry{Key: nk, Value: vs}
 		mTbls := out.mtbls.Load().(*memTables)
 		if out.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize()) == out.opt.MaxMemTableSize {
@@ -138,12 +138,12 @@ func replayFunction(out *DB) func(Entry) error {
 		}
 		first = false
 
-		if out.orc.curRead < y.ParseTs(e.Key) {
-			out.orc.curRead = y.ParseTs(e.Key)
+		if out.orc.curRead < e.Key.Version {
+			out.orc.curRead = e.Key.Version
 		}
 
-		nk := make([]byte, len(e.Key))
-		copy(nk, e.Key)
+		var nk y.Key
+		nk.Copy(e.Key)
 		nv := make([]byte, len(e.Value))
 		copy(nv, e.Value)
 
@@ -176,11 +176,10 @@ func replayFunction(out *DB) func(Entry) error {
 			y.Assert(len(txn) == 0)
 
 		} else {
-			txnTs := y.ParseTs(nk)
 			if lastCommit == 0 {
-				lastCommit = txnTs
+				lastCommit = e.Key.Version
 			}
-			y.Assert(lastCommit == txnTs)
+			y.Assert(lastCommit == e.Key.Version)
 			te := txnEntry{nk: nk, v: v}
 			txn = append(txn, te)
 		}
@@ -440,9 +439,9 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 	guard.Done()
 }
 
-func isRangeCoversTable(start, end []byte, t *table.Table) bool {
-	left := y.CompareKeysWithVer(start, t.Smallest()) <= 0
-	right := y.CompareKeysWithVer(t.Biggest(), end) < 0
+func isRangeCoversTable(start, end y.Key, t *table.Table) bool {
+	left := start.Compare(t.Smallest()) <= 0
+	right := t.Biggest().Compare(end) < 0
 	return left && right
 }
 
@@ -503,7 +502,7 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]*table.Table, e
 	}
 
 	sort.Slice(tbls, func(i, j int) bool {
-		return bytes.Compare(tbls[i].Smallest(), tbls[j].Smallest()) < 0
+		return tbls[i].Smallest().Compare(tbls[j].Smallest()) < 0
 	})
 
 	return tbls, syncDir(db.lc.kv.opt.Dir)
@@ -512,7 +511,7 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]*table.Table, e
 func (db *DB) checkExternalTables(tbls []*table.Table) error {
 	keys := make([][]byte, 0, len(tbls)*2)
 	for _, t := range tbls {
-		keys = append(keys, t.Smallest(), t.Biggest())
+		keys = append(keys, t.Smallest().UserKey, t.Biggest().UserKey)
 	}
 	ok := sort.SliceIsSorted(keys, func(i, j int) bool {
 		return bytes.Compare(keys[i], keys[j]) < 0
@@ -662,7 +661,7 @@ func (db *DB) getMemTables() []*table.MemTable {
 // tables and find the max version among them.  To maintain this invariant, we also need to ensure
 // that all versions of a key are always present in the same table from level 1, because compaction
 // can push any table down.
-func (db *DB) get(key []byte) y.ValueStruct {
+func (db *DB) get(key y.Key) y.ValueStruct {
 	tables := db.getMemTables() // Lock should be released.
 
 	db.metrics.NumGets.Inc()
@@ -673,7 +672,7 @@ func (db *DB) get(key []byte) y.ValueStruct {
 			return vs
 		}
 	}
-	keyHash := farm.Fingerprint64(y.ParseKey(key))
+	keyHash := farm.Fingerprint64(key.UserKey)
 	return db.lc.get(key, keyHash)
 }
 
@@ -742,7 +741,7 @@ func (db *DB) sendToWriteCh(entries []*Entry) (*request, error) {
 //   Check(kv.BatchSet(entries))
 func (db *DB) batchSet(entries []*Entry) error {
 	sort.Slice(entries, func(i, j int) bool {
-		return y.CompareKeysWithVer(entries[i].Key, entries[j].Key) < 0
+		return entries[i].Key.Compare(entries[j].Key) < 0
 	})
 	req, err := db.sendToWriteCh(entries)
 	if err != nil {
@@ -830,7 +829,7 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 			return err
 		}
 		numWrite++
-		bytesWrite += len(key) + int(value.EncodedSize())
+		bytesWrite += key.Len() + int(value.EncodedSize())
 	}
 	stats := &y.CompactionStats{
 		KeysWrite:  numWrite,

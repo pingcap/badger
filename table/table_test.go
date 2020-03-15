@@ -143,7 +143,7 @@ func TestHashIndexTS(t *testing.T) {
 		y.Check(err)
 	}
 	b := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
-	keys := [][]byte{
+	keys := []y.Key{
 		y.KeyWithTs([]byte("key"), 9),
 		y.KeyWithTs([]byte("key"), 7),
 		y.KeyWithTs([]byte("key"), 5),
@@ -151,7 +151,7 @@ func TestHashIndexTS(t *testing.T) {
 		y.KeyWithTs([]byte("key"), 1),
 	}
 	for _, k := range keys {
-		b.Add(k, y.ValueStruct{Value: k, Meta: 'A', UserMeta: []byte{0}})
+		b.Add(k, y.ValueStruct{Value: k.UserKey, Meta: 'A', UserMeta: []byte{0}})
 	}
 	y.Check(b.Finish())
 	f.Close()
@@ -160,15 +160,15 @@ func TestHashIndexTS(t *testing.T) {
 
 	rk, _, ok := table.PointGet(y.KeyWithTs([]byte("key"), 10), keyHash)
 	require.True(t, ok)
-	require.True(t, bytes.Compare(rk, keys[0]) == 0)
+	require.True(t, rk.Equal(keys[0]))
 
 	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 6), keyHash)
 	require.True(t, ok)
-	require.True(t, bytes.Compare(rk, keys[2]) == 0)
+	require.True(t, rk.Equal(keys[2]))
 
 	rk, _, ok = table.PointGet(y.KeyWithTs([]byte("key"), 2), keyHash)
 	require.True(t, ok)
-	require.True(t, bytes.Compare(rk, keys[4]) == 0)
+	require.True(t, rk.Equal(keys[4]))
 }
 
 func TestPointGet(t *testing.T) {
@@ -179,29 +179,28 @@ func TestPointGet(t *testing.T) {
 
 	for i := 0; i < 8000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		keyHash := farm.Fingerprint64(y.ParseKey(k))
-		k, _, ok := table.PointGet(k, keyHash)
+		keyHash := farm.Fingerprint64(k.UserKey)
+		k1, _, ok := table.PointGet(k, keyHash)
 		if !ok {
 			// will fallback to seek
 			continue
 		}
-		require.NotNil(t, k, key("key", i)+" not find")
-		require.True(t, y.SameKey(k, k), "point get not point to correct key")
+		require.True(t, k1.SameUserKey(k), "point get not point to correct key")
 	}
 
 	for i := 8000; i < 10000; i++ {
 		k := y.KeyWithTs([]byte(key("key", i)), math.MaxUint64)
-		keyHash := farm.Fingerprint64(y.ParseKey(k))
+		keyHash := farm.Fingerprint64(k.UserKey)
 		rk, _, ok := table.PointGet(k, keyHash)
 		if !ok {
 			// will fallback to seek
 			continue
 		}
-		if rk == nil {
+		if rk.IsEmpty() {
 			// hash table says no entry, fast return
 			continue
 		}
-		require.False(t, y.SameKey(k, rk), "point get not point to correct key")
+		require.False(t, k.SameUserKey(rk), "point get not point to correct key")
 	}
 }
 
@@ -219,7 +218,7 @@ func TestExternalTable(t *testing.T) {
 	kvs := generateKeyValues("key", n)
 	for _, kv := range kvs {
 		y.Assert(len(kv) == 2)
-		err := b.Add([]byte(kv[0]), y.ValueStruct{Value: []byte(kv[1]), Meta: 'A', UserMeta: []byte{0}})
+		err := b.Add(y.KeyWithTs([]byte(kv[0]), 0), y.ValueStruct{Value: []byte(kv[1]), Meta: 'A', UserMeta: []byte{0}})
 		if t != nil {
 			require.NoError(t, err)
 		} else {
@@ -318,7 +317,7 @@ func TestSeek(t *testing.T) {
 		}
 		require.True(t, it.Valid())
 		k := it.Key()
-		require.EqualValues(t, tt.out, string(y.ParseKey(k)))
+		require.EqualValues(t, tt.out, string(k.UserKey))
 	}
 }
 
@@ -352,7 +351,7 @@ func TestSeekForPrev(t *testing.T) {
 		}
 		require.True(t, it.Valid())
 		k := it.Key()
-		require.EqualValues(t, tt.out, string(y.ParseKey(k)))
+		require.EqualValues(t, tt.out, string(k.UserKey))
 	}
 }
 
@@ -418,7 +417,7 @@ func TestTable(t *testing.T) {
 	seek := y.KeyWithTs([]byte(key("key", kid)), 0)
 	for ti.seek(seek); ti.Valid(); ti.next() {
 		k := ti.Key()
-		require.EqualValues(t, string(y.ParseKey(k)), key("key", kid))
+		require.EqualValues(t, string(k.UserKey), key("key", kid))
 		kid++
 	}
 	if kid != 10000 {
@@ -431,7 +430,7 @@ func TestTable(t *testing.T) {
 	ti.seek(y.KeyWithTs([]byte(key("key", -1)), 0))
 	require.True(t, ti.Valid())
 	k := ti.Key()
-	require.EqualValues(t, string(y.ParseKey(k)), key("key", 0))
+	require.EqualValues(t, string(k.UserKey), key("key", 0))
 }
 
 func TestIterateBackAndForth(t *testing.T) {
@@ -451,27 +450,27 @@ func TestIterateBackAndForth(t *testing.T) {
 	it.prev()
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, key("key", 1008), string(y.ParseKey(k)))
+	require.EqualValues(t, key("key", 1008), string(k.UserKey))
 
 	it.next()
 	it.next()
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, key("key", 1010), y.ParseKey(k))
+	require.EqualValues(t, key("key", 1010), k.UserKey)
 
 	it.seek(y.KeyWithTs([]byte(key("key", 2000)), 0))
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, key("key", 2000), y.ParseKey(k))
+	require.EqualValues(t, key("key", 2000), k.UserKey)
 
 	it.prev()
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, key("key", 1999), y.ParseKey(k))
+	require.EqualValues(t, key("key", 1999), k.UserKey)
 
 	it.seekToFirst()
 	k = it.Key()
-	require.EqualValues(t, key("key", 0), y.ParseKey(k))
+	require.EqualValues(t, key("key", 0), k.UserKey)
 }
 
 func TestUniIterator(t *testing.T) {
@@ -519,7 +518,7 @@ func TestConcatIteratorOneTable(t *testing.T) {
 	it.Rewind()
 	require.True(t, it.Valid())
 	k := it.Key()
-	require.EqualValues(t, "k1", string(y.ParseKey(k)))
+	require.EqualValues(t, "k1", string(k.UserKey))
 	vs := it.Value()
 	require.EqualValues(t, "a1", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -553,17 +552,17 @@ func TestConcatIterator(t *testing.T) {
 		require.EqualValues(t, 30000, count)
 
 		it.Seek(y.KeyWithTs([]byte("a"), 0))
-		require.EqualValues(t, "keya0000", string(y.ParseKey(it.Key())))
+		require.EqualValues(t, "keya0000", string(it.Key().UserKey))
 		vs := it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
 		it.Seek(y.KeyWithTs([]byte("keyb"), 0))
-		require.EqualValues(t, "keyb0000", string(y.ParseKey(it.Key())))
+		require.EqualValues(t, "keyb0000", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
 		it.Seek(y.KeyWithTs([]byte("keyb9999b"), 0))
-		require.EqualValues(t, "keyc0000", string(y.ParseKey(it.Key())))
+		require.EqualValues(t, "keyc0000", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
@@ -587,17 +586,17 @@ func TestConcatIterator(t *testing.T) {
 		require.False(t, it.Valid())
 
 		it.Seek(y.KeyWithTs([]byte("keyb"), 0))
-		require.EqualValues(t, "keya9999", string(y.ParseKey(it.Key())))
+		require.EqualValues(t, "keya9999", string(it.Key().UserKey))
 		vs := it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
 
 		it.Seek(y.KeyWithTs([]byte("keyb9999b"), 0))
-		require.EqualValues(t, "keyb9999", string(y.ParseKey(it.Key())))
+		require.EqualValues(t, "keyb9999", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
 
 		it.Seek(y.KeyWithTs([]byte("keyd"), 0))
-		require.EqualValues(t, "keyc9999", string(y.ParseKey(it.Key())))
+		require.EqualValues(t, "keyc9999", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
 	}
@@ -625,7 +624,7 @@ func TestMergingIterator(t *testing.T) {
 	it.Rewind()
 	require.True(t, it.Valid())
 	k := it.Key()
-	require.EqualValues(t, "k1", string(y.ParseKey(k)))
+	require.EqualValues(t, "k1", string(k.UserKey))
 	vs := it.Value()
 	require.EqualValues(t, "a1", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -633,7 +632,7 @@ func TestMergingIterator(t *testing.T) {
 
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, "k2", string(y.ParseKey(k)))
+	require.EqualValues(t, "k2", string(k.UserKey))
 	vs = it.Value()
 	require.EqualValues(t, "a2", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -664,7 +663,7 @@ func TestMergingIteratorReversed(t *testing.T) {
 	it.Rewind()
 	require.True(t, it.Valid())
 	k := it.Key()
-	require.EqualValues(t, "k2", string(y.ParseKey(k)))
+	require.EqualValues(t, "k2", string(k.UserKey))
 	vs := it.Value()
 	require.EqualValues(t, "a2", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -672,7 +671,7 @@ func TestMergingIteratorReversed(t *testing.T) {
 
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, "k1", string(y.ParseKey(k)))
+	require.EqualValues(t, "k1", string(k.UserKey))
 	vs = it.Value()
 	require.EqualValues(t, "a1", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -703,7 +702,7 @@ func TestMergingIteratorTakeOne(t *testing.T) {
 	it.Rewind()
 	require.True(t, it.Valid())
 	k := it.Key()
-	require.EqualValues(t, "k1", string(y.ParseKey(k)))
+	require.EqualValues(t, "k1", string(k.UserKey))
 	vs := it.Value()
 	require.EqualValues(t, "a1", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -711,14 +710,14 @@ func TestMergingIteratorTakeOne(t *testing.T) {
 
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, "k2", string(y.ParseKey(k)))
+	require.EqualValues(t, "k2", string(k.UserKey))
 	vs = it.Value()
 	require.EqualValues(t, "a2", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
 	it.Next()
 
 	k = it.Key()
-	require.EqualValues(t, "l1", string(y.ParseKey(k)))
+	require.EqualValues(t, "l1", string(k.UserKey))
 	vs = it.Value()
 	require.EqualValues(t, "b1", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -749,7 +748,7 @@ func TestMergingIteratorTakeTwo(t *testing.T) {
 	it.Rewind()
 	require.True(t, it.Valid())
 	k := it.Key()
-	require.EqualValues(t, "k1", string(y.ParseKey(k)))
+	require.EqualValues(t, "k1", string(k.UserKey))
 	vs := it.Value()
 	require.EqualValues(t, "a1", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -757,7 +756,7 @@ func TestMergingIteratorTakeTwo(t *testing.T) {
 
 	require.True(t, it.Valid())
 	k = it.Key()
-	require.EqualValues(t, "k2", string(y.ParseKey(k)))
+	require.EqualValues(t, "k2", string(k.UserKey))
 	vs = it.Value()
 	require.EqualValues(t, "a2", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -765,7 +764,7 @@ func TestMergingIteratorTakeTwo(t *testing.T) {
 	require.True(t, it.Valid())
 
 	k = it.Key()
-	require.EqualValues(t, "l1", string(y.ParseKey(k)))
+	require.EqualValues(t, "l1", string(k.UserKey))
 	vs = it.Value()
 	require.EqualValues(t, "b1", string(vs.Value))
 	require.EqualValues(t, 'A', vs.Meta)
@@ -783,7 +782,7 @@ func BenchmarkRead(b *testing.B) {
 	for i := 0; i < n; i++ {
 		k := fmt.Sprintf("%016x", i)
 		v := fmt.Sprintf("%d", i)
-		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
+		y.Check(builder.Add(y.KeyWithTs([]byte(k), 0), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 	}
 
 	y.Check(builder.Finish())
@@ -806,7 +805,10 @@ func BenchmarkRead(b *testing.B) {
 func BenchmarkBuildTable(b *testing.B) {
 	ns := []int{1000, 10000, 100000, 1000000, 5000000, 10000000, 15000000}
 	for _, n := range ns {
-		kvs := make([]struct{ k, v []byte }, n)
+		kvs := make([]struct {
+			k y.Key
+			v []byte
+		}, n)
 		for i := 0; i < n; i++ {
 			kvs[i].k = y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
 			kvs[i].v = []byte(fmt.Sprintf("%d", i))
@@ -859,13 +861,13 @@ func BenchmarkPointGet(b *testing.B) {
 		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
 		f, err := y.OpenSyncedFile(filename, true)
 		builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
-		keys := make([][]byte, n)
+		keys := make([]y.Key, n)
 		y.Check(err)
 		for i := 0; i < n; i++ {
 			k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
 			v := fmt.Sprintf("%d", i)
 			keys[i] = k
-			y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
+			y.Check(builder.Add(k, y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
 
 		y.Check(builder.Finish())
@@ -885,7 +887,7 @@ func BenchmarkPointGet(b *testing.B) {
 					if !it.Valid() {
 						continue
 					}
-					if !y.SameKey(k, it.Key()) {
+					if !k.SameUserKey(it.Key()) {
 						continue
 					}
 					vs = it.Value()
@@ -896,7 +898,7 @@ func BenchmarkPointGet(b *testing.B) {
 
 		b.Run(fmt.Sprintf("Hash_%d", n), func(b *testing.B) {
 			var (
-				resultKey []byte
+				resultKey y.Key
 				resultVs  y.ValueStruct
 				ok        bool
 			)
@@ -905,7 +907,7 @@ func BenchmarkPointGet(b *testing.B) {
 				rand.Seed(0)
 				for i := 0; i < n; i++ {
 					k := keys[rand.Intn(n)]
-					keyHash := farm.Fingerprint64(y.ParseKey(k))
+					keyHash := farm.Fingerprint64(k.UserKey)
 					resultKey, resultVs, ok = tbl.PointGet(k, keyHash)
 					if !ok {
 						it := tbl.NewIterator(false)
@@ -913,7 +915,7 @@ func BenchmarkPointGet(b *testing.B) {
 						if !it.Valid() {
 							continue
 						}
-						if !y.SameKey(k, it.Key()) {
+						if !k.SameUserKey(it.Key()) {
 							continue
 						}
 						resultKey, resultVs = it.Key(), it.Value()
@@ -934,9 +936,9 @@ func BenchmarkReadAndBuild(b *testing.B) {
 	builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
 	y.Check(err)
 	for i := 0; i < n; i++ {
-		k := fmt.Sprintf("%016x", i)
+		k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
 		v := fmt.Sprintf("%d", i)
-		y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
+		y.Check(builder.Add(k, y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 	}
 
 	y.Check(builder.Finish())
@@ -983,9 +985,9 @@ func BenchmarkReadMerged(b *testing.B) {
 		for j := 0; j < tableSize; j++ {
 			id := j*m + i // Arrays are interleaved.
 			// id := i*tableSize+j (not interleaved)
-			k := fmt.Sprintf("%016x", id)
+			k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", id)), 0)
 			v := fmt.Sprintf("%d", id)
-			y.Check(builder.Add([]byte(k), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
+			y.Check(builder.Add(k, y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
 		y.Check(builder.Finish())
 		tbl, err := OpenTable(f.Name(), compressionType, cache)
@@ -1019,7 +1021,7 @@ func BenchmarkRandomRead(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		itr := tbl.NewIterator(false)
 		no := r.Intn(n)
-		k := []byte(fmt.Sprintf("%016x", no))
+		k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", no)), 0)
 		v := []byte(fmt.Sprintf("%d", no))
 		itr.Seek(k)
 		if !itr.Valid() {
@@ -1041,9 +1043,9 @@ func getTableForBenchmarks(b *testing.B, count int, cache *ristretto.Cache) *Tab
 	builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
 	require.NoError(b, err)
 	for i := 0; i < count; i++ {
-		k := fmt.Sprintf("%016x", i)
+		k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
 		v := fmt.Sprintf("%d", i)
-		builder.Add([]byte(k), y.ValueStruct{Value: []byte(v)})
+		builder.Add(k, y.ValueStruct{Value: []byte(v)})
 	}
 
 	err = builder.Finish()

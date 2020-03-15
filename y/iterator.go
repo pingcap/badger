@@ -71,8 +71,8 @@ func (v *ValueStruct) EncodeTo(buf []byte) []byte {
 type Iterator interface {
 	Next()
 	Rewind()
-	Seek(key []byte)
-	Key() []byte
+	Seek(key Key)
+	Key() Key
 	Value() ValueStruct
 	FillValue(vs *ValueStruct)
 	Valid() bool

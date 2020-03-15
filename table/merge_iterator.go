@@ -17,7 +17,7 @@ type MergeIterator struct {
 
 type mergeIteratorChild struct {
 	valid bool
-	key   []byte
+	key   y.Key
 	iter  y.Iterator
 
 	// The two iterators are type asserted from `y.Iterator`, used to inline more function calls.
@@ -55,7 +55,7 @@ func (mt *MergeIterator) fix() {
 		return
 	}
 	for mt.smaller.valid {
-		cmp := y.CompareKeysWithVer(mt.smaller.key, mt.bigger.key)
+		cmp := mt.smaller.key.Compare(mt.bigger.key)
 		if cmp == 0 {
 			// Ignore the value in second iterator.
 			mt.second.Next()
@@ -116,7 +116,7 @@ func (mt *MergeIterator) Rewind() {
 }
 
 // Seek brings us to element with key >= given key.
-func (mt *MergeIterator) Seek(key []byte) {
+func (mt *MergeIterator) Seek(key y.Key) {
 	mt.smaller.iter.Seek(key)
 	mt.smaller.reset()
 	mt.bigger.iter.Seek(key)
@@ -130,7 +130,7 @@ func (mt *MergeIterator) Valid() bool {
 }
 
 // Key returns the key associated with the current iterator
-func (mt *MergeIterator) Key() []byte {
+func (mt *MergeIterator) Key() y.Key {
 	return mt.smaller.key
 }
 
@@ -174,10 +174,10 @@ func (e *EmptyIterator) Next() {}
 
 func (e *EmptyIterator) Rewind() {}
 
-func (e *EmptyIterator) Seek(key []byte) {}
+func (e *EmptyIterator) Seek(key y.Key) {}
 
-func (e *EmptyIterator) Key() []byte {
-	return nil
+func (e *EmptyIterator) Key() y.Key {
+	return y.Key{}
 }
 
 func (e *EmptyIterator) Value() y.ValueStruct {

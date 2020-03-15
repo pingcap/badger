@@ -27,8 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coocood/badger/y"
-
 	"github.com/stretchr/testify/require"
 )
 
@@ -624,7 +622,7 @@ func TestIteratorAllVersionsWithDeleted(t *testing.T) {
 			require.NoError(t, err)
 			err = txn.db.batchSet([]*Entry{
 				{
-					Key:  y.KeyWithTs(item.key, item.version),
+					Key:  item.key,
 					meta: bitDelete,
 				},
 			})

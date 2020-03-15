@@ -31,7 +31,7 @@ func (w *writeWorker) ingestTables(task *ingestTask) {
 		defer task.Done()
 		defer w.orc.doneCommit(ts)
 
-		ends := make([][]byte, 0, len(task.tbls))
+		ends := make([]y.Key, 0, len(task.tbls))
 
 		for _, t := range task.tbls {
 			if task.err = t.SetGlobalTs(ts); task.err != nil {
@@ -70,7 +70,7 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 	it := mTbls.getMutable().NewIterator(false)
 	for _, t := range task.tbls {
 		it.Seek(t.Smallest())
-		if it.Valid() && y.CompareKeysWithVer(it.Key(), y.KeyWithTs(t.Biggest(), 0)) <= 0 {
+		if it.Valid() && it.Key().Compare(t.Biggest()) <= 0 {
 			wg = w.flushMemTable()
 			break
 		}
@@ -78,7 +78,7 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 	return
 }
 
-func (w *writeWorker) ingestTable(tbl *table.Table, splitHints [][]byte) error {
+func (w *writeWorker) ingestTable(tbl *table.Table, splitHints []y.Key) error {
 	cs := &w.lc.cstatus
 	kr := keyRange{
 		left:  tbl.Smallest(),
@@ -111,11 +111,11 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints [][]byte) error {
 
 	if len(overlappingTables) != 0 {
 		overlapLeft := overlappingTables[0].Smallest()
-		if y.CompareKeysWithVer(overlapLeft, kr.left) < 0 {
+		if overlapLeft.Compare(kr.left) < 0 {
 			kr.left = overlapLeft
 		}
 		overRight := overlappingTables[len(overlappingTables)-1].Biggest()
-		if y.CompareKeysWithVer(overRight, kr.right) > 0 {
+		if overRight.Compare(kr.right) > 0 {
 			kr.right = overRight
 		}
 	}
@@ -136,7 +136,7 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints [][]byte) error {
 	return nil
 }
 
-func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingTables []*table.Table, splitHints [][]byte, guard *epoch.Guard) error {
+func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingTables []*table.Table, splitHints []y.Key, guard *epoch.Guard) error {
 	cd := &compactDef{
 		nextLevel: w.lc.levels[level],
 		top:       []*table.Table{tbl},
@@ -169,7 +169,7 @@ func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
 	for _, mt := range imms {
 		it := mt.NewIterator(false)
 		it.Seek(kr.left)
-		if !it.Valid() || y.CompareKeysWithVer(it.Key(), kr.right) <= 0 {
+		if !it.Valid() || it.Key().Compare(kr.right) <= 0 {
 			return true
 		}
 	}
@@ -201,7 +201,7 @@ func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) (overlappingTabl
 	for i := left; i < right; i++ {
 		it := handler.tables[i].NewIterator(false)
 		it.Seek(kr.left)
-		if it.Valid() && y.CompareKeysWithVer(it.Key(), kr.right) <= 0 {
+		if it.Valid() && it.Key().Compare(kr.right) <= 0 {
 			overlap = true
 			break
 		}
