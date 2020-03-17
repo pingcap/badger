@@ -63,6 +63,16 @@ type Entry struct {
 	offset uint32
 }
 
+// SetHidden makes the entry a hidden entry.
+// A hidden entry can only be read if Transaction.ReadHidden is set.
+func (e *Entry) SetHidden() {
+	e.meta |= bitHidden
+}
+
+func (e *Entry) SetDelete() {
+	e.meta |= bitDelete
+}
+
 func (e *Entry) estimateSize() int {
 	return e.Key.Len() + len(e.Value) + len(e.UserMeta) + 2 // Meta, UserMeta
 }

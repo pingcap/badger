@@ -969,17 +969,16 @@ func (s *levelsController) get(key y.Key, keyHash uint64) y.ValueStruct {
 	for _, h := range s.levels {
 		vs := h.get(key, keyHash) // Calls h.RLock() and h.RUnlock().
 		if vs.Valid() {
-			log.Info("got in level", h.level)
 			return vs
 		}
 	}
 	return y.ValueStruct{}
 }
 
-func (s *levelsController) multiGet(pairs []keyValuePair) {
+func (s *levelsController) multiGet(pairs []keyValuePair, readHidden bool) {
 	start := time.Now()
 	for _, h := range s.levels {
-		h.multiGet(pairs)
+		h.multiGet(pairs, readHidden)
 	}
 	s.kv.metrics.LSMMultiGetDuration.Observe(time.Since(start).Seconds())
 }

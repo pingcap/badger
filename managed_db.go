@@ -34,7 +34,7 @@ type ManagedDB struct {
 // This is only useful for databases built on top of Badger (like Dgraph), and
 // can be ignored by most users.
 func OpenManaged(opts Options) (*ManagedDB, error) {
-	opts.managedTxns = true
+	opts.ManagedTxns = true
 	db, err := Open(opts)
 	if err != nil {
 		return nil, err
@@ -65,7 +65,7 @@ func (db *ManagedDB) NewTransactionAt(readTs uint64, update bool) *Txn {
 // This is only useful for databases built on top of Badger (like Dgraph), and
 // can be ignored by most users.
 func (txn *Txn) CommitAt(commitTs uint64) error {
-	if !txn.db.opt.managedTxns {
+	if !txn.db.IsManaged() {
 		return ErrManagedTxn
 	}
 	txn.commitTs = commitTs

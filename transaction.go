@@ -18,7 +18,7 @@ package badger
 
 import (
 	"bytes"
-	"github.com/ngaut/log"
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -160,6 +160,8 @@ type Txn struct {
 	count        int64
 	numIterators int32
 	blobCache    map[uint32]*blobCache
+
+	readHidden bool
 }
 
 type pendingWritesIterator struct {
@@ -258,6 +260,9 @@ func (txn *Txn) checkSize(e *Entry) error {
 // It will return ErrReadOnlyTxn if update flag was set to false when creating the
 // transaction.
 func (txn *Txn) Set(key, val []byte) error {
+	if txn.db.IsManaged() {
+		return ErrManagedTxn
+	}
 	e := &Entry{
 		Key:   y.KeyWithTs(key, 0),
 		Value: val,
@@ -270,11 +275,17 @@ func (txn *Txn) Set(key, val []byte) error {
 // interpret the value or store other contextual bits corresponding to the
 // key-value pair.
 func (txn *Txn) SetWithMeta(key, val []byte, meta byte) error {
+	if txn.db.IsManaged() {
+		return ErrManagedTxn
+	}
 	e := &Entry{Key: y.KeyWithTs(key, 0), Value: val, UserMeta: []byte{meta}}
 	return txn.SetEntry(e)
 }
 
 func (txn *Txn) SetWithMetaSlice(key, val, meta []byte) error {
+	if txn.db.IsManaged() {
+		return ErrManagedTxn
+	}
 	e := &Entry{Key: y.KeyWithTs(key, 0), Value: val, UserMeta: meta}
 	return txn.SetEntry(e)
 }
@@ -349,13 +360,20 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	}
 
 	seek := y.KeyWithTs(key, txn.readTs)
-	vs := txn.db.get(seek)
-	if !vs.Valid() {
-		log.Info("not found a")
-		return nil, ErrKeyNotFound
-	}
-	if isDeleted(vs.Meta) {
-		return nil, ErrKeyNotFound
+	var vs y.ValueStruct
+	for {
+		vs = txn.db.get(seek)
+		if !vs.Valid() {
+			return nil, ErrKeyNotFound
+		}
+		if isDeleted(vs.Meta) {
+			return nil, ErrKeyNotFound
+		}
+		if isHidden(vs.Meta) && !txn.readHidden {
+			seek.Version = vs.Version - 1
+			continue
+		}
+		break
 	}
 
 	item.key.UserKey = key
@@ -392,7 +410,7 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 		keyValuePairs[i].hash = farm.Fingerprint64(key)
 		keyValuePairs[i].key = y.KeyWithTs(key, txn.readTs)
 	}
-	txn.db.multiGet(keyValuePairs)
+	txn.db.multiGet(keyValuePairs, txn.readHidden)
 	items = make([]*Item, len(keys))
 	for i, pair := range keyValuePairs {
 		if pair.found && !isDeleted(pair.val.Meta) {
@@ -445,9 +463,6 @@ func (txn *Txn) Discard() {
 // If error is nil, the transaction is successfully committed. In case of a non-nil error, the LSM
 // tree won't be updated, so there's no need for any rollback.
 func (txn *Txn) Commit() error {
-	if txn.commitTs == 0 && txn.db.opt.managedTxns {
-		return ErrManagedTxn
-	}
 	if txn.discarded {
 		return ErrDiscardedTxn
 	}
@@ -455,28 +470,34 @@ func (txn *Txn) Commit() error {
 	if len(txn.writes) == 0 {
 		return nil // Nothing to do.
 	}
-
+	managed := txn.db.IsManaged()
 	entries := make([]*Entry, 0, len(txn.pendingWrites)+1)
 	for _, e := range txn.pendingWrites {
+		if managed && e.Key.Version == 0 {
+			return fmt.Errorf("version of key %x not specified for managed db", e.Key.UserKey)
+		}
 		e.meta |= bitTxn
 		entries = append(entries, e)
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Key.Compare(entries[j].Key) < 0
 	})
-
+	var commitTs uint64
 	state := txn.db.orc
 	state.writeLock.Lock()
-	commitTs := state.newCommitTs(txn)
-	if commitTs == 0 {
-		state.writeLock.Unlock()
-		return ErrConflict
+	if !managed {
+		commitTs = state.newCommitTs(txn)
+		if commitTs == 0 {
+			state.writeLock.Unlock()
+			return ErrConflict
+		}
+		for _, e := range entries {
+			// Suffix the keys with commit ts, so the key versions are sorted in
+			// descending order of commit timestamp.
+			e.Key.Version = commitTs
+		}
 	}
-	for _, e := range entries {
-		// Suffix the keys with commit ts, so the key versions are sorted in
-		// descending order of commit timestamp.
-		e.Key.Version = commitTs
-	}
+	// The txnKey entry is used for mark the transaction boundary, the value here is used for assertion.
 	e := &Entry{
 		Key:   y.KeyWithTs(txnKey, commitTs),
 		Value: []byte(strconv.FormatUint(commitTs, 10)),
@@ -528,7 +549,11 @@ func (db *DB) NewTransaction(update bool) *Txn {
 		count:  1,                       // One extra entry for BitFin.
 		size:   int64(len(txnKey) + 10), // Some buffer for the extra entry.
 		readTs: readTs,
-		guard:  db.resourceMgr.AcquireWithPayload(readTs),
+	}
+	if !db.IsManaged() {
+		txn.guard = db.resourceMgr.AcquireWithPayload(readTs)
+	} else {
+		txn.guard = db.resourceMgr.Acquire()
 	}
 	if update {
 		txn.pendingWrites = make(map[string]*Entry)
@@ -540,21 +565,29 @@ func (db *DB) NewTransaction(update bool) *Txn {
 // View executes a function creating and managing a read-only transaction for the user. Error
 // returned by the function is relayed by the View method.
 func (db *DB) View(fn func(txn *Txn) error) error {
-	if db.opt.managedTxns {
-		return ErrManagedTxn
-	}
 	txn := db.NewTransaction(false)
+	if db.IsManaged() {
+		txn.SetReadTS(math.MaxUint64)
+	}
 	defer txn.Discard()
 
 	return fn(txn)
 }
 
+// SetReadTS reads the DB with a given TS, it can only be used in a managed DB.
+func (txn *Txn) SetReadTS(readTS uint64) {
+	y.Assert(txn.db.IsManaged())
+	txn.readTs = readTS
+}
+
+// SetReadHidden makes the transaction able to read hidden entries.
+func (txn *Txn) SetReadHidden(readHidden bool) {
+	txn.readHidden = readHidden
+}
+
 // Update executes a function, creating and managing a read-write transaction
 // for the user. Error returned by the function is relayed by the Update method.
 func (db *DB) Update(fn func(txn *Txn) error) error {
-	if db.opt.managedTxns {
-		return ErrManagedTxn
-	}
 	txn := db.NewTransaction(true)
 	defer txn.Discard()
 

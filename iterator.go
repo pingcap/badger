@@ -132,6 +132,11 @@ func (item *Item) IsDeleted() bool {
 	return isDeleted(item.meta)
 }
 
+// IsHidden returns true if item is hidden.
+func (item *Item) IsHidden() bool {
+	return isHidden(item.meta)
+}
+
 // EstimatedSize returns approximate size of the key-value pair.
 //
 // This can be called while iterating through a store to quickly estimate the
@@ -357,6 +362,10 @@ func (it *Iterator) parseItemForward() {
 				iitr.Next()
 				continue
 			}
+			if isHidden(it.vs.Meta) && !it.txn.readHidden {
+				iitr.Next()
+				continue
+			}
 		} else {
 			iitr.FillValue(&it.vs)
 		}
@@ -384,6 +393,10 @@ func possibleSameKey(aKey, bKey []byte) bool {
 
 func isDeleted(meta byte) bool {
 	return meta&bitDelete > 0
+}
+
+func isHidden(meta byte) bool {
+	return meta&bitHidden > 0
 }
 
 func (it *Iterator) setItem(item *Item) {
@@ -427,6 +440,10 @@ FILL:
 	// If deleted, advance and return.
 	mi.FillValue(&it.vs)
 	if isDeleted(it.vs.Meta) {
+		mi.Next()
+		return false
+	}
+	if isHidden(it.vs.Meta) && !it.txn.readHidden {
 		mi.Next()
 		return false
 	}
@@ -503,4 +520,8 @@ func (it *Iterator) Rewind() {
 	}
 	it.iitr.Rewind()
 	it.parseItemReverse()
+}
+
+func (it *Iterator) SetAllVersions(allVersions bool) {
+	it.opt.AllVersions = allVersions
 }

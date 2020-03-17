@@ -19,6 +19,7 @@ package badger
 import (
 	"fmt"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"os"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coocood/badger/y"
 	"github.com/stretchr/testify/require"
 )
 
@@ -878,4 +880,92 @@ func TestTxnMultiGet(t *testing.T) {
 		}
 		txn.Discard()
 	})
+}
+
+func TestMangedDB(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.ManagedTxns = true
+	db, err := Open(opts)
+	require.NoError(t, err)
+	defer db.Close()
+	k := []byte("k")
+	k2 := []byte("k2")
+	err = db.Update(func(txn *Txn) error {
+		err1 := txn.Set([]byte("l"), []byte("b"))
+		// A managed DB cannot set key with zero version.
+		require.NotNil(t, err1)
+		e := &Entry{
+			Key:   y.KeyWithTs(k, 100),
+			Value: []byte("v1"),
+		}
+		return txn.SetEntry(e)
+	})
+	require.Nil(t, err)
+	err = db.Update(func(txn *Txn) error {
+		require.Nil(t, txn.SetEntry(&Entry{
+			Key:   y.KeyWithTs(k, 101),
+			Value: []byte("v2"),
+		}))
+		return txn.SetEntry(&Entry{
+			Key:   y.KeyWithTs(k2, 100),
+			Value: []byte("v2"),
+		})
+	})
+	require.Nil(t, err)
+	err = db.Update(func(txn *Txn) error {
+		e := &Entry{
+			Key:   y.KeyWithTs(k, 102),
+			Value: []byte("v3"),
+		}
+		e.SetHidden()
+		return txn.SetEntry(e)
+	})
+	require.Nil(t, err)
+	err = db.Update(func(txn *Txn) error {
+		e := &Entry{
+			Key: y.KeyWithTs(k, 103),
+		}
+		e.SetDelete()
+		return txn.SetEntry(e)
+	})
+	require.Nil(t, err)
+
+	err = db.View(func(txn *Txn) error {
+		require.Equal(t, txn.readTs, uint64(math.MaxUint64))
+		item, _ := txn.Get(k)
+		require.Nil(t, item)
+		txn.SetReadTS(102)
+		item, _ = txn.Get(k)
+		require.NotNil(t, item)
+		require.Equal(t, item.Version(), uint64(101))
+		txn.SetReadHidden(true)
+		item, _ = txn.Get(k)
+		require.NotNil(t, item)
+		require.Equal(t, item.Version(), uint64(102))
+		txn.SetReadTS(100)
+		item, _ = txn.Get(k)
+		require.NotNil(t, item)
+		require.Equal(t, item.Version(), uint64(100))
+		txn.SetReadTS(99)
+		item, _ = txn.Get(k)
+		require.Nil(t, item)
+
+		txn.SetReadTS(102)
+		txn.SetReadHidden(false)
+		items, _ := txn.MultiGet([][]byte{k, k2})
+		require.Len(t, items, 2)
+		require.Equal(t, items[0].Version(), uint64(101))
+		require.Equal(t, items[1].Version(), uint64(100))
+
+		txn.SetReadHidden(true)
+		items, _ = txn.MultiGet([][]byte{k, k2})
+		require.Len(t, items, 2)
+		require.Equal(t, items[0].Version(), uint64(102))
+		require.Equal(t, items[1].Version(), uint64(100))
+		return nil
+	})
+	require.Nil(t, err)
 }

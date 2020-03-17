@@ -75,8 +75,8 @@ type DB struct {
 	// mem table buffer to avoid expensive allocating big chunk of memory
 	memTableCh chan *table.MemTable
 
-	orc              *oracle
-	minReadTsTracker safeTsTracker
+	orc           *oracle
+	safeTsTracker safeTsTracker
 
 	limiter *rate.Limiter
 
@@ -260,7 +260,7 @@ func Open(opt Options) (db *DB, err error) {
 	}()
 
 	orc := &oracle{
-		isManaged:  opt.managedTxns,
+		isManaged:  opt.ManagedTxns,
 		nextCommit: 1,
 		commits:    make(map[uint64]uint64),
 	}
@@ -320,7 +320,7 @@ func Open(opt Options) (db *DB, err error) {
 	go db.updateSize(db.closers.updateSize)
 	db.mtbls.Store(newMemTables(<-db.memTableCh, &memTables{}))
 
-	db.resourceMgr = epoch.NewResourceManager(&db.minReadTsTracker)
+	db.resourceMgr = epoch.NewResourceManager(&db.safeTsTracker)
 
 	// newLevelsController potentially loads files in directory.
 	if db.lc, err = newLevelsController(db, &manifest, db.resourceMgr, opt.TableBuilderOptions); err != nil {
@@ -676,7 +676,7 @@ func (db *DB) get(key y.Key) y.ValueStruct {
 	return db.lc.get(key, keyHash)
 }
 
-func (db *DB) multiGet(pairs []keyValuePair) {
+func (db *DB) multiGet(pairs []keyValuePair, readHidden bool) {
 	tables := db.getMemTables() // Lock should be released.
 
 	var foundCount, mtGets int
@@ -686,13 +686,20 @@ func (db *DB) multiGet(pairs []keyValuePair) {
 			if pair.found {
 				continue
 			}
-			val := table.Get(pair.key)
-			if val.Valid() {
-				pair.val = val
-				pair.found = true
-				foundCount++
+			for {
+				val := table.Get(pair.key)
+				if val.Valid() {
+					if isHidden(val.Meta) && !readHidden {
+						pair.key.Version = val.Version - 1
+						continue
+					}
+					pair.val = val
+					pair.found = true
+					foundCount++
+				}
+				mtGets++
+				break
 			}
-			mtGets++
 		}
 	}
 	db.metrics.NumMemtableGets.Add(float64(mtGets))
@@ -701,7 +708,7 @@ func (db *DB) multiGet(pairs []keyValuePair) {
 	if foundCount == len(pairs) {
 		return
 	}
-	db.lc.multiGet(pairs)
+	db.lc.multiGet(pairs, readHidden)
 }
 
 func (db *DB) updateOffset(off logOffset) {
@@ -1048,7 +1055,26 @@ func (db *DB) IterateVLog(offset uint64, fn func(e Entry)) error {
 }
 
 func (db *DB) getCompactSafeTs() uint64 {
-	return atomic.LoadUint64(&db.minReadTsTracker.safeTs)
+	return atomic.LoadUint64(&db.safeTsTracker.safeTs)
+}
+
+// UpdateSafeTs is used for Managed DB, during compaction old version smaller than the safe ts will be discarded.
+// If this is not called, all old versions are kept.
+func (db *DB) UpdateSafeTs(ts uint64) {
+	y.Assert(db.IsManaged())
+	for {
+		old := db.getCompactSafeTs()
+		if old < ts {
+			if !atomic.CompareAndSwapUint64(&db.safeTsTracker.safeTs, old, ts) {
+				continue
+			}
+		}
+		break
+	}
+}
+
+func (db *DB) IsManaged() bool {
+	return db.opt.ManagedTxns
 }
 
 type safeTsTracker struct {

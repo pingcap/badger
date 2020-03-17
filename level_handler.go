@@ -346,16 +346,16 @@ func (s *levelHandler) getInTable(key y.Key, keyHash uint64, table *table.Table)
 	return
 }
 
-func (s *levelHandler) multiGet(pairs []keyValuePair) {
+func (s *levelHandler) multiGet(pairs []keyValuePair, readHidden bool) {
 	tables := s.getTablesForKeys(pairs)
 	if s.level == 0 {
-		s.multiGetLevel0(pairs, tables)
+		s.multiGetLevel0(pairs, tables, readHidden)
 	} else {
-		s.multiGetLevelN(pairs, tables)
+		s.multiGetLevelN(pairs, tables, readHidden)
 	}
 }
 
-func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table) {
+func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table, readHidden bool) {
 	for _, table := range tables {
 		for i := range pairs {
 			pair := &pairs[i]
@@ -365,16 +365,23 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 			if pair.key.Compare(table.Smallest()) < 0 || pair.key.Compare(table.Biggest()) > 0 {
 				continue
 			}
-			val := s.getInTable(pair.key, pair.hash, table)
-			if val.Valid() {
-				pair.val = val
-				pair.found = true
+			for {
+				val := s.getInTable(pair.key, pair.hash, table)
+				if val.Valid() {
+					if isHidden(val.Meta) && !readHidden {
+						pair.key.Version = val.Version - 1
+						continue
+					}
+					pair.val = val
+					pair.found = true
+				}
+				break
 			}
 		}
 	}
 }
 
-func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table) {
+func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table, readHidden bool) {
 	for i := range pairs {
 		pair := &pairs[i]
 		if pair.found {
@@ -384,10 +391,17 @@ func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Tabl
 		if table == nil {
 			continue
 		}
-		val := s.getInTable(pair.key, pair.hash, table)
-		if val.Valid() {
-			pair.val = val
-			pair.found = true
+		for {
+			val := s.getInTable(pair.key, pair.hash, table)
+			if val.Valid() {
+				if isHidden(val.Meta) && !readHidden {
+					pair.key.Version = val.Version - 1
+					continue
+				}
+				pair.val = val
+				pair.found = true
+			}
+			break
 		}
 	}
 }
