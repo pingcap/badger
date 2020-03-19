@@ -148,11 +148,10 @@ func (c *Cache) Get(key uint64) (interface{}, bool) {
 	return value, ok
 }
 
-// Set attempts to add the key-value item to the cache. If it returns false,
-// then the Set was dropped and the key-value item isn't added to the cache. If
-// it returns true, there's still a chance it could be dropped by the policy if
-// its determined that the key-value item isn't worth keeping, but otherwise the
-// item will be added and other items will be evicted in order to make room.
+// Set attempts to add the key-value item to the cache. There's still a chance it
+// could be dropped by the policy if its determined that the key-value item
+// isn't worth keeping, but otherwise the item will be added and other items
+// will be evicted in order to make room.
 //
 // To dynamically evaluate the items cost using the Config.Coster function, set
 // the cost parameter to 0 and Coster will be ran when needed in order to find
