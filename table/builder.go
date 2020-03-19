@@ -81,7 +81,7 @@ type Builder struct {
 
 	hashEntries []hashEntry
 	bloomFpr    float64
-	isExternal  bool
+	useGlobalTS bool
 	opt         options.TableBuilderOptions
 	useSuRF     bool
 
@@ -117,7 +117,7 @@ func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.Tabl
 		baseKeysBuf: make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    opt.LogicalBloomFPR,
-		isExternal:  true,
+		useGlobalTS: true,
 		compression: compression,
 		opt:         opt,
 	}
@@ -128,6 +128,11 @@ func (b *Builder) Reset(f *os.File) {
 	b.resetBuffers()
 	b.w.Reset(f)
 	b.idxFileName = f.Name() + idxFileSuffix
+}
+
+// SetIsManaged should be called when ingesting a table into a managed DB.
+func (b *Builder) SetIsManaged() {
+	b.useGlobalTS = false
 }
 
 func (b *Builder) resetBuffers() {
@@ -207,13 +212,13 @@ func (b *Builder) addHelper(key y.Key, v y.ValueStruct) {
 	h := header{
 		baseLen: uint16(key.Len() - diffKey.Len()),
 	}
-	if b.isExternal {
+	if b.useGlobalTS {
 		h.diffLen = uint16(len(diffKey.UserKey))
 	} else {
 		h.diffLen = uint16(diffKey.Len())
 	}
 	b.buf = append(b.buf, h.Encode()...)
-	if b.isExternal {
+	if b.useGlobalTS {
 		b.buf = append(b.buf, diffKey.UserKey...)
 	} else {
 		b.buf = diffKey.AppendTo(b.buf) // We only need to store the key difference.
@@ -328,7 +333,7 @@ func (b *Builder) Finish() error {
 
 	// Don't compress the global ts, because it may be updated during ingest.
 	ts := uint64(0)
-	if b.isExternal {
+	if b.useGlobalTS {
 		// External builder doesn't append ts to the keys, the output sst should has a non-zero global ts.
 		ts = 1
 	}

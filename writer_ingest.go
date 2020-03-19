@@ -55,7 +55,9 @@ func (w *writeWorker) ingestTables(task *ingestTask) {
 
 func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.WaitGroup, err error) {
 	w.orc.writeLock.Lock()
-	ts = w.orc.allocTs()
+	if !w.IsManaged() {
+		ts = w.orc.allocTs()
+	}
 	reqs := w.pollWriteCh(make([]*request, len(w.writeCh)))
 	w.orc.writeLock.Unlock()
 

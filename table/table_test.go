@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coocood/badger/cache"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
-	"github.com/coocood/badger/cache"
 	"github.com/dgryski/go-farm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
