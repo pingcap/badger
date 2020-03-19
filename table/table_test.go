@@ -29,7 +29,7 @@ import (
 
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
-	"github.com/dgraph-io/ristretto"
+	"github.com/coocood/badger/cache"
 	"github.com/dgryski/go-farm"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -54,8 +54,8 @@ var defaultBuilderOpt = options.TableBuilderOptions{
 	LogicalBloomFPR:     0.01,
 }
 
-func testCache() *ristretto.Cache {
-	c, err := ristretto.NewCache(&ristretto.Config{
+func testCache() *cache.Cache {
+	c, err := cache.NewCache(&cache.Config{
 		NumCounters: 1000000 * 10,
 		MaxCost:     1000000,
 		BufferItems: 64,
@@ -848,7 +848,7 @@ func BenchmarkBuildTable(b *testing.B) {
 	}
 }
 
-var cacheConfig = ristretto.Config{
+var cacheConfig = cache.Config{
 	NumCounters: 1000000 * 10,
 	MaxCost:     1000000,
 	BufferItems: 64,
@@ -974,7 +974,7 @@ func BenchmarkReadMerged(b *testing.B) {
 	tableSize := n / m
 	var tables []*Table
 
-	var cache, err = ristretto.NewCache(&cacheConfig)
+	var cache, err = cache.NewCache(&cacheConfig)
 	require.NoError(b, err)
 
 	for i := 0; i < m; i++ {
@@ -1036,7 +1036,7 @@ func BenchmarkRandomRead(b *testing.B) {
 	}
 }
 
-func getTableForBenchmarks(b *testing.B, count int, cache *ristretto.Cache) *Table {
+func getTableForBenchmarks(b *testing.B, count int, cache *cache.Cache) *Table {
 	rand.Seed(time.Now().Unix())
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
 	f, err := y.OpenSyncedFile(filename, false)

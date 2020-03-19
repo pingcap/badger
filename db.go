@@ -34,7 +34,7 @@ import (
 	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
-	"github.com/dgraph-io/ristretto"
+	"github.com/coocood/badger/cache"
 	"github.com/dgryski/go-farm"
 	"github.com/ncw/directio"
 	"github.com/ngaut/log"
@@ -80,7 +80,7 @@ type DB struct {
 
 	limiter *rate.Limiter
 
-	blockCache *ristretto.Cache
+	blockCache *cache.Cache
 
 	metrics  *y.MetricsSet
 	lsmSize  int64
@@ -265,9 +265,9 @@ func Open(opt Options) (db *DB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 
-	var cache *ristretto.Cache
+	var c *cache.Cache
 	if opt.MaxCacheSize != 0 {
-		config := ristretto.Config{
+		config := cache.Config{
 			// Use 5% of cache memory for storing counters.
 			NumCounters: int64(float64(opt.MaxCacheSize) * 0.05 * 2),
 			MaxCost:     int64(float64(opt.MaxCacheSize) * 0.95),
@@ -276,7 +276,7 @@ func Open(opt Options) (db *DB, err error) {
 			Metrics: false,
 		}
 		var err error
-		cache, err = ristretto.NewCache(&config)
+		c, err = cache.NewCache(&config)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create cache")
 		}
@@ -292,7 +292,7 @@ func Open(opt Options) (db *DB, err error) {
 		valueDirGuard: valueDirLockGuard,
 		orc:           orc,
 		metrics:       y.NewMetricSet(opt.Dir),
-		blockCache:    cache,
+		blockCache:    c,
 	}
 	db.vlog.metrics = db.metrics
 
@@ -530,7 +530,7 @@ func (db *DB) checkExternalTables(tbls []*table.Table) error {
 }
 
 // CacheMetrics returns the metrics for the underlying cache.
-func (db *DB) CacheMetrics() *ristretto.Metrics {
+func (db *DB) CacheMetrics() *cache.Metrics {
 	// Do not enable ristretto metrics in badger until issue
 	// https://github.com/dgraph-io/ristretto/issues/92 is resolved.
 	// return db.blockCache.Metrics()

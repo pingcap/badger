@@ -33,7 +33,7 @@ import (
 	"github.com/coocood/badger/surf"
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
-	"github.com/dgraph-io/ristretto"
+	"github.com/coocood/badger/cache"
 	"github.com/golang/snappy"
 	"github.com/pingcap/errors"
 )
@@ -75,7 +75,7 @@ type Table struct {
 
 	compression options.CompressionType
 
-	cache *ristretto.Cache
+	cache *cache.Cache
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -109,7 +109,7 @@ func (t *Table) Delete() error {
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(filename string, compression options.CompressionType, cache *ristretto.Cache) (*Table, error) {
+func OpenTable(filename string, compression options.CompressionType, cache *cache.Cache) (*Table, error) {
 	id, ok := ParseFileID(filename)
 	if !ok {
 		return nil, errors.Errorf("Invalid filename: %s", filename)

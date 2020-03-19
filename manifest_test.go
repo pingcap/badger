@@ -30,12 +30,12 @@ import (
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
-	"github.com/dgraph-io/ristretto"
+	"github.com/coocood/badger/cache"
 	"github.com/stretchr/testify/require"
 )
 
-func testCache() *ristretto.Cache {
-	c, err := ristretto.NewCache(&ristretto.Config{
+func testCache() *cache.Cache {
+	c, err := cache.NewCache(&cache.Config{
 		NumCounters: 1000000 * 10,
 		MaxCost:     1000000,
 		BufferItems: 64,
