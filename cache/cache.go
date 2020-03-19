@@ -284,7 +284,7 @@ func (c *Cache) handleNewItem(key uint64, cost int64) {
 		deleted := victim.del(c.store)
 		victim.Unlock()
 		if deleted && c.onEvict != nil {
-			c.onEvict(victim.key, victim.value)
+			c.onEvict(victim.key, victim.value.Load())
 		}
 	}
 }
