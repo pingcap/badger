@@ -721,19 +721,12 @@ func TestManagedDB(t *testing.T) {
 	// Don't allow these APIs in ManagedDB
 	require.Panics(t, func() { kv.NewTransaction(false) })
 
-	err = kv.Update(func(tx *Txn) error { return nil })
-	require.Equal(t, ErrManagedTxn, err)
-
-	err = kv.View(func(tx *Txn) error { return nil })
-	require.Equal(t, ErrManagedTxn, err)
-
 	// Write data at t=3.
 	txn := kv.NewTransactionAt(3, true)
 	for i := 0; i <= 3; i++ {
-		require.NoError(t, txn.Set(key(i), val(i)))
+		require.NoError(t, txn.SetEntry(&Entry{Key: y.KeyWithTs(key(i), 3), Value: val(i)}))
 	}
-	require.Equal(t, ErrManagedTxn, txn.Commit())
-	require.NoError(t, txn.CommitAt(3))
+	require.NoError(t, txn.Commit())
 
 	// Read data at t=2.
 	txn = kv.NewTransactionAt(2, false)
@@ -762,9 +755,9 @@ func TestManagedDB(t *testing.T) {
 		if err == nil {
 			continue // Don't overwrite existing keys.
 		}
-		require.NoError(t, txn.Set(key(i), val(i)))
+		require.NoError(t, txn.SetEntry(&Entry{Key: y.KeyWithTs(key(i), 7), Value: val(i)}))
 	}
-	require.NoError(t, txn.CommitAt(7))
+	require.NoError(t, txn.Commit())
 
 	// Read data at t=9.
 	txn = kv.NewTransactionAt(9, false)

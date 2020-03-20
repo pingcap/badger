@@ -18,7 +18,9 @@ package table
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
+	"math"
 	"sort"
 
 	"github.com/coocood/badger/surf"
@@ -31,9 +33,11 @@ type blockIterator struct {
 	err     error
 	baseKey []byte
 
-	globalTs uint64
-	key      y.Key
-	val      []byte
+	globalTsBytes [8]byte
+	globalTs      uint64
+	keyWithTS     []byte
+	key           y.Key
+	val           []byte
 
 	lastBaseLen     uint16
 	entryEndOffsets []uint32
@@ -44,6 +48,7 @@ func (itr *blockIterator) setBlock(b block) {
 	itr.idx = 0
 	itr.baseKey = b.baseKey
 	itr.lastBaseLen = 0
+	itr.keyWithTS = itr.keyWithTS[:0]
 	itr.key.Reset()
 	itr.val = itr.val[:0]
 	itr.data = b.data
@@ -107,19 +112,18 @@ func (itr *blockIterator) setIdx(i int) {
 	var h header
 	h.Decode(entryData)
 	if h.baseLen > itr.lastBaseLen {
-		itr.key.UserKey = append(itr.key.UserKey[:itr.lastBaseLen], itr.baseKey[itr.lastBaseLen:h.baseLen]...)
+		itr.keyWithTS = append(itr.keyWithTS[:itr.lastBaseLen], itr.baseKey[itr.lastBaseLen:h.baseLen]...)
 	}
 	itr.lastBaseLen = h.baseLen
 	valueOff := headerSize + int(h.diffLen)
 	diffKeyBytes := entryData[headerSize:valueOff]
 	if itr.globalTs != 0 {
-		itr.key.UserKey = append(itr.key.UserKey[:h.baseLen], diffKeyBytes...)
-		itr.key.Version = itr.globalTs
+		itr.keyWithTS = append(itr.keyWithTS[:h.baseLen], diffKeyBytes...)
+		itr.keyWithTS = append(itr.keyWithTS, itr.globalTsBytes[:]...)
 	} else {
-		diffKey := y.ParseKey(diffKeyBytes)
-		itr.key.UserKey = append(itr.key.UserKey[:h.baseLen], diffKey.UserKey...)
-		itr.key.Version = diffKey.Version
+		itr.keyWithTS = append(itr.keyWithTS[:h.baseLen], diffKeyBytes...)
 	}
+	itr.key = y.ParseKey(itr.keyWithTS)
 	itr.val = entryData[valueOff:]
 }
 
@@ -148,6 +152,7 @@ type Iterator struct {
 func (t *Table) NewIterator(reversed bool) *Iterator {
 	it := &Iterator{t: t, reversed: reversed}
 	it.bi.globalTs = t.globalTs
+	binary.BigEndian.PutUint64(it.bi.globalTsBytes[:], math.MaxUint64-t.globalTs)
 	if t.surf != nil {
 		it.surf = t.surf.NewIterator()
 	}

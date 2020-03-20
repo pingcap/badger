@@ -17,7 +17,6 @@
 package table
 
 import (
-	"bytes"
 	"encoding/binary"
 	"math"
 	"os"
@@ -69,6 +68,7 @@ type Builder struct {
 	baseKeysEndOffs []uint32
 
 	blockBaseKey []byte // Base key for the current block.
+	diffKeyBuf   []byte
 
 	blockEndOffsets []uint32 // Base offsets of every block.
 
@@ -159,15 +159,14 @@ func (b *Builder) Close() {}
 func (b *Builder) Empty() bool { return b.writtenLen+len(b.buf) == 0 }
 
 // keyDiff returns a suffix of newKey that is different from b.blockBaseKey.
-func (b Builder) keyDiff(newKey y.Key) y.Key {
+func (b *Builder) keyDiff(newKey []byte) []byte {
 	var i int
-	for i = 0; i < len(newKey.UserKey) && i < len(b.blockBaseKey); i++ {
-		if newKey.UserKey[i] != b.blockBaseKey[i] {
+	for i = 0; i < len(newKey) && i < len(b.blockBaseKey); i++ {
+		if newKey[i] != b.blockBaseKey[i] {
 			break
 		}
 	}
-	newKey.UserKey = newKey.UserKey[i:]
-	return newKey
+	return newKey[i:]
 }
 
 func (b *Builder) addIndex(key y.Key) {
@@ -199,30 +198,33 @@ func (b *Builder) addHelper(key y.Key, v y.ValueStruct) {
 	}
 
 	// diffKey stores the difference of key with blockBaseKey.
-	var diffKey y.Key
+	var diffKey []byte
 	if len(b.blockBaseKey) == 0 {
 		// Make a copy. Builder should not keep references. Otherwise, caller has to be very careful
 		// and will have to make copies of keys every time they add to builder, which is even worse.
-		b.blockBaseKey = append(b.blockBaseKey, key.UserKey...)
-		diffKey.Version = key.Version
+		if b.useGlobalTS {
+			b.blockBaseKey = append(b.blockBaseKey, key.UserKey...)
+		} else {
+			b.blockBaseKey = key.AppendTo(b.blockBaseKey)
+		}
 	} else {
-		diffKey = b.keyDiff(key)
+		if b.useGlobalTS {
+			diffKey = b.keyDiff(key.UserKey)
+		} else {
+			b.diffKeyBuf = key.AppendTo(b.diffKeyBuf[:0])
+			diffKey = b.keyDiff(b.diffKeyBuf)
+		}
 	}
-
 	h := header{
-		baseLen: uint16(key.Len() - diffKey.Len()),
+		diffLen: uint16(len(diffKey)),
 	}
 	if b.useGlobalTS {
-		h.diffLen = uint16(len(diffKey.UserKey))
+		h.baseLen = uint16(len(key.UserKey) - len(diffKey))
 	} else {
-		h.diffLen = uint16(diffKey.Len())
+		h.baseLen = uint16(key.Len() - len(diffKey))
 	}
 	b.buf = append(b.buf, h.Encode()...)
-	if b.useGlobalTS {
-		b.buf = append(b.buf, diffKey.UserKey...)
-	} else {
-		b.buf = diffKey.AppendTo(b.buf) // We only need to store the key difference.
-	}
+	b.buf = append(b.buf, diffKey...) // We only need to store the key difference.
 	b.buf = v.EncodeTo(b.buf)
 	b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
 	b.counter++ // Increment number of keys added for this current block.
@@ -275,10 +277,6 @@ func (b *Builder) Add(key y.Key, value y.ValueStruct) error {
 func (b *Builder) shouldFinishBlock(key y.Key, value y.ValueStruct) bool {
 	// If there is no entry till now, we will return false.
 	if len(b.entryEndOffsets) == 0 {
-		return false
-	}
-	if bytes.Equal(b.blockBaseKey, key.UserKey) {
-		// make sure each block base key is different.
 		return false
 	}
 

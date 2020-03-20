@@ -306,9 +306,12 @@ func TestForceCompactL0(t *testing.T) {
 		version := uint64(i)
 		txn := db.NewTransactionAt(version, true)
 		for j := 0; j < m; j++ {
-			require.NoError(t, txn.Set(data(j), v))
+			require.NoError(t, txn.SetEntry(&Entry{
+				Key:   y.KeyWithTs(data(j), version+1),
+				Value: v,
+			}))
 		}
-		require.NoError(t, txn.CommitAt(version+1))
+		require.NoError(t, txn.Commit())
 	}
 	db.Close()
 
