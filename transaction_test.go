@@ -910,15 +910,6 @@ func TestMangedDB(t *testing.T) {
 	require.Nil(t, err)
 	err = db.Update(func(txn *Txn) error {
 		e := &Entry{
-			Key:   y.KeyWithTs(k, 102),
-			Value: []byte("v3"),
-		}
-		e.SetHidden()
-		return txn.SetEntry(e)
-	})
-	require.Nil(t, err)
-	err = db.Update(func(txn *Txn) error {
-		e := &Entry{
 			Key: y.KeyWithTs(k, 103),
 		}
 		e.SetDelete()
@@ -934,10 +925,6 @@ func TestMangedDB(t *testing.T) {
 		item, _ = txn.Get(k)
 		require.NotNil(t, item)
 		require.Equal(t, item.Version(), uint64(101))
-		txn.SetReadHidden(true)
-		item, _ = txn.Get(k)
-		require.NotNil(t, item)
-		require.Equal(t, item.Version(), uint64(102))
 		txn.SetReadTS(100)
 		item, _ = txn.Get(k)
 		require.NotNil(t, item)
@@ -947,16 +934,9 @@ func TestMangedDB(t *testing.T) {
 		require.Nil(t, item)
 
 		txn.SetReadTS(102)
-		txn.SetReadHidden(false)
 		items, _ := txn.MultiGet([][]byte{k, k2})
 		require.Len(t, items, 2)
 		require.Equal(t, items[0].Version(), uint64(101))
-		require.Equal(t, items[1].Version(), uint64(100))
-
-		txn.SetReadHidden(true)
-		items, _ = txn.MultiGet([][]byte{k, k2})
-		require.Len(t, items, 2)
-		require.Equal(t, items[0].Version(), uint64(102))
 		require.Equal(t, items[1].Version(), uint64(100))
 		return nil
 	})

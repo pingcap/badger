@@ -41,7 +41,6 @@ import (
 const (
 	bitDelete       byte = 1 << 0 // Set if the key has been deleted.
 	bitValuePointer byte = 1 << 1 // Set if the value is NOT stored directly next to key.
-	bitHidden       byte = 1 << 2 // Set if the value is not visible to normal transaction.
 
 	// The MSB 2 bits are for transactions.
 	bitTxn    byte = 1 << 6 // Set if the entry is part of a txn.

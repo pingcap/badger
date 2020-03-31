@@ -17,6 +17,7 @@
 package table
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 	"math"
@@ -232,7 +233,15 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key y.Key) {
 
 func (itr *Iterator) seekBlock(key y.Key) int {
 	return sort.Search(len(itr.t.blockEndOffsets), func(idx int) bool {
-		return y.ParseKey(itr.t.getBlockBaseKey(idx)).Compare(key) > 0
+		blockBaseKey := itr.t.getBlockBaseKey(idx)
+		if itr.t.globalTs != 0 {
+			cmp := bytes.Compare(blockBaseKey, key.UserKey)
+			if cmp != 0 {
+				return cmp > 0
+			}
+			return itr.bi.globalTs < key.Version
+		}
+		return y.ParseKey(blockBaseKey).Compare(key) > 0
 	})
 }
 

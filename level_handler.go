@@ -346,16 +346,16 @@ func (s *levelHandler) getInTable(key y.Key, keyHash uint64, table *table.Table)
 	return
 }
 
-func (s *levelHandler) multiGet(pairs []keyValuePair, readHidden bool) {
+func (s *levelHandler) multiGet(pairs []keyValuePair) {
 	tables := s.getTablesForKeys(pairs)
 	if s.level == 0 {
-		s.multiGetLevel0(pairs, tables, readHidden)
+		s.multiGetLevel0(pairs, tables)
 	} else {
-		s.multiGetLevelN(pairs, tables, readHidden)
+		s.multiGetLevelN(pairs, tables)
 	}
 }
 
-func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table, readHidden bool) {
+func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table) {
 	for _, table := range tables {
 		for i := range pairs {
 			pair := &pairs[i]
@@ -368,10 +368,6 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 			for {
 				val := s.getInTable(pair.key, pair.hash, table)
 				if val.Valid() {
-					if isHidden(val.Meta) && !readHidden {
-						pair.key.Version = val.Version - 1
-						continue
-					}
 					pair.val = val
 					pair.found = true
 				}
@@ -381,7 +377,7 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 	}
 }
 
-func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table, readHidden bool) {
+func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table) {
 	for i := range pairs {
 		pair := &pairs[i]
 		if pair.found {
@@ -394,10 +390,6 @@ func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Tabl
 		for {
 			val := s.getInTable(pair.key, pair.hash, table)
 			if val.Valid() {
-				if isHidden(val.Meta) && !readHidden {
-					pair.key.Version = val.Version - 1
-					continue
-				}
 				pair.val = val
 				pair.found = true
 			}

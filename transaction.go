@@ -160,8 +160,6 @@ type Txn struct {
 	count        int64
 	numIterators int32
 	blobCache    map[uint32]*blobCache
-
-	readHidden bool
 }
 
 type pendingWritesIterator struct {
@@ -369,10 +367,6 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 		if isDeleted(vs.Meta) {
 			return nil, ErrKeyNotFound
 		}
-		if isHidden(vs.Meta) && !txn.readHidden {
-			seek.Version = vs.Version - 1
-			continue
-		}
 		break
 	}
 
@@ -410,7 +404,7 @@ func (txn *Txn) MultiGet(keys [][]byte) (items []*Item, err error) {
 		keyValuePairs[i].hash = farm.Fingerprint64(key)
 		keyValuePairs[i].key = y.KeyWithTs(key, txn.readTs)
 	}
-	txn.db.multiGet(keyValuePairs, txn.readHidden)
+	txn.db.multiGet(keyValuePairs)
 	items = make([]*Item, len(keys))
 	for i, pair := range keyValuePairs {
 		if pair.found && !isDeleted(pair.val.Meta) {
@@ -578,11 +572,6 @@ func (db *DB) View(fn func(txn *Txn) error) error {
 func (txn *Txn) SetReadTS(readTS uint64) {
 	y.Assert(txn.db.IsManaged())
 	txn.readTs = readTS
-}
-
-// SetReadHidden makes the transaction able to read hidden entries.
-func (txn *Txn) SetReadHidden(readHidden bool) {
-	txn.readHidden = readHidden
 }
 
 // Update executes a function, creating and managing a read-write transaction

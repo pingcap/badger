@@ -975,10 +975,10 @@ func (s *levelsController) get(key y.Key, keyHash uint64) y.ValueStruct {
 	return y.ValueStruct{}
 }
 
-func (s *levelsController) multiGet(pairs []keyValuePair, readHidden bool) {
+func (s *levelsController) multiGet(pairs []keyValuePair) {
 	start := time.Now()
 	for _, h := range s.levels {
-		h.multiGet(pairs, readHidden)
+		h.multiGet(pairs)
 	}
 	s.kv.metrics.LSMMultiGetDuration.Observe(time.Since(start).Seconds())
 }

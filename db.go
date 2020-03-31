@@ -676,7 +676,7 @@ func (db *DB) get(key y.Key) y.ValueStruct {
 	return db.lc.get(key, keyHash)
 }
 
-func (db *DB) multiGet(pairs []keyValuePair, readHidden bool) {
+func (db *DB) multiGet(pairs []keyValuePair) {
 	tables := db.getMemTables() // Lock should be released.
 
 	var foundCount, mtGets int
@@ -689,10 +689,6 @@ func (db *DB) multiGet(pairs []keyValuePair, readHidden bool) {
 			for {
 				val := table.Get(pair.key)
 				if val.Valid() {
-					if isHidden(val.Meta) && !readHidden {
-						pair.key.Version = val.Version - 1
-						continue
-					}
 					pair.val = val
 					pair.found = true
 					foundCount++
@@ -708,7 +704,7 @@ func (db *DB) multiGet(pairs []keyValuePair, readHidden bool) {
 	if foundCount == len(pairs) {
 		return
 	}
-	db.lc.multiGet(pairs, readHidden)
+	db.lc.multiGet(pairs)
 }
 
 func (db *DB) updateOffset(off logOffset) {
