@@ -158,7 +158,9 @@ func replayFunction(out *DB) func(Entry) error {
 			if err != nil {
 				return errors.Wrapf(err, "Unable to parse txn fin: %q", e.Value)
 			}
-			y.Assert(lastCommit == txnTs)
+			if !out.IsManaged() {
+				y.Assert(lastCommit == txnTs)
+			}
 			y.Assert(len(txn) > 0)
 			// Got the end of txn. Now we can store them.
 			for _, t := range txn {
@@ -179,7 +181,9 @@ func replayFunction(out *DB) func(Entry) error {
 			if lastCommit == 0 {
 				lastCommit = e.Key.Version
 			}
-			y.Assert(lastCommit == e.Key.Version)
+			if !out.IsManaged() {
+				y.Assert(lastCommit == e.Key.Version)
+			}
 			te := txnEntry{nk: nk, v: v}
 			txn = append(txn, te)
 		}
