@@ -210,26 +210,32 @@ func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) (uint32, 
 		read.recordOffset += uint32(headerBufSize + len(e.Key.UserKey) + len(e.Value) + len(e.UserMeta) + 4) // len(crcBuf)
 
 		if e.meta&bitTxn > 0 {
-			txnTs := e.Key.Version
-			if lastCommit == 0 {
-				lastCommit = txnTs
-			}
-			if lastCommit != txnTs {
-				break
+			if !vlog.kv.IsManaged() {
+				txnTs := e.Key.Version
+				if lastCommit == 0 {
+					lastCommit = txnTs
+				}
+				if lastCommit != txnTs {
+					break
+				}
 			}
 		} else if e.meta&bitFinTxn > 0 {
-			txnTs, err := strconv.ParseUint(string(e.Value), 10, 64)
-			if err != nil || lastCommit != txnTs {
-				break
+			if !vlog.kv.IsManaged() {
+				txnTs, err := strconv.ParseUint(string(e.Value), 10, 64)
+				if err != nil || lastCommit != txnTs {
+					break
+				}
+				// Got the end of txn. Now we can store them.
+				lastCommit = 0
 			}
-			// Got the end of txn. Now we can store them.
-			lastCommit = 0
 			validEndOffset = read.recordOffset
 		} else {
-			if lastCommit != 0 {
-				// This is most likely an entry which was moved as part of GC.
-				// We shouldn't get this entry in the middle of a transaction.
-				break
+			if !vlog.kv.IsManaged() {
+				if lastCommit != 0 {
+					// This is most likely an entry which was moved as part of GC.
+					// We shouldn't get this entry in the middle of a transaction.
+					break
+				}
 			}
 			validEndOffset = read.recordOffset
 		}

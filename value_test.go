@@ -75,6 +75,72 @@ func TestValueBasic(t *testing.T) {
 	require.Equal(t, 2, i)
 }
 
+func TestValueBasicManaged(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger")
+	y.Check(err)
+	defer os.RemoveAll(dir)
+
+	testOpt := getTestOptions(dir)
+	testOpt.ManagedTxns = true
+	kv, _ := Open(testOpt)
+	defer kv.Close()
+	log := &kv.vlog
+
+	// Use value big enough that the value log writes them even if SyncWrites is false.
+	const val1 = "sampleval012345678901234567890123"
+	const val2 = "samplevalb012345678901234567890123"
+	require.True(t, len(val1) >= kv.opt.ValueThreshold)
+	e := &Entry{
+		Key:   y.KeyWithTs([]byte("samplekey"), 100),
+		Value: []byte(val1),
+		meta:  bitTxn,
+	}
+	e2 := &Entry{
+		Key:   y.KeyWithTs([]byte("samplekeyb"), 100),
+		Value: []byte(val2),
+		meta:  bitTxn,
+	}
+	eFin := &Entry{
+		Key:  y.KeyWithTs(txnKey, 0),
+		meta: bitFinTxn,
+	}
+	e3 := &Entry{
+		Key:   y.KeyWithTs([]byte("samplekey"), 101),
+		Value: []byte(val1),
+		meta:  bitTxn,
+	}
+	e4 := &Entry{
+		Key:   y.KeyWithTs([]byte("samplekeyb"), 101),
+		Value: []byte(val2),
+		meta:  bitTxn,
+	}
+	eFin2 := &Entry{
+		Key:  y.KeyWithTs(txnKey, 0),
+		meta: bitFinTxn,
+	}
+	offset := log.getMaxPtr()
+	err = log.write([]*request{{
+		Entries: []*Entry{e, e2, eFin},
+	}})
+	require.Nil(t, err)
+	err = log.write([]*request{{
+		Entries: []*Entry{e3, e4, eFin2},
+	}})
+	newOffset := log.getMaxPtr()
+	require.True(t, newOffset > offset)
+	expectedEntries := []Entry{*e, *e2, *e3, *e4}
+	var i int
+	err = kv.IterateVLog(offset, func(e Entry) {
+		expectedEntry := expectedEntries[i]
+		expectedEntry.offset = e.offset
+		expectedEntry.logOffset = logOffset{}
+		require.Equal(t, expectedEntry, e)
+		i++
+	})
+	require.Nil(t, err)
+	require.Equal(t, 4, i)
+}
+
 func TestChecksums(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
