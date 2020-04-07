@@ -199,32 +199,35 @@ func (c *Cache) GetOrCompute(key uint64, f func() (interface{}, int64, error)) (
 		if v := i.value.Load(); v != nil {
 			return v, nil
 		}
-
-		i.Lock()
-		if i.dead {
-			i.Unlock()
-			continue
+		if v, err, ok := c.compute(i, f); ok {
+			return v, err
 		}
-
-		if v := i.value.Load(); v != nil {
-			i.Unlock()
-			return v, nil
-		}
-
-		v, cost, err := f()
-		if err != nil {
-			i.Unlock()
-			return nil, err
-		}
-		i.value.Store(v)
-
-		if cost == 0 && c.cost != nil {
-			cost = c.cost(v)
-		}
-		c.setBuf <- setEvent{del: false, key: key, cost: cost}
-		i.Unlock()
-		return v, nil
 	}
+}
+
+func (c *Cache) compute(i *item, f func() (interface{}, int64, error)) (interface{}, error, bool) {
+	i.Lock()
+	defer i.Unlock()
+	if i.dead {
+		return nil, nil, false
+	}
+
+	// Double check.
+	if v := i.value.Load(); v != nil {
+		return v, nil, true
+	}
+
+	v, cost, err := f()
+	if err != nil {
+		return nil, err, true
+	}
+	i.value.Store(v)
+
+	if cost == 0 && c.cost != nil {
+		cost = c.cost(v)
+	}
+	c.setBuf <- setEvent{del: false, key: i.key, cost: cost}
+	return v, nil, true
 }
 
 // Del deletes the key-value item from the cache if it exists.
