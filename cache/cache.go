@@ -254,7 +254,18 @@ func (c *Cache) Close() {
 	// block until processItems goroutine is returned
 	c.stop <- struct{}{}
 	close(c.stop)
-	close(c.setBuf)
+
+	// TODO: Close will be called when shutdown DB, but some table will try to
+	// evict data from cache in epoch's background thread, if we close setBuf here
+	// runtime will panic.
+	//
+	// It is safe to let this channel keeps open, because the DB process is going to terminate.
+	//
+	// To address this issue, we must wait epoch manger to close before close cache.
+	// For now just ignore this channel.
+
+	// close(c.setBuf)
+
 	c.policy.Close()
 }
 

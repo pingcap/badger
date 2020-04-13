@@ -61,7 +61,8 @@ type Options struct {
 	// compacted away.
 	NumLevelZeroTablesStall int
 
-	MaxCacheSize int64
+	MaxBlockCacheSize int64
+	MaxIndexCacheSize int64
 
 	// Maximum total size for L1.
 	LevelOneSize int64
@@ -157,7 +158,8 @@ var DefaultOptions = Options{
 	ValueLogMaxNumFiles:     1,
 	ValueThreshold:          32,
 	Truncate:                false,
-	MaxCacheSize:            1 * 1024 * 1024 * 1024,
+	MaxBlockCacheSize:       1 << 30,
+	MaxIndexCacheSize:       1 << 30,
 	TableBuilderOptions: options.TableBuilderOptions{
 		SuRFStartLevel:      8,
 		HashUtilRatio:       0.75,

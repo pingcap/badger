@@ -324,7 +324,8 @@ func (s *levelHandler) getInTables(key y.Key, keyHash uint64, tables []*table.Ta
 
 func (s *levelHandler) getInTable(key y.Key, keyHash uint64, table *table.Table) (result y.ValueStruct) {
 	s.metrics.NumLSMGets.Inc()
-	resultKey, resultVs, ok := table.PointGet(key, keyHash)
+	// TODO: error handling here
+	resultKey, resultVs, ok, _ := table.PointGet(key, keyHash)
 	if !ok {
 		it := table.NewIterator(false)
 		it.Seek(key)

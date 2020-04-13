@@ -51,31 +51,32 @@ func IndexFilename(tableFilename string) string { return tableFilename + idxFile
 type Table struct {
 	sync.Mutex
 
-	fd        *os.File // Own fd.
-	indexFd   *os.File
-	tableSize int // Initialized in OpenTable, using fd.Stat().
+	fd      *os.File // Own fd.
+	indexFd *os.File
 
-	globalTs        uint64
-	blockEndOffsets []uint32
-	baseKeys        []byte
-	baseKeysEndOffs []uint32
+	globalTs             uint64
+	tableSize            int64
+	blockEndOffsetsRange fieldRange
+	baseKeysEndOffsRange fieldRange
+	baseKeysRange        fieldRange
+	bfRange              fieldRange
+	hIdxRange            fieldRange
+	surfRange            fieldRange
 
 	// The following are initialized once and const.
 	smallest, biggest y.Key  // Smallest and largest keys.
 	id                uint64 // file id, part of filename
 
-	dataMmap  []byte
-	indexMmap []byte
+	blockCache *cache.Cache
+	blocksMmap []byte
+
+	indexCache *cache.Cache
+	idxData    []byte
+	indexMmap  []byte
 
 	compacting int32
 
-	bf   *bbloom.Bloom
-	hIdx *hashIndex
-	surf *surf.SuRF
-
 	compression options.CompressionType
-
-	cache *cache.Cache
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -85,9 +86,19 @@ func (t *Table) CompressionType() options.CompressionType {
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
-	if len(t.dataMmap) != 0 {
-		y.Munmap(t.dataMmap)
+	if t.blockCache != nil {
+		blkCnt := t.blockEndOffsetsRange.end - t.blockEndOffsetsRange.start
+		for blk := 0; blk < blkCnt; blk++ {
+			t.blockCache.Del(t.blockCacheKey(blk))
+		}
 	}
+	if t.indexCache != nil {
+		t.indexCache.Del(t.id)
+	}
+	if len(t.blocksMmap) != 0 {
+		y.Munmap(t.blocksMmap)
+	}
+	t.idxData = nil
 	if len(t.indexMmap) != 0 {
 		y.Munmap(t.indexMmap)
 	}
@@ -109,7 +120,7 @@ func (t *Table) Delete() error {
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(filename string, compression options.CompressionType, cache *cache.Cache) (*Table, error) {
+func OpenTable(filename string, compression options.CompressionType, blockCache *cache.Cache, indexCache *cache.Cache) (*Table, error) {
 	id, ok := ParseFileID(filename)
 	if !ok {
 		return nil, errors.Errorf("Invalid filename: %s", filename)
@@ -131,15 +142,17 @@ func OpenTable(filename string, compression options.CompressionType, cache *cach
 		indexFd:     indexFd,
 		id:          id,
 		compression: compression,
-		cache:       cache,
+		blockCache:  blockCache,
+		indexCache:  indexCache,
 	}
-	if err := t.loadIndex(); err != nil {
+
+	if err := t.initIndex(); err != nil {
 		t.Close()
 		return nil, err
 	}
 
-	if cache == nil {
-		t.dataMmap, err = y.Mmap(fd, false, t.Size())
+	if blockCache == nil {
+		t.blocksMmap, err = y.Mmap(fd, false, t.Size())
 		if err != nil {
 			t.Close()
 			return nil, y.Wrapf(err, "Unable to map file")
@@ -166,16 +179,27 @@ func (t *Table) Close() error {
 // If it find an hash collision the last return value will be false,
 // which means caller should fallback to seek search. Otherwise it value will be true.
 // If the hash index does not contain such an element the returned key will be nil.
-func (t *Table) PointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool) {
-	if t.bf != nil && !t.bf.Has(keyHash) {
-		return y.Key{}, y.ValueStruct{}, true
+func (t *Table) PointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool, error) {
+	if !t.bfRange.isEmpty() {
+		bf, err := t.bf()
+		if err != nil || !bf.Has(keyHash) {
+			return y.Key{}, y.ValueStruct{}, true, err
+		}
 	}
 
 	blkIdx, offset := uint32(resultFallback), uint8(0)
-	if t.hIdx != nil {
-		blkIdx, offset = t.hIdx.lookup(keyHash)
-	} else if t.surf != nil {
-		v, ok := t.surf.Get(key.UserKey)
+	if !t.hIdxRange.isEmpty() {
+		hIdx, err := t.hIdx()
+		if err != nil {
+			return y.Key{}, y.ValueStruct{}, false, err
+		}
+		blkIdx, offset = hIdx.lookup(keyHash)
+	} else if !t.surfRange.isEmpty() {
+		surf, err := t.surf()
+		if err != nil {
+			return y.Key{}, y.ValueStruct{}, false, err
+		}
+		v, ok := surf.Get(key.UserKey)
 		if !ok {
 			blkIdx = resultNoEntry
 		} else {
@@ -185,27 +209,27 @@ func (t *Table) PointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool)
 		}
 	}
 	if blkIdx == resultFallback {
-		return y.Key{}, y.ValueStruct{}, false
+		return y.Key{}, y.ValueStruct{}, false, nil
 	}
 	if blkIdx == resultNoEntry {
-		return y.Key{}, y.ValueStruct{}, true
+		return y.Key{}, y.ValueStruct{}, true, nil
 	}
 
 	it := t.NewIterator(false)
 	it.seekFromOffset(int(blkIdx), int(offset), key)
 
 	if !it.Valid() || !key.SameUserKey(it.Key()) {
-		return y.Key{}, y.ValueStruct{}, true
+		return y.Key{}, y.ValueStruct{}, true, it.Error()
 	}
-	return it.Key(), it.Value(), true
+	return it.Key(), it.Value(), true, nil
 }
 
 func (t *Table) read(off int, sz int) ([]byte, error) {
-	if len(t.dataMmap) > 0 {
-		if len(t.dataMmap[off:]) < sz {
+	if len(t.blocksMmap) > 0 {
+		if len(t.blocksMmap[off:]) < sz {
 			return nil, y.ErrEOF
 		}
-		return t.dataMmap[off : off+sz], nil
+		return t.blocksMmap[off : off+sz], nil
 	}
 	res := make([]byte, sz)
 	_, err := t.fd.ReadAt(res, int64(off))
@@ -218,67 +242,157 @@ func (t *Table) readNoFail(off int, sz int) []byte {
 	return res
 }
 
-func (t *Table) loadIndex() error {
-	// TODO: now we simply keep all index data in memory.
-	// We can add a cache policy to evict unused index to avoid OOM later.
+func (t *Table) initIndex() error {
+	data, err := t.indexData()
+	if err != nil {
+		return err
+	}
+	for d := (metaDecoder{buf: data}); d.valid(); d.next() {
+		switch d.currentId() {
+		case idSmallest:
+			if k := d.decode(); len(k) != 0 {
+				t.smallest = y.KeyWithTs(y.Copy(k), math.MaxUint64)
+			}
+		case idBiggest:
+			if k := d.decode(); len(k) != 0 {
+				t.biggest = y.KeyWithTs(y.Copy(k), 0)
+			}
+		case idBaseKeysEndOffs:
+			t.baseKeysEndOffsRange = d.currentRange()
+		case idBaseKeys:
+			t.baseKeysRange = d.currentRange()
+		case idBlockEndOffsets:
+			t.blockEndOffsetsRange = d.currentRange()
+			offsets := bytesToU32Slice(d.decode())
+			t.tableSize = int64(offsets[len(offsets)-1])
+		case idBloomFilter:
+			t.bfRange = d.currentRange()
+		case idHashIndex:
+			t.hIdxRange = d.currentRange()
+		case idSuRFIndex:
+			t.surfRange = d.currentRange()
+		}
+	}
+	return nil
+}
+
+func (t *Table) indexData() ([]byte, error) {
+	if len(t.idxData) != 0 {
+		return t.idxData, nil
+	}
+	if t.indexCache == nil {
+		idxData, err := t.loadIndexData(true)
+		if err != nil {
+			return nil, err
+		}
+		t.idxData = idxData
+		return idxData, nil
+	}
+
+	idxData, err := t.indexCache.GetOrCompute(t.id, func() (interface{}, int64, error) {
+		d, err := t.loadIndexData(false)
+		if err != nil {
+			return nil, 0, err
+		}
+		return d, int64(len(d)), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return idxData.([]byte), nil
+}
+
+func (t *Table) loadIndexData(mmap bool) ([]byte, error) {
 	fstat, err := t.indexFd.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	idxData, err := y.Mmap(t.indexFd, false, fstat.Size())
-	if err != nil {
-		return err
+	var idxData []byte
+
+	if mmap {
+		idxData, err = y.Mmap(t.indexFd, false, fstat.Size())
+		if err != nil {
+			return nil, err
+		}
+		t.indexMmap = idxData
+	} else {
+		idxData = make([]byte, fstat.Size())
+		if _, err = t.indexFd.Read(idxData); err != nil {
+			return nil, err
+		}
 	}
-	t.indexMmap = idxData
 
 	t.globalTs = bytesToU64(idxData[:8])
 	idxData = idxData[8:]
 	if t.compression != options.None {
 		mmap := idxData
 		if idxData, err = t.decompressData(idxData); err != nil {
-			return err
+			return nil, err
 		}
 		y.Munmap(mmap)
 		t.indexMmap = nil
 	}
+	return idxData, nil
+}
 
-	decoder := metaDecoder{buf: idxData}
-	for decoder.valid() {
-		switch decoder.currentId() {
-		case idSmallest:
-			if k := decoder.decode(); len(k) != 0 {
-				t.smallest = y.KeyWithTs(k, math.MaxUint64)
-			}
-		case idBiggest:
-			if k := decoder.decode(); len(k) != 0 {
-				t.biggest = y.KeyWithTs(k, 0)
-			}
-		case idBaseKeysEndOffs:
-			t.baseKeysEndOffs = bytesToU32Slice(decoder.decode())
-		case idBaseKeys:
-			t.baseKeys = decoder.decode()
-		case idBlockEndOffsets:
-			t.blockEndOffsets = bytesToU32Slice(decoder.decode())
-		case idBloomFilter:
-			if d := decoder.decode(); len(d) != 0 {
-				t.bf = new(bbloom.Bloom)
-				t.bf.BinaryUnmarshal(d)
-			}
-		case idHashIndex:
-			if d := decoder.decode(); len(d) != 0 {
-				t.hIdx = new(hashIndex)
-				t.hIdx.readIndex(d)
-			}
-		case idSuRFIndex:
-			if d := decoder.decode(); len(d) != 0 {
-				t.surf = new(surf.SuRF)
-				t.surf.Unmarshal(d)
-			}
-		default:
-			decoder.skip()
-		}
+func (t *Table) blockEndOffsets() ([]uint32, error) {
+	d, err := t.indexData()
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	r := &t.blockEndOffsetsRange
+	return bytesToU32Slice(d[r.start:r.end]), nil
+}
+
+func (t *Table) baseKeys() ([]byte, error) {
+	d, err := t.indexData()
+	if err != nil {
+		return nil, err
+	}
+	r := &t.baseKeysRange
+	return d[r.start:r.end], nil
+}
+
+func (t *Table) baseKeysEndOffs() ([]uint32, error) {
+	d, err := t.indexData()
+	if err != nil {
+		return nil, err
+	}
+	r := &t.baseKeysEndOffsRange
+	return bytesToU32Slice(d[r.start:r.end]), nil
+}
+
+func (t *Table) bf() (*bbloom.Bloom, error) {
+	d, err := t.indexData()
+	if err != nil {
+		return nil, err
+	}
+	r := &t.bfRange
+	bf := new(bbloom.Bloom)
+	bf.BinaryUnmarshal(d[r.start:r.end])
+	return bf, nil
+}
+
+func (t *Table) hIdx() (*hashIndex, error) {
+	d, err := t.indexData()
+	if err != nil {
+		return nil, err
+	}
+	r := &t.hIdxRange
+	hIdx := new(hashIndex)
+	hIdx.readIndex(d[r.start:r.end])
+	return hIdx, nil
+}
+
+func (t *Table) surf() (*surf.SuRF, error) {
+	d, err := t.indexData()
+	if err != nil {
+		return nil, err
+	}
+	r := &t.surfRange
+	surf := new(surf.SuRF)
+	surf.Unmarshal(d[r.start:r.end])
+	return surf, nil
 }
 
 type block struct {
@@ -291,28 +405,49 @@ func (b *block) size() int64 {
 	return int64(intSize + len(b.data))
 }
 
-func (t *Table) getBlockBaseKey(idx int) []byte {
+func (t *Table) blockBaseKeyGetter() (baseKeyGetter, error) {
+	baseKeysEndOffs, err := t.baseKeysEndOffs()
+	if err != nil {
+		return baseKeyGetter{}, err
+	}
+	baseKeys, err := t.baseKeys()
+	if err != nil {
+		return baseKeyGetter{}, err
+	}
+	return baseKeyGetter{endOffs: baseKeysEndOffs, keys: baseKeys}, nil
+}
+
+type baseKeyGetter struct {
+	endOffs []uint32
+	keys    []byte
+}
+
+func (g *baseKeyGetter) get(idx int) []byte {
 	baseKeyStartOff := 0
 	if idx > 0 {
-		baseKeyStartOff = int(t.baseKeysEndOffs[idx-1])
+		baseKeyStartOff = int(g.endOffs[idx-1])
 	}
-	baseKeyEndOff := t.baseKeysEndOffs[idx]
-	return t.baseKeys[baseKeyStartOff:baseKeyEndOff]
+	baseKeyEndOff := g.endOffs[idx]
+	return g.keys[baseKeyStartOff:baseKeyEndOff]
 }
 
 func (t *Table) block(idx int) (block, error) {
 	y.Assert(idx >= 0)
-	if idx >= len(t.blockEndOffsets) {
+	blockEndOffsets, err := t.blockEndOffsets()
+	if err != nil {
+		return block{}, err
+	}
+	if idx >= len(blockEndOffsets) {
 		return block{}, errors.New("block out of index")
 	}
 
-	if t.cache == nil {
-		return t.loadBlock(idx)
+	if t.blockCache == nil {
+		return t.loadBlock(idx, blockEndOffsets)
 	}
 
 	key := t.blockCacheKey(idx)
-	blk, err := t.cache.GetOrCompute(key, func() (interface{}, int64, error) {
-		b, e := t.loadBlock(idx)
+	blk, err := t.blockCache.GetOrCompute(key, func() (interface{}, int64, error) {
+		b, e := t.loadBlock(idx, blockEndOffsets)
 		if e != nil {
 			return nil, 0, e
 		}
@@ -324,15 +459,15 @@ func (t *Table) block(idx int) (block, error) {
 	return blk.(block), nil
 }
 
-func (t *Table) loadBlock(idx int) (block, error) {
+func (t *Table) loadBlock(idx int, blockEndOffsets []uint32) (block, error) {
 	var startOffset int
 	if idx > 0 {
-		startOffset = int(t.blockEndOffsets[idx-1])
+		startOffset = int(blockEndOffsets[idx-1])
 	}
 	blk := block{
 		offset: startOffset,
 	}
-	endOffset := int(t.blockEndOffsets[idx])
+	endOffset := int(blockEndOffsets[idx])
 	dataLen := endOffset - startOffset
 	var err error
 	if blk.data, err = t.read(blk.offset, dataLen); err != nil {
@@ -346,21 +481,12 @@ func (t *Table) loadBlock(idx int) (block, error) {
 			"failed to decode compressed data in file: %s at offset: %d, len: %d",
 			t.fd.Name(), blk.offset, dataLen)
 	}
-	blk.baseKey = t.getBlockBaseKey(idx)
+	getter, err := t.blockBaseKeyGetter()
+	if err != nil {
+		return block{}, err
+	}
+	blk.baseKey = getter.get(idx)
 	return blk, nil
-}
-
-func (t *Table) approximateOffset(it *Iterator, key y.Key) int {
-	if t.Biggest().Compare(key) < 0 {
-		return int(t.blockEndOffsets[len(t.blockEndOffsets)-1])
-	} else if t.Smallest().Compare(key) > 0 {
-		return 0
-	}
-	blk := it.seekBlock(key)
-	if blk != 0 {
-		return int(t.blockEndOffsets[blk-1])
-	}
-	return 0
 }
 
 // HasGlobalTs returns table does set global ts.
@@ -398,7 +524,7 @@ func (t *Table) blockCacheKey(idx int) uint64 {
 }
 
 // Size is its file size in bytes
-func (t *Table) Size() int64 { return int64(t.blockEndOffsets[len(t.blockEndOffsets)-1]) }
+func (t *Table) Size() int64 { return t.tableSize }
 
 // Smallest is its smallest key, or nil if there are none
 func (t *Table) Smallest() y.Key { return t.smallest }
@@ -423,14 +549,22 @@ func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 		return includeEnd
 	}
 
-	if t.surf != nil {
-		return t.surf.HasOverlap(start.UserKey, end.UserKey, includeEnd)
+	if !t.surfRange.isEmpty() {
+		surf, err := t.surf()
+		if err == nil {
+			return surf.HasOverlap(start.UserKey, end.UserKey, includeEnd)
+		}
 	}
 
+	// If there are errors occurred during seeking,
+	// we assume the table has overlapped with the range to prevent data loss.
 	it := t.NewIterator(false)
+	if it.Error() != nil {
+		return true
+	}
 	it.Seek(start)
 	if !it.Valid() {
-		return false
+		return it.Error() != nil
 	}
 	if cmp := it.Key().Compare(end); cmp > 0 {
 		return false

@@ -81,6 +81,7 @@ type DB struct {
 	limiter *rate.Limiter
 
 	blockCache *cache.Cache
+	indexCache *cache.Cache
 
 	metrics  *y.MetricsSet
 	lsmSize  int64
@@ -269,20 +270,27 @@ func Open(opt Options) (db *DB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 
-	var c *cache.Cache
-	if opt.MaxCacheSize != 0 {
-		config := cache.Config{
-			// Use 5% of cache memory for storing counters.
-			NumCounters: int64(float64(opt.MaxCacheSize) * 0.05 * 2),
-			MaxCost:     int64(float64(opt.MaxCacheSize) * 0.95),
-			BufferItems: 64,
-			// Enable metrics once https://github.com/dgraph-io/ristretto/issues/92 is resolved.
-			Metrics: false,
-		}
+	var blkCache, idxCache *cache.Cache
+	if opt.MaxBlockCacheSize != 0 {
 		var err error
-		c, err = cache.NewCache(&config)
+		blkCache, err = cache.NewCache(&cache.Config{
+			// The expected keys is MaxCacheSize / BlockSize, then x10 as documentation suggests.
+			NumCounters: opt.MaxBlockCacheSize / int64(opt.TableBuilderOptions.BlockSize) * 10,
+			MaxCost:     opt.MaxBlockCacheSize,
+			BufferItems: 64,
+		})
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to create cache")
+			return nil, errors.Wrap(err, "failed to create block cache")
+		}
+
+		indexSizeHint := float64(opt.MaxTableSize) / 6.0
+		idxCache, err = cache.NewCache(&cache.Config{
+			NumCounters: int64(float64(opt.MaxIndexCacheSize) / indexSizeHint * 10),
+			MaxCost:     opt.MaxIndexCacheSize,
+			BufferItems: 64,
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to create index cache")
 		}
 	}
 	db = &DB{
@@ -296,7 +304,8 @@ func Open(opt Options) (db *DB, err error) {
 		valueDirGuard: valueDirLockGuard,
 		orc:           orc,
 		metrics:       y.NewMetricSet(opt.Dir),
-		blockCache:    c,
+		blockCache:    blkCache,
+		indexCache:    idxCache,
 	}
 	db.vlog.metrics = db.metrics
 
@@ -497,7 +506,7 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]*table.Table, e
 			return nil, err
 		}
 
-		tbl, err := table.OpenTable(filename, spec.Compression, db.blockCache)
+		tbl, err := table.OpenTable(filename, spec.Compression, db.blockCache, db.indexCache)
 		if err != nil {
 			return nil, err
 		}
@@ -923,7 +932,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.CompressionPerLevel[0], db.blockCache)
+		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.CompressionPerLevel[0], db.blockCache, db.indexCache)
 		if err != nil {
 			log.Infof("ERROR while opening table: %v", err)
 			return err

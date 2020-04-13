@@ -116,7 +116,7 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 			flags |= y.ReadOnly
 		}
 
-		t, err := table.OpenTable(fname, tableManifest.Compression, kv.blockCache)
+		t, err := table.OpenTable(fname, tableManifest.Compression, kv.blockCache, kv.indexCache)
 		if err != nil {
 			closeAllTables(tables)
 			return nil, errors.Wrapf(err, "Opening table: %q", fname)
@@ -492,7 +492,7 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 		}
 		fd.Close()
 		var tbl *table.Table
-		tbl, err = table.OpenTable(filename, lc.opt.CompressionPerLevel[cd.nextLevel.level], lc.kv.blockCache)
+		tbl, err = table.OpenTable(filename, lc.opt.CompressionPerLevel[cd.nextLevel.level], lc.kv.blockCache, lc.kv.indexCache)
 		if err != nil {
 			return
 		}
