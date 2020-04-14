@@ -243,7 +243,7 @@ func (t *Table) readNoFail(off int, sz int) []byte {
 }
 
 func (t *Table) initIndex() error {
-	data, err := t.indexData()
+	data, err := t.loadIndexData(false)
 	if err != nil {
 		return err
 	}
@@ -302,14 +302,14 @@ func (t *Table) indexData() ([]byte, error) {
 	return idxData.([]byte), nil
 }
 
-func (t *Table) loadIndexData(mmap bool) ([]byte, error) {
+func (t *Table) loadIndexData(useMmap bool) ([]byte, error) {
 	fstat, err := t.indexFd.Stat()
 	if err != nil {
 		return nil, err
 	}
 	var idxData []byte
 
-	if mmap {
+	if useMmap {
 		idxData, err = y.Mmap(t.indexFd, false, fstat.Size())
 		if err != nil {
 			return nil, err
@@ -325,11 +325,13 @@ func (t *Table) loadIndexData(mmap bool) ([]byte, error) {
 	t.globalTs = bytesToU64(idxData[:8])
 	idxData = idxData[8:]
 	if t.compression != options.None {
-		mmap := idxData
+		old := idxData
 		if idxData, err = t.decompressData(idxData); err != nil {
 			return nil, err
 		}
-		y.Munmap(mmap)
+		if useMmap {
+			y.Munmap(old)
+		}
 		t.indexMmap = nil
 	}
 	return idxData, nil
