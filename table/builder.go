@@ -457,14 +457,6 @@ type metaDecoder struct {
 	cursor int
 }
 
-type fieldRange struct {
-	start, end int
-}
-
-func (r *fieldRange) isEmpty() bool {
-	return r.start == r.end
-}
-
 func (e *metaDecoder) valid() bool {
 	return e.cursor < len(e.buf)
 }
@@ -479,16 +471,6 @@ func (e *metaDecoder) decode() []byte {
 	cursor += 4
 	d := e.buf[cursor : cursor+l]
 	return d
-}
-
-func (e *metaDecoder) currentRange() fieldRange {
-	cursor := e.cursor + 1
-	l := int(bytesToU32(e.buf[cursor:]))
-	cursor += 4
-	return fieldRange{
-		start: cursor,
-		end:   cursor + l,
-	}
 }
 
 func (e *metaDecoder) next() {
