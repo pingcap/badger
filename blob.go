@@ -718,13 +718,13 @@ type blobCache struct {
 	lastPhysical uint32
 }
 
-const cacheSize = 64 * 1024
+const cacheSize = 8 * 1024
 
 func (bc *blobCache) read(bp blobPointer, slice *y.Slice) ([]byte, error) {
 	physicalOffset := bc.file.getPhysicalOffset(bp.logicalAddr)
 	lastPhysical := bc.lastPhysical
 	bc.lastPhysical = physicalOffset
-	if lastPhysical == 0 || bp.length > cacheSize/2 {
+	if lastPhysical == 0 || bp.length > cacheSize {
 		return bc.file.read(bp, slice)
 	}
 	if physicalOffset >= bc.cacheOffset && physicalOffset+bp.length < bc.cacheOffset+uint32(len(bc.cacheData)) {
