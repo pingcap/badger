@@ -190,11 +190,6 @@ func (lc *levelsController) runWorker(c *y.Closer, scorePriority bool) {
 	time.Sleep(time.Duration(rand.Int31n(1000)) * time.Millisecond)
 
 	for {
-		select {
-		case <-c.HasBeenClosed():
-			return
-		default:
-		}
 		guard := lc.resourceMgr.Acquire()
 		prios := lc.pickCompactLevels()
 		if scorePriority {
@@ -211,8 +206,16 @@ func (lc *levelsController) runWorker(c *y.Closer, scorePriority bool) {
 			}
 		}
 		guard.Done()
-		if !didCompact {
-			time.Sleep(time.Second * 3)
+		waitDur := time.Second * 3
+		if didCompact {
+			waitDur /= 10
+		}
+		timer := time.NewTimer(waitDur)
+		select {
+		case <-c.HasBeenClosed():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
 	}
 }
