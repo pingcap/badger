@@ -196,7 +196,9 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 		nextLevel: lh1,
 	}
 
-	rm := epoch.NewResourceManager(epoch.NoOpInspector{})
+	closer := y.NewCloser(0)
+	defer closer.SignalAndWait()
+	rm := epoch.NewResourceManager(closer, epoch.NoOpInspector{})
 	g := rm.Acquire()
 	defer g.Done()
 	manifest := createManifest()
