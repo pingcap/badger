@@ -590,14 +590,6 @@ func (db *DB) Close() (err error) {
 		db.closers.compactors.SignalAndWait()
 		log.Infof("Compaction finished")
 	}
-	if db.closers.blobManager != nil {
-		db.closers.blobManager.SignalAndWait()
-		log.Infof("BlobManager finished")
-	}
-	if db.closers.resourceManager != nil {
-		db.closers.resourceManager.SignalAndWait()
-		log.Infof("ResourceManager finished")
-	}
 	if db.opt.CompactL0WhenClose && !db.volatileMode {
 		// Force Compact L0
 		// We don't need to care about cstatus since no parallel compaction is running.
@@ -614,6 +606,15 @@ func (db *DB) Close() (err error) {
 		} else {
 			log.Infof("fillTables failed for level zero. No compaction required")
 		}
+	}
+
+	if db.closers.blobManager != nil {
+		db.closers.blobManager.SignalAndWait()
+		log.Infof("BlobManager finished")
+	}
+	if db.closers.resourceManager != nil {
+		db.closers.resourceManager.SignalAndWait()
+		log.Infof("ResourceManager finished")
 	}
 
 	if lcErr := db.lc.close(); err == nil {
