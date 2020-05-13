@@ -19,7 +19,6 @@ package badger
 import (
 	"bytes"
 	"fmt"
-	"math/rand"
 	"os"
 	"sort"
 	"time"
@@ -186,8 +185,6 @@ func (lc *levelsController) runWorker(c *y.Closer, scorePriority bool) {
 	if lc.kv.opt.DoNotCompact {
 		return
 	}
-
-	time.Sleep(time.Duration(rand.Int31n(1000)) * time.Millisecond)
 
 	for {
 		guard := lc.resourceMgr.Acquire()
