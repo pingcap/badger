@@ -115,16 +115,17 @@ func (w *writeWorker) pollWriteCh(buf []*request) []*request {
 }
 
 func (w *writeWorker) writeVLog(reqs []*request) error {
-	err := w.vlog.write(reqs)
-	if err != nil {
-		w.done(reqs, err)
-		return err
+	if !w.volatileMode {
+		if err := w.vlog.write(reqs); err != nil {
+			w.done(reqs, err)
+			return err
+		}
 	}
 	t := postLogTask{
 		logFile: w.vlog.currentLogFile().fd,
 		reqs:    reqs,
 	}
-	if w.opt.SyncWrites {
+	if w.opt.SyncWrites && !w.volatileMode {
 		w.flushCh <- t
 	} else {
 		w.writeLSMCh <- t
@@ -161,7 +162,10 @@ func (w *writeWorker) closeWriteVLog() {
 	for r := range w.writeCh { // Flush the channel.
 		reqs = append(reqs, r)
 	}
-	err := w.vlog.write(reqs)
+	var err error
+	if !w.volatileMode {
+		err = w.vlog.write(reqs)
+	}
 	if err != nil {
 		w.done(reqs, err)
 	} else {

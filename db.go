@@ -47,10 +47,12 @@ var (
 )
 
 type closers struct {
-	updateSize *y.Closer
-	compactors *y.Closer
-	memtable   *y.Closer
-	writes     *y.Closer
+	updateSize      *y.Closer
+	compactors      *y.Closer
+	resourceManager *y.Closer
+	blobManager     *y.Closer
+	memtable        *y.Closer
+	writes          *y.Closer
 }
 
 // DB provides the various functions required to interact with Badger.
@@ -83,9 +85,10 @@ type DB struct {
 	blockCache *cache.Cache
 	indexCache *cache.Cache
 
-	metrics  *y.MetricsSet
-	lsmSize  int64
-	vlogSize int64
+	metrics      *y.MetricsSet
+	lsmSize      int64
+	vlogSize     int64
+	volatileMode bool
 
 	blobManger blobManager
 
@@ -306,6 +309,7 @@ func Open(opt Options) (db *DB, err error) {
 		metrics:       y.NewMetricSet(opt.Dir),
 		blockCache:    blkCache,
 		indexCache:    idxCache,
+		volatileMode:  opt.VolatileMode,
 	}
 	db.vlog.metrics = db.metrics
 
@@ -333,7 +337,8 @@ func Open(opt Options) (db *DB, err error) {
 	go db.updateSize(db.closers.updateSize)
 	db.mtbls.Store(newMemTables(<-db.memTableCh, &memTables{}))
 
-	db.resourceMgr = epoch.NewResourceManager(&db.safeTsTracker)
+	db.closers.resourceManager = y.NewCloser(0)
+	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
 
 	// newLevelsController potentially loads files in directory.
 	if db.lc, err = newLevelsController(db, &manifest, db.resourceMgr, opt.TableBuilderOptions); err != nil {
@@ -570,7 +575,7 @@ func (db *DB) Close() (err error) {
 	// trying to push stuff into the memtable. This will also resolve the value
 	// offset problem: as we push into memtable, we update value offsets there.
 	mTbls := db.mtbls.Load().(*memTables)
-	if !mTbls.getMutable().Empty() {
+	if !mTbls.getMutable().Empty() && !db.volatileMode {
 		log.Infof("Flushing memtable")
 		db.mtbls.Store(newMemTables(nil, mTbls))
 		db.flushChan <- newFlushTask(mTbls.getMutable(), db.logOff)
@@ -585,7 +590,15 @@ func (db *DB) Close() (err error) {
 		db.closers.compactors.SignalAndWait()
 		log.Infof("Compaction finished")
 	}
-	if db.opt.CompactL0WhenClose {
+	if db.closers.blobManager != nil {
+		db.closers.blobManager.SignalAndWait()
+		log.Infof("BlobManager finished")
+	}
+	if db.closers.resourceManager != nil {
+		db.closers.resourceManager.SignalAndWait()
+		log.Infof("ResourceManager finished")
+	}
+	if db.opt.CompactL0WhenClose && !db.volatileMode {
 		// Force Compact L0
 		// We don't need to care about cstatus since no parallel compaction is running.
 		cd := &compactDef{

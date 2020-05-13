@@ -86,6 +86,7 @@ type Options struct {
 
 	// 4. Flags for testing purposes
 	// ------------------------------
+	VolatileMode bool
 	DoNotCompact bool // Stops LSM tree from compactions.
 
 	maxBatchCount int64 // max entries in batch
