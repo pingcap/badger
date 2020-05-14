@@ -29,8 +29,9 @@ import (
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 	"github.com/ncw/directio"
-	"github.com/ngaut/log"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
 
@@ -66,7 +67,7 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 	// 2. Delete files that shouldn't exist.
 	for id := range idMap {
 		if _, ok := mf.Tables[id]; !ok {
-			log.Infof("Table file %d not referenced in MANIFEST", id)
+			log.Info("table file not referenced in MANIFEST", zap.Uint64("id", id))
 			filename := table.NewFilename(id, kv.opt.Dir)
 			if err := os.Remove(filename); err != nil {
 				return y.Wrapf(err, "While removing table %d", id)
@@ -362,7 +363,7 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 	botTables := cd.bot
 
 	hasOverlap := lc.hasOverlapTable(cd)
-	log.Infof("Key range overlaps with lower levels: %v", hasOverlap)
+	log.Info("check range with lower level", zap.Bool("overlapped", hasOverlap))
 
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
 	// value log file should be GCed.
@@ -517,11 +518,11 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 	// background operation.
 	err = syncDir(lc.kv.opt.Dir)
 	if err != nil {
-		log.Error(err)
+		log.Error("compact sync dir error", zap.Error(err))
 		return
 	}
 	sortTables(newTables)
-	log.Infof("Discard stats: %s", discardStats)
+	log.Info("compact send discard stats", zap.Stringer("stats", discardStats))
 	if len(discardStats.ptrs) > 0 {
 		lc.kv.blobManger.discardCh <- discardStats
 	}
@@ -860,8 +861,9 @@ func (lc *levelsController) runCompactDef(l int, cd *compactDef, limiter *rate.L
 	// Note: For level 0, while doCompact is running, it is possible that new tables are added.
 	// However, the tables are added only to the end, so it is ok to just delete the first table.
 
-	log.Infof("LOG Compact %s, del %d tables, add %d tables, took %v",
-		cd, len(cd.top)+len(cd.bot), len(newTables), time.Since(timeStart))
+	log.Info("compaction done",
+		zap.Stringer("def", cd), zap.Int("deleted", len(cd.top)+len(cd.bot)), zap.Int("added", len(newTables)),
+		zap.Duration("duration", time.Since(timeStart)))
 	return nil
 }
 
@@ -875,31 +877,31 @@ func (lc *levelsController) doCompact(p compactionPriority, guard *epoch.Guard) 
 		nextLevel: lc.levels[l+1],
 	}
 
-	log.Infof("Got compaction priority: %+v", p)
+	log.Info("start compaction", zap.Int("level", p.level), zap.Float64("score", p.score))
 
 	// While picking tables to be compacted, both levels' tables are expected to
 	// remain unchanged.
 	if l == 0 {
 		if !lc.fillTablesL0(cd) {
-			log.Infof("fillTables failed for level: %d", l)
+			log.Info("build compaction fill tables failed", zap.Int("level", l))
 			return false, nil
 		}
 	} else {
 		if !lc.fillTables(cd) {
-			log.Infof("fillTables failed for level: %d", l)
+			log.Info("build compaction fill tables failed", zap.Int("level", l))
 			return false, nil
 		}
 	}
 	defer lc.cstatus.delete(cd) // Remove the ranges from compaction status.
 
-	log.Infof("Running compaction: %s", cd)
+	log.Info("running compaction", zap.Stringer("def", cd))
 	if err := lc.runCompactDef(l, cd, lc.kv.limiter, guard); err != nil {
 		// This compaction couldn't be done successfully.
-		log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
+		log.Info("compact failed", zap.Stringer("def", cd), zap.Error(err))
 		return false, err
 	}
 
-	log.Infof("Compaction Done for level: %d", cd.thisLevel.level)
+	log.Info("compaction done", zap.Int("level", cd.thisLevel.level))
 	return true, nil
 }
 
@@ -919,11 +921,11 @@ func (lc *levelsController) addLevel0Table(t *table.Table, head *protos.HeadInfo
 		// Stall. Make sure all levels are healthy before we unstall.
 		var timeStart time.Time
 		{
-			log.Warnf("STALLED STALLED STALLED: %v", time.Since(lastUnstalled))
+			log.Warn("STALLED STALLED STALLED", zap.Duration("duration", time.Since(lastUnstalled)))
 			lc.cstatus.RLock()
 			for i := 0; i < lc.kv.opt.TableBuilderOptions.MaxLevels; i++ {
-				log.Warnf("level=%d. Status=%s Size=%d",
-					i, lc.cstatus.levels[i].debug(), lc.levels[i].getTotalSize())
+				log.Warn("dump level status", zap.Int("level", i), zap.String("status", lc.cstatus.levels[i].debug()),
+					zap.Int64("size", lc.levels[i].getTotalSize()))
 			}
 			lc.cstatus.RUnlock()
 			timeStart = time.Now()
@@ -940,12 +942,11 @@ func (lc *levelsController) addLevel0Table(t *table.Table, head *protos.HeadInfo
 			time.Sleep(10 * time.Millisecond)
 			if i%100 == 0 {
 				prios := lc.pickCompactLevels()
-				log.Warnf("Waiting to add level 0 table. Compaction priorities: %+v", prios)
+				log.S().Warnf("waiting to add level 0 table, %+v", prios)
 				i = 0
 			}
 		}
-		log.Infof("UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED: %v",
-			time.Since(timeStart))
+		log.Info("UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED UNSTALLED", zap.Duration("duration", time.Since(timeStart)))
 		lastUnstalled = time.Now()
 	}
 

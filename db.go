@@ -37,8 +37,9 @@ import (
 	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
 	"github.com/ncw/directio"
-	"github.com/ngaut/log"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
 
@@ -138,7 +139,7 @@ func replayFunction(out *DB) func(Entry) error {
 	first := true
 	return func(e Entry) error { // Function for replaying.
 		if first {
-			log.Infof("First key=%s", e.Key)
+			log.Info("replay wal", zap.Stringer("first key", e.Key))
 		}
 		first = false
 
@@ -559,7 +560,7 @@ func (db *DB) CacheMetrics() *cache.Metrics {
 // make their way to disk. Calling DB.Close() multiple times is not safe and would
 // cause panic.
 func (db *DB) Close() (err error) {
-	log.Infof("Closing database")
+	log.Info("Closing database")
 
 	// Stop writes next.
 	db.closers.writes.SignalAndWait()
@@ -576,7 +577,7 @@ func (db *DB) Close() (err error) {
 	// offset problem: as we push into memtable, we update value offsets there.
 	mTbls := db.mtbls.Load().(*memTables)
 	if !mTbls.getMutable().Empty() && !db.volatileMode {
-		log.Infof("Flushing memtable")
+		log.Info("Flushing memtable")
 		db.mtbls.Store(newMemTables(nil, mTbls))
 		db.flushChan <- newFlushTask(mTbls.getMutable(), db.logOff)
 	}
@@ -584,11 +585,11 @@ func (db *DB) Close() (err error) {
 
 	if db.closers.memtable != nil {
 		db.closers.memtable.SignalAndWait()
-		log.Infof("Memtable flushed")
+		log.Info("Memtable flushed")
 	}
 	if db.closers.compactors != nil {
 		db.closers.compactors.SignalAndWait()
-		log.Infof("Compaction finished")
+		log.Info("Compaction finished")
 	}
 	if db.opt.CompactL0WhenClose && !db.volatileMode {
 		// Force Compact L0
@@ -601,26 +602,26 @@ func (db *DB) Close() (err error) {
 		defer guard.Done()
 		if db.lc.fillTablesL0(cd) {
 			if err := db.lc.runCompactDef(0, cd, nil, guard); err != nil {
-				log.Infof("\tLOG Compact FAILED with error: %+v: %+v", err, cd)
+				log.Info("LOG Compact FAILED", zap.Stringer("compact def", cd), zap.Error(err))
 			}
 		} else {
-			log.Infof("fillTables failed for level zero. No compaction required")
+			log.Info("fillTables failed for level zero. No compaction required")
 		}
 	}
 
 	if db.closers.blobManager != nil {
 		db.closers.blobManager.SignalAndWait()
-		log.Infof("BlobManager finished")
+		log.Info("BlobManager finished")
 	}
 	if db.closers.resourceManager != nil {
 		db.closers.resourceManager.SignalAndWait()
-		log.Infof("ResourceManager finished")
+		log.Info("ResourceManager finished")
 	}
 
 	if lcErr := db.lc.close(); err == nil {
 		err = errors.Wrap(lcErr, "DB.Close")
 	}
-	log.Infof("Waiting for closer")
+	log.Info("Waiting for closer")
 	db.closers.updateSize.SignalAndWait()
 	if db.blockCache != nil {
 		db.blockCache.Close()
@@ -816,8 +817,7 @@ func (db *DB) flushMemTable() *sync.WaitGroup {
 	db.mtbls.Store(newTbls)
 	ft := newFlushTask(mTbls.getMutable(), db.logOff)
 	db.flushChan <- ft
-	log.Infof("Flushing memtable, mt.size=%d, size of flushChan: %d",
-		mTbls.getMutable().MemSize(), len(db.flushChan))
+	log.Info("flushing memtable", zap.Int64("memtable size", mTbls.getMutable().MemSize()), zap.Int("size of flushChan", len(db.flushChan)))
 
 	// New memtable is empty. We certainly have room.
 	return &ft.wg
@@ -875,7 +875,7 @@ func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
 		if err1 != nil {
 			return err1
 		}
-		log.Infof("build L0 blob:%d size:%d", bf.fid, bf.fileSize)
+		log.Info("build L0 blob", zap.Uint32("id", bf.fid), zap.Uint32("size", bf.fileSize))
 		err1 = db.blobManger.addFile(bf)
 		if err1 != nil {
 			return err1
@@ -920,7 +920,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 				LogOffset: ft.off.offset,
 			}
 			// Store badger head even if vptr is zero, need it for readTs
-			log.Infof("Storing offset: %+v", ft.off)
+			log.Info("flush memtable storing offset", zap.Uint32("fid", ft.off.fid), zap.Uint32("offset", ft.off.offset))
 		}
 
 		fileID := db.lc.reserveFileID()
@@ -937,18 +937,18 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		err = db.writeLevel0Table(ft.mt, fd)
 		dirSyncErr := <-dirSyncCh
 		if err != nil {
-			log.Errorf("ERROR while writing to level 0: %v", err)
+			log.Error("error while writing to level 0", zap.Error(err))
 			return err
 		}
 		if dirSyncErr != nil {
-			log.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
+			log.Error("error while syncing level directory", zap.Error(dirSyncErr))
 			return err
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
 		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.CompressionPerLevel[0], db.blockCache, db.indexCache)
 		if err != nil {
-			log.Infof("ERROR while opening table: %v", err)
+			log.Info("error while opening table", zap.Error(err))
 			return err
 		}
 		err = db.lc.addLevel0Table(tbl, headInfo)
@@ -999,7 +999,7 @@ func (db *DB) calculateSize() {
 			return nil
 		})
 		if err != nil {
-			log.Infof("Got error while calculating total size of directory: %s", dir)
+			log.Info("error while calculating total size of directory", zap.String("path", dir))
 		}
 		return lsmSize, vlogSize
 	}

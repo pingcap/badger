@@ -19,8 +19,9 @@ import (
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/y"
 	"github.com/ncw/directio"
-	"github.com/ngaut/log"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 const blobFileSuffix = ".blob"
@@ -321,7 +322,7 @@ func (bm *blobManager) getFile(fid uint32) *blobFile {
 		}
 	}
 	if file == nil {
-		log.Error("failed to get file ", fid)
+		log.Error("failed to get file", zap.Uint32("id", fid))
 	}
 	bm.filesLock.RUnlock()
 	return file
@@ -350,7 +351,7 @@ func (bm *blobManager) addGCFile(oldFiles []*blobFile, newFile *blobFile, logica
 	for i, v := range oldFiles {
 		oldFids[i] = v.fid
 	}
-	log.Infof("addGCFile old files %v, new file id %d, logical files %v", oldFids, newFile.getID(), logicalFiles)
+	log.Info("addGCFile", zap.Uint32s("old files", oldFids), zap.Uint32("new file id", newFile.getID()), zap.String("logical files", fmt.Sprintf("%v", logicalFiles)))
 	buf := make([]byte, len(oldFiles)*8)
 	for i, oldFile := range oldFiles {
 		offset := i * 8
@@ -469,7 +470,7 @@ func (h *blobGCHandler) run(c *y.Closer) {
 			h.handleDiscardInfo(discardInfo)
 			err := h.doGCIfNeeded()
 			if err != nil {
-				log.Error(err)
+				log.Error("handle discardInfo", zap.Error(err))
 			}
 		case <-c.HasBeenClosed():
 			return
@@ -487,7 +488,7 @@ func (h *blobGCHandler) handleDiscardInfo(discardStats *DiscardStats) {
 	for physicalFid, ptrs := range physicalDiscards {
 		err := h.writeDiscardToFile(physicalFid, ptrs)
 		if err != nil {
-			log.Error("handleDiscardInfo", physicalFid, err)
+			log.Error("handleDiscardInfo", zap.Uint32("physicalFid", physicalFid), zap.Error(err))
 			continue
 		}
 	}

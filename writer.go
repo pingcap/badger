@@ -25,7 +25,8 @@ import (
 	"github.com/coocood/badger/fileutil"
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
-	"github.com/ngaut/log"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 type writeWorker struct {
@@ -198,7 +199,7 @@ func (w *writeWorker) writeLSM(reqs []*request) {
 	}
 
 	w.done(reqs, nil)
-	log.Debugf("%d entries written", count)
+	log.Debug("entries written", zap.Int("count", count))
 	return
 }
 
@@ -208,7 +209,7 @@ func (w *writeWorker) done(reqs []*request, err error) {
 		r.Wg.Done()
 	}
 	if err != nil {
-		log.Warnf("ERROR in Badger::writeLSM: %v", err)
+		log.Warn("handle requests failed", zap.Int("count", len(reqs)), zap.Error(err))
 	}
 }
 

@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ngaut/log"
+	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func TestBuildPrefixKeys(t *testing.T) {
@@ -152,7 +153,7 @@ func genRandomKeys(initSize, initLen, round int) [][]byte {
 	for i := len(result); i < len(keys); i++ {
 		keys[i] = nil
 	}
-	log.Debugf("generate %d keys using %v with seed %x", len(result), time.Since(start), start.Unix())
+	log.Info("keys generated", zap.Int("count", len(result)), zap.Duration("time", time.Since(start)), zap.Int64("seed", start.Unix()))
 
 	return result
 }
