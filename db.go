@@ -1137,7 +1137,7 @@ func (t *safeTsTracker) End() {
 		safe = t.minActive - 1
 	}
 
-	if safe > t.safeTs {
+	if safe > atomic.LoadUint64(&t.safeTs) {
 		atomic.StoreUint64(&t.safeTs, safe)
 	}
 }
