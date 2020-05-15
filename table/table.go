@@ -83,6 +83,7 @@ type Table struct {
 
 	indexCache *cache.Cache
 	index      *tableIndex
+	indexOnce  sync.Once
 	indexMmap  []byte
 
 	compacting int32
@@ -300,15 +301,16 @@ func (t *Table) readTableIndex(data []byte) *tableIndex {
 }
 
 func (t *Table) getIndex() (*tableIndex, error) {
-	if t.index != nil {
-		return t.index, nil
-	}
 	if t.indexCache == nil {
-		idxData, err := t.loadIndexData(true)
-		if err != nil {
-			return nil, err
-		}
-		t.index = t.readTableIndex(idxData)
+		var err error
+		t.indexOnce.Do(func() {
+			var idxData []byte
+			idxData, err = t.loadIndexData(true)
+			if err != nil {
+				return
+			}
+			t.index = t.readTableIndex(idxData)
+		})
 		return t.index, nil
 	}
 
