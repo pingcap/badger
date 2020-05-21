@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/coocood/badger/cache"
+	"github.com/coocood/badger/cache/z"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
@@ -85,16 +86,7 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 // keyValues is n by 2 where n is number of pairs.
 func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
-
-	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
-	f, err := y.OpenSyncedFile(filename, true)
-	if t != nil {
-		require.NoError(t, err)
-	} else {
-		y.Check(err)
-	}
-	b := NewTableBuilder(f, rate.NewLimiter(rate.Inf, math.MaxInt32), 0, defaultBuilderOpt)
-
+	b, f := newTableBuilderForTest()
 	sort.Slice(keyValues, func(i, j int) bool {
 		return keyValues[i][0] < keyValues[j][0]
 	})
@@ -108,8 +100,44 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 		}
 	}
 	y.Check(b.Finish())
-	f.Close()
-	f, _ = y.OpenSyncedFile(filename, true)
+	y.Check(f.Close())
+	f, _ = y.OpenSyncedFile(f.Name(), true)
+	return f
+}
+
+func newTableBuilderForTest() (*Builder, *os.File) {
+	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), z.FastRand())
+	f, err := y.OpenSyncedFile(filename, true)
+	y.Check(err)
+	opt := defaultBuilderOpt
+	if z.FastRand()%2 == 0 {
+		opt.SuRFStartLevel = 8
+	}
+	y.Assert(filename == f.Name())
+	return NewTableBuilder(f, rate.NewLimiter(rate.Inf, math.MaxInt32), 0, opt), f
+}
+
+func buildMultiVersionTable(keyValues [][]string) *os.File {
+	b, f := newTableBuilderForTest()
+	sort.Slice(keyValues, func(i, j int) bool {
+		return keyValues[i][0] < keyValues[j][0]
+	})
+	for _, kv := range keyValues {
+		y.Assert(len(kv) == 2)
+		val := fmt.Sprintf("%s_%d", kv[1], 9)
+		err := b.Add(y.KeyWithTs([]byte(kv[0]), 9), y.ValueStruct{Value: []byte(val), Meta: 'A', UserMeta: []byte{0}})
+		y.Check(err)
+		for i := uint64(8); i > 0; i-- {
+			if z.FastRand()%4 != 0 {
+				val = fmt.Sprintf("%s_%d", kv[1], i)
+				err = b.Add(y.KeyWithTs([]byte(kv[0]), i), y.ValueStruct{Value: []byte(val), Meta: 'A', UserMeta: []byte{0}})
+				y.Check(err)
+			}
+		}
+	}
+	y.Check(b.Finish())
+	y.Check(f.Close())
+	f, _ = y.OpenSyncedFile(f.Name(), true)
 	return f
 }
 
@@ -292,7 +320,7 @@ func TestSeekToLast(t *testing.T) {
 	}
 }
 
-func TestSeek(t *testing.T) {
+func TestSeekBasic(t *testing.T) {
 	f := buildTestTable(t, "k", 10000)
 	table, err := OpenTable(f.Name(), compressionType, testCache(), testCache())
 	require.NoError(t, err)
@@ -476,6 +504,58 @@ func TestIterateBackAndForth(t *testing.T) {
 	it.seekToFirst()
 	k = it.Key()
 	require.EqualValues(t, key("key", 0), k.UserKey)
+}
+
+func TestIterateMultiVersion(t *testing.T) {
+	f := buildMultiVersionTable(generateKeyValues("key", 4000))
+	table, err := OpenTable(f.Name(), compressionType, testCache(), testCache())
+	require.NoError(t, err)
+	defer table.Delete()
+	it := table.NewIterator(false)
+	var lastKey y.Key
+	for it.Rewind(); it.Valid(); it.Next() {
+		if !lastKey.IsEmpty() {
+			require.True(t, lastKey.Compare(it.Key()) < 0)
+		}
+		lastKey.Copy(it.Key())
+	}
+	for i := 0; i < 1000; i++ {
+		k := y.KeyWithTs([]byte(key("key", int(z.FastRand()%4000))), uint64(5+z.FastRand()%5))
+		kHash := farm.Fingerprint64(k.UserKey)
+		gotKey, _, ok, _ := table.PointGet(k, kHash)
+		if ok {
+			require.True(t, gotKey.SameUserKey(k))
+			require.True(t, gotKey.Compare(k) >= 0)
+		} else {
+			it.Seek(k)
+			if it.Valid() {
+				require.True(t, it.Key().Compare(k) >= 0)
+				var cpKey y.Key
+				cpKey.Copy(it.Key())
+				it.prev()
+				if it.Valid() {
+					require.True(t, it.Key().Compare(k) < 0, "%s %s %s", it.Key(), cpKey, k)
+				}
+			}
+		}
+	}
+	revIt := table.NewIterator(true)
+	lastKey.Reset()
+	for revIt.Rewind(); revIt.Valid(); revIt.Next() {
+		if !lastKey.IsEmpty() {
+			require.Truef(t, lastKey.Compare(revIt.Key()) > 0, "%v %v", lastKey.String(), revIt.Key().String())
+		}
+		lastKey.Copy(revIt.Key())
+	}
+	for i := 0; i < 1000; i++ {
+		k := y.KeyWithTs([]byte(key("key", int(z.FastRand()%4000))), uint64(5+z.FastRand()%5))
+		// reverse iterator never seek to the same key with smaller version.
+		revIt.Seek(k)
+		if !revIt.Valid() {
+			continue
+		}
+		require.True(t, revIt.Key().Compare(k) <= 0, "%s %s", revIt.Key(), k)
+	}
 }
 
 func TestUniIterator(t *testing.T) {

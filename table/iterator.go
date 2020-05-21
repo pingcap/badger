@@ -27,32 +27,70 @@ import (
 	"github.com/coocood/badger/y"
 )
 
+type singleKeyIterator struct {
+	oldOffset uint32
+	latestVer uint64
+	latestVal []byte
+	oldVals   entrySlice
+	idx       int
+	oldBlock  []byte
+}
+
+func (ski *singleKeyIterator) set(oldOffset uint32, latestVer uint64, latestVal []byte) {
+	ski.oldOffset = oldOffset
+	numEntries := bytesToU32(ski.oldBlock[oldOffset:])
+	endOffsStartIdx := oldOffset + 4
+	endOffsEndIdx := endOffsStartIdx + 4*numEntries
+	ski.oldVals.endOffs = bytesToU32Slice(ski.oldBlock[endOffsStartIdx:endOffsEndIdx])
+	valueEndOff := endOffsEndIdx + ski.oldVals.endOffs[numEntries-1]
+	ski.oldVals.data = ski.oldBlock[endOffsEndIdx:valueEndOff]
+	ski.latestVer = latestVer
+	ski.latestVal = latestVal
+}
+
+func (ski *singleKeyIterator) versionAndVal() (ver uint64, val []byte) {
+	if ski.idx == 0 {
+		return ski.latestVer, ski.latestVal
+	}
+	oldEntry := ski.oldVals.getEntry(ski.idx - 1)
+	return bytesToU64(oldEntry), oldEntry[8:]
+}
+
+func (ski *singleKeyIterator) length() int {
+	return ski.oldVals.length() + 1
+}
+
+func (ski *singleKeyIterator) seekVersion(sVer uint64) (ver uint64, val []byte) {
+	for ski.idx = 0; ski.idx < ski.length(); ski.idx++ {
+		ver, val = ski.versionAndVal()
+		if sVer >= ver {
+			return
+		}
+	}
+	return
+}
+
 type blockIterator struct {
-	data    []byte
+	entries entrySlice
 	idx     int
 	err     error
-	baseKey []byte
 
 	globalTsBytes [8]byte
 	globalTs      uint64
-	keyWithTS     []byte
 	key           y.Key
 	val           []byte
 
-	lastBaseLen     uint16
-	entryEndOffsets []uint32
+	baseLen uint16
+	ski     singleKeyIterator
 }
 
 func (itr *blockIterator) setBlock(b block) {
 	itr.err = nil
 	itr.idx = 0
-	itr.baseKey = b.baseKey
-	itr.lastBaseLen = 0
-	itr.keyWithTS = itr.keyWithTS[:0]
 	itr.key.Reset()
 	itr.val = itr.val[:0]
-	itr.data = b.data
-	itr.loadEntryEndOffsets()
+	itr.loadEntries(b.data)
+	itr.key.UserKey = append(itr.key.UserKey[:0], b.baseKey[:itr.baseLen]...)
 }
 
 func (itr *blockIterator) valid() bool {
@@ -63,25 +101,37 @@ func (itr *blockIterator) Error() error {
 	return itr.err
 }
 
-// loadEntryEndOffsets loads the entryEndOffsets for binary searching for a key.
-func (itr *blockIterator) loadEntryEndOffsets() {
+// loadEntries loads the entryEndOffsets for binary searching for a key.
+func (itr *blockIterator) loadEntries(data []byte) {
 	// Get the number of entries from the end of `data` (and remove it).
-	off := len(itr.data) - 4
-	entriesNum := int(bytesToU32(itr.data[off:]))
-	itr.data = itr.data[:off]
-	off = len(itr.data) - entriesNum*4
-	itr.entryEndOffsets = bytesToU32Slice(itr.data[off:])
-	itr.data = itr.data[:off]
+	dataLen := len(data)
+	itr.baseLen = binary.LittleEndian.Uint16(data[dataLen-2:])
+	entriesNum := int(bytesToU32(data[dataLen-6:]))
+	entriesEnd := dataLen - 6
+	entriesStart := entriesEnd - entriesNum*4
+	itr.entries.endOffs = bytesToU32Slice(data[entriesStart:entriesEnd])
+	itr.entries.data = data[:entriesStart]
 }
 
 // Seek brings us to the first block element that is >= input key.
 // The binary search will begin at `start`, you can use it to skip some items.
 func (itr *blockIterator) seek(key y.Key) {
-	foundEntryIdx := sort.Search(len(itr.entryEndOffsets), func(idx int) bool {
+	foundEntryIdx := sort.Search(itr.entries.length(), func(idx int) bool {
 		itr.setIdx(idx)
-		return itr.key.Compare(key) >= 0
+		return bytes.Compare(itr.key.UserKey, key.UserKey) >= 0
 	})
 	itr.setIdx(foundEntryIdx)
+	if itr.err != nil {
+		return
+	}
+	if itr.key.Version > key.Version && bytes.Equal(key.UserKey, itr.key.UserKey) {
+		if itr.hasOldVersion() {
+			itr.key.Version, itr.val = itr.ski.seekVersion(key.Version)
+		}
+		if itr.key.Version > key.Version {
+			itr.setIdx(foundEntryIdx + 1)
+		}
+	}
 }
 
 // seekToFirst brings us to the first element. Valid should return true.
@@ -91,48 +141,82 @@ func (itr *blockIterator) seekToFirst() {
 
 // seekToLast brings us to the last element. Valid should return true.
 func (itr *blockIterator) seekToLast() {
-	itr.setIdx(len(itr.entryEndOffsets) - 1)
+	itr.setIdx(itr.entries.length() - 1)
+	itr.seekToLastVersion()
 }
 
 // setIdx sets the iterator to the entry index and set the current key and value.
 func (itr *blockIterator) setIdx(i int) {
 	itr.idx = i
-	if i >= len(itr.entryEndOffsets) || i < 0 {
+	if i >= itr.entries.length() || i < 0 {
 		itr.err = io.EOF
 		return
 	}
 	itr.err = nil
-	var startOffset int
-	if i > 0 {
-		startOffset = int(itr.entryEndOffsets[i-1])
+	entryData := itr.entries.getEntry(i)
+	diffKeyLen := binary.LittleEndian.Uint16(entryData)
+	entryData = entryData[2:]
+	itr.key.UserKey = append(itr.key.UserKey[:itr.baseLen], entryData[:diffKeyLen]...)
+	entryData = entryData[diffKeyLen:]
+	hasOld := entryData[0] != 0
+	entryData = entryData[1:]
+	var oldOffset uint32
+	if hasOld {
+		oldOffset = bytesToU32(entryData)
+		entryData = entryData[4:]
 	}
-
-	endOffset := int(itr.entryEndOffsets[i])
-	entryData := itr.data[startOffset:endOffset]
-	var h header
-	h.Decode(entryData)
-	if h.baseLen > itr.lastBaseLen {
-		itr.keyWithTS = append(itr.keyWithTS[:itr.lastBaseLen], itr.baseKey[itr.lastBaseLen:h.baseLen]...)
-	}
-	itr.lastBaseLen = h.baseLen
-	valueOff := headerSize + int(h.diffLen)
-	diffKeyBytes := entryData[headerSize:valueOff]
 	if itr.globalTs != 0 {
-		itr.keyWithTS = append(itr.keyWithTS[:h.baseLen], diffKeyBytes...)
-		itr.keyWithTS = append(itr.keyWithTS, itr.globalTsBytes[:]...)
+		itr.key.Version = itr.globalTs
 	} else {
-		itr.keyWithTS = append(itr.keyWithTS[:h.baseLen], diffKeyBytes...)
+		itr.key.Version = bytesToU64(entryData)
+		entryData = entryData[8:]
 	}
-	itr.key = y.ParseKey(itr.keyWithTS)
-	itr.val = entryData[valueOff:]
+	itr.val = entryData
+	itr.ski.idx = 0
+	if hasOld {
+		itr.ski.set(oldOffset, itr.key.Version, itr.val)
+	}
+}
+
+func (itr *blockIterator) hasOldVersion() bool {
+	return itr.ski.oldOffset != 0
 }
 
 func (itr *blockIterator) next() {
+	if itr.hasOldVersion() {
+		itr.ski.idx++
+		if itr.ski.idx < itr.ski.oldVals.length() {
+			itr.key.Version, itr.val = itr.ski.versionAndVal()
+			return
+		}
+	}
 	itr.setIdx(itr.idx + 1)
 }
 
 func (itr *blockIterator) prev() {
+	if itr.prevVersion() {
+		return
+	}
 	itr.setIdx(itr.idx - 1)
+	itr.seekToLastVersion()
+}
+
+func (itr *blockIterator) prevVersion() bool {
+	if itr.hasOldVersion() {
+		itr.ski.idx--
+		if itr.ski.idx >= 0 {
+			itr.key.Version, itr.val = itr.ski.versionAndVal()
+			return true
+		}
+	}
+	return false
+}
+
+func (itr *blockIterator) seekToLastVersion() {
+	if itr.hasOldVersion() {
+		itr.ski.idx = itr.ski.length() - 1
+		itr.key.Version, itr.val = itr.ski.versionAndVal()
+	}
 }
 
 // Iterator is an iterator for a Table.
@@ -161,6 +245,10 @@ func (t *Table) NewIterator(reversed bool) *Iterator {
 func (t *Table) newIterator(reversed bool, index *tableIndex) *Iterator {
 	it := &Iterator{t: t, reversed: reversed, tIdx: index}
 	it.bi.globalTs = t.globalTs
+	if t.oldBlockLen > 0 {
+		y.Assert(len(t.oldBlock) > 0)
+	}
+	it.bi.ski.oldBlock = t.oldBlock
 	binary.BigEndian.PutUint64(it.bi.globalTsBytes[:], math.MaxUint64-t.globalTs)
 	if index.surf != nil {
 		it.surf = index.surf.NewIterator()
@@ -219,7 +307,7 @@ func (itr *Iterator) seekToLast() {
 	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekHelper(blockIdx int, key y.Key) {
+func (itr *Iterator) seekInBlock(blockIdx int, key y.Key) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx, itr.tIdx)
 	if err != nil {
@@ -249,15 +337,8 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key y.Key) {
 
 func (itr *Iterator) seekBlock(key y.Key) int {
 	return sort.Search(len(itr.tIdx.blockEndOffsets), func(idx int) bool {
-		blockBaseKey := itr.tIdx.getBlockBaseKey(idx)
-		if itr.t.globalTs != 0 {
-			cmp := bytes.Compare(blockBaseKey, key.UserKey)
-			if cmp != 0 {
-				return cmp > 0
-			}
-			return itr.bi.globalTs < key.Version
-		}
-		return y.ParseKey(blockBaseKey).Compare(key) > 0
+		blockBaseKey := itr.tIdx.baseKeys.getEntry(idx)
+		return bytes.Compare(blockBaseKey, key.UserKey) > 0
 	})
 }
 
@@ -273,7 +354,7 @@ func (itr *Iterator) seekFrom(key y.Key) {
 	if idx == 0 {
 		// The smallest key in our table is already strictly > key. We can return that.
 		// This is like a SeekToFirst.
-		itr.seekHelper(0, key)
+		itr.seekInBlock(0, key)
 		return
 	}
 
@@ -283,7 +364,7 @@ func (itr *Iterator) seekFrom(key y.Key) {
 	// 1) Everything in block[idx-1] is strictly < key. In this case, we should go to the first
 	//    element of block[idx].
 	// 2) Some element in block[idx-1] is >= key. We should go to that element.
-	itr.seekHelper(idx-1, key)
+	itr.seekInBlock(idx-1, key)
 	if itr.err == io.EOF {
 		// Case 1. Need to visit block[idx].
 		if idx == len(itr.tIdx.blockEndOffsets) {
@@ -292,7 +373,7 @@ func (itr *Iterator) seekFrom(key y.Key) {
 			return
 		}
 		// Since block[idx].smallest is > key. This is essentially a block[idx].SeekToFirst.
-		itr.seekHelper(idx, key)
+		itr.seekFromOffset(idx, 0, key)
 	}
 	// Case 2: No need to do anything. We already did the seek in block[idx-1].
 }
@@ -301,7 +382,6 @@ func (itr *Iterator) seekFrom(key y.Key) {
 func (itr *Iterator) seek(key y.Key) {
 	itr.err = nil
 	itr.reset()
-
 	if itr.surf == nil {
 		itr.seekFrom(key)
 		return
@@ -336,7 +416,7 @@ func (itr *Iterator) next() {
 		return
 	}
 
-	if itr.bi.data == nil {
+	if itr.bi.entries.length() == 0 {
 		block, err := itr.t.block(itr.bpos, itr.tIdx)
 		if err != nil {
 			itr.err = err
@@ -351,7 +431,7 @@ func (itr *Iterator) next() {
 	itr.bi.next()
 	if !itr.bi.valid() {
 		itr.bpos++
-		itr.bi.data = nil
+		itr.bi.entries.reset()
 		itr.next()
 		return
 	}
@@ -364,7 +444,7 @@ func (itr *Iterator) prev() {
 		return
 	}
 
-	if itr.bi.data == nil {
+	if itr.bi.entries.length() == 0 {
 		block, err := itr.t.block(itr.bpos, itr.tIdx)
 		if err != nil {
 			itr.err = err
@@ -379,7 +459,7 @@ func (itr *Iterator) prev() {
 	itr.bi.prev()
 	if !itr.bi.valid() {
 		itr.bpos--
-		itr.bi.data = nil
+		itr.bi.entries.reset()
 		itr.prev()
 		return
 	}

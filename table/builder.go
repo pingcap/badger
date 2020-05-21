@@ -17,6 +17,7 @@
 package table
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
 	"os"
@@ -34,21 +35,45 @@ import (
 	"golang.org/x/time/rate"
 )
 
-type header struct {
-	baseLen uint16 // Overlap with base key.
-	diffLen uint16 // Length of the diff.
+type entrySlice struct {
+	data    []byte
+	endOffs []uint32
 }
 
-// Encode encodes the header.
-func (h header) Encode() []byte {
-	var b [4]byte
-	*(*header)(unsafe.Pointer(&b[0])) = h
-	return b[:]
+func (es *entrySlice) append(entry []byte) {
+	es.data = append(es.data, entry...)
+	es.endOffs = append(es.endOffs, uint32(len(es.data)))
 }
 
-// Decode decodes the header.
-func (h *header) Decode(buf []byte) {
-	*h = *(*header)(unsafe.Pointer(&buf[0]))
+func (es *entrySlice) appendVal(val *y.ValueStruct) {
+	es.data = val.EncodeTo(es.data)
+	es.endOffs = append(es.endOffs, uint32(len(es.data)))
+}
+
+func (es *entrySlice) getLast() []byte {
+	return es.getEntry(es.length() - 1)
+}
+
+func (es *entrySlice) getEntry(i int) []byte {
+	var startOff uint32
+	if i > 0 {
+		startOff = es.endOffs[i-1]
+	}
+	endOff := es.endOffs[i]
+	return es.data[startOff:endOff]
+}
+
+func (es *entrySlice) length() int {
+	return len(es.endOffs)
+}
+
+func (es *entrySlice) size() int {
+	return len(es.data) + 4*len(es.endOffs)
+}
+
+func (es *entrySlice) reset() {
+	es.data = es.data[:0]
+	es.endOffs = es.endOffs[:0]
 }
 
 const headerSize = 4
@@ -64,11 +89,7 @@ type Builder struct {
 	rawWrittenLen int
 	compression   options.CompressionType
 
-	baseKeysBuf     []byte
-	baseKeysEndOffs []uint32
-
-	blockBaseKey []byte // Base key for the current block.
-	diffKeyBuf   []byte
+	baseKeys entrySlice
 
 	blockEndOffsets []uint32 // Base offsets of every block.
 
@@ -87,6 +108,13 @@ type Builder struct {
 
 	surfKeys [][]byte
 	surfVals [][]byte
+
+	tmpKeys       entrySlice
+	tmpVerAndVals entrySlice
+	tmpOldOffs    []uint32
+
+	singleKeyOldVers entrySlice
+	oldBlock         []byte
 }
 
 // NewTableBuilder makes a new TableBuilder.
@@ -100,12 +128,13 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		idxFileName: f.Name() + idxFileSuffix,
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
-		baseKeysBuf: make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    fprBase / levelFactor,
 		compression: opt.CompressionPerLevel[level],
 		opt:         opt,
 		useSuRF:     level >= opt.SuRFStartLevel,
+		// add one byte so the offset would never be 0, so oldOffset is 0 means no old version.
+		oldBlock: []byte{0},
 	}
 }
 
@@ -114,7 +143,6 @@ func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.Tabl
 		idxFileName: f.Name() + idxFileSuffix,
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
-		baseKeysBuf: make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    opt.LogicalBloomFPR,
 		useGlobalTS: true,
@@ -140,9 +168,7 @@ func (b *Builder) resetBuffers() {
 	b.buf = b.buf[:0]
 	b.writtenLen = 0
 	b.rawWrittenLen = 0
-	b.baseKeysBuf = b.baseKeysBuf[:0]
-	b.baseKeysEndOffs = b.baseKeysEndOffs[:0]
-	b.blockBaseKey = b.blockBaseKey[:0]
+	b.baseKeys.reset()
 	b.blockEndOffsets = b.blockEndOffsets[:0]
 	b.entryEndOffsets = b.entryEndOffsets[:0]
 	b.hashEntries = b.hashEntries[:0]
@@ -150,23 +176,24 @@ func (b *Builder) resetBuffers() {
 	b.surfVals = nil
 	b.smallest.UserKey = b.smallest.UserKey[:0]
 	b.biggest.UserKey = b.biggest.UserKey[:0]
+	b.oldBlock = b.oldBlock[:0]
 }
 
 // Close closes the TableBuilder.
 func (b *Builder) Close() {}
 
 // Empty returns whether it's empty.
-func (b *Builder) Empty() bool { return b.writtenLen+len(b.buf) == 0 }
+func (b *Builder) Empty() bool { return b.writtenLen+len(b.buf)+b.tmpKeys.length() == 0 }
 
-// keyDiff returns a suffix of newKey that is different from b.blockBaseKey.
-func (b *Builder) keyDiff(newKey []byte) []byte {
+// keyDiff returns the first index at which the two keys are different.
+func keyDiffIdx(k1, k2 []byte) int {
 	var i int
-	for i = 0; i < len(newKey) && i < len(b.blockBaseKey); i++ {
-		if newKey[i] != b.blockBaseKey[i] {
+	for i = 0; i < len(k1) && i < len(k2); i++ {
+		if k1[i] != k2[i] {
 			break
 		}
 	}
-	return newKey[i:]
+	return i
 }
 
 func (b *Builder) addIndex(key y.Key) {
@@ -180,9 +207,9 @@ func (b *Builder) addIndex(key y.Key) {
 
 	keyHash := farm.Fingerprint64(key.UserKey)
 	// It is impossible that a single table contains 16 million keys.
-	y.Assert(len(b.baseKeysEndOffs) < maxBlockCnt)
+	y.Assert(b.baseKeys.length() < maxBlockCnt)
 
-	pos := entryPosition{uint16(len(b.baseKeysEndOffs)), uint8(b.counter)}
+	pos := entryPosition{uint16(b.baseKeys.length()), uint8(b.counter)}
 	if b.useSuRF {
 		b.surfKeys = append(b.surfKeys, y.SafeCopy(nil, key.UserKey))
 		b.surfVals = append(b.surfVals, pos.encode())
@@ -196,47 +223,65 @@ func (b *Builder) addHelper(key y.Key, v y.ValueStruct) {
 	if len(key.UserKey) > 0 {
 		b.addIndex(key)
 	}
-
-	// diffKey stores the difference of key with blockBaseKey.
-	var diffKey []byte
-	if len(b.blockBaseKey) == 0 {
-		// Make a copy. Builder should not keep references. Otherwise, caller has to be very careful
-		// and will have to make copies of keys every time they add to builder, which is even worse.
-		if b.useGlobalTS {
-			b.blockBaseKey = append(b.blockBaseKey, key.UserKey...)
-		} else {
-			b.blockBaseKey = key.AppendTo(b.blockBaseKey)
-		}
-	} else {
-		if b.useGlobalTS {
-			diffKey = b.keyDiff(key.UserKey)
-		} else {
-			b.diffKeyBuf = key.AppendTo(b.diffKeyBuf[:0])
-			diffKey = b.keyDiff(b.diffKeyBuf)
-		}
+	b.tmpKeys.append(key.UserKey)
+	if !b.useGlobalTS {
+		b.tmpVerAndVals.data = append(b.tmpVerAndVals.data, u64ToBytes(key.Version)...)
 	}
-	h := header{
-		diffLen: uint16(len(diffKey)),
-	}
-	if b.useGlobalTS {
-		h.baseLen = uint16(len(key.UserKey) - len(diffKey))
-	} else {
-		h.baseLen = uint16(key.Len() - len(diffKey))
-	}
-	b.buf = append(b.buf, h.Encode()...)
-	b.buf = append(b.buf, diffKey...) // We only need to store the key difference.
-	b.buf = v.EncodeTo(b.buf)
-	b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
-	b.counter++ // Increment number of keys added for this current block.
+	b.tmpVerAndVals.appendVal(&v)
+	b.tmpOldOffs = append(b.tmpOldOffs, 0)
+	b.counter++
 }
 
+// oldEntry format:
+//   numEntries(4) | endOffsets(4 * numEntries) | entries
+//
+// entry format:
+//   version(8) | value
+func (b *Builder) addOld(key y.Key, v y.ValueStruct) {
+	keyIdx := b.tmpKeys.length() - 1
+	startOff := b.tmpOldOffs[keyIdx]
+	if startOff == 0 {
+		startOff = uint32(len(b.oldBlock))
+		b.tmpOldOffs[keyIdx] = startOff
+	}
+	b.singleKeyOldVers.data = append(b.singleKeyOldVers.data, u64ToBytes(key.Version)...)
+	b.singleKeyOldVers.appendVal(&v)
+}
+
+// entryFormat
+// no old entry:
+//  diffKeyLen(2) | diffKey | 0 | version(8) | value
+// has old entry:
+//  diffKeyLen(2) | diffKey | 1 | oldOffset(4) | version(8) | value
 func (b *Builder) finishBlock() error {
+	if b.tmpKeys.length() == 0 {
+		return nil
+	}
+	if b.singleKeyOldVers.length() > 0 {
+		b.flushSingleKeyOldVers()
+	}
+	firstKey := b.tmpKeys.getEntry(0)
+	lastKey := b.tmpKeys.getLast()
+	blockCommonLen := keyDiffIdx(firstKey, lastKey)
+	for i := 0; i < b.tmpKeys.length(); i++ {
+		key := b.tmpKeys.getEntry(i)
+		b.buf = appendU16(b.buf, uint16(len(key)-blockCommonLen))
+		b.buf = append(b.buf, key[blockCommonLen:]...)
+		if b.tmpOldOffs[i] == 0 {
+			b.buf = append(b.buf, 0)
+		} else {
+			b.buf = append(b.buf, 1)
+			b.buf = append(b.buf, u32ToBytes(b.tmpOldOffs[i])...)
+		}
+		b.buf = append(b.buf, b.tmpVerAndVals.getEntry(i)...)
+		b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
+	}
 	b.buf = append(b.buf, u32SliceToBytes(b.entryEndOffsets)...)
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.entryEndOffsets)))...)
+	b.buf = appendU16(b.buf, uint16(blockCommonLen))
 
 	// Add base key.
-	b.baseKeysBuf = append(b.baseKeysBuf, b.blockBaseKey...)
-	b.baseKeysEndOffs = append(b.baseKeysEndOffs, uint32(len(b.baseKeysBuf)))
+	b.baseKeys.append(firstKey)
 
 	data := b.buf
 	if b.compression != options.None {
@@ -257,15 +302,28 @@ func (b *Builder) finishBlock() error {
 	// Reset the block for the next build.
 	b.entryEndOffsets = b.entryEndOffsets[:0]
 	b.counter = 0
-	b.blockBaseKey = b.blockBaseKey[:0]
 	b.buf = b.buf[:0]
+	b.tmpKeys.reset()
+	b.tmpVerAndVals.reset()
+	b.tmpOldOffs = b.tmpOldOffs[:0]
 	return nil
 }
 
 // Add adds a key-value pair to the block.
 // If doNotRestart is true, we will not restart even if b.counter >= restartInterval.
 func (b *Builder) Add(key y.Key, value y.ValueStruct) error {
-	if b.shouldFinishBlock(key, value) {
+	var lastUserKey []byte
+	if b.tmpKeys.length() > 0 {
+		lastUserKey = b.tmpKeys.getLast()
+	}
+	// Check old before check finish block, so two blocks never have the same key.
+	if bytes.Equal(lastUserKey, key.UserKey) {
+		b.addOld(key, value)
+		return nil
+	} else if b.singleKeyOldVers.length() > 0 {
+		b.flushSingleKeyOldVers()
+	}
+	if b.shouldFinishBlock() {
 		if err := b.finishBlock(); err != nil {
 			return err
 		}
@@ -274,32 +332,34 @@ func (b *Builder) Add(key y.Key, value y.ValueStruct) error {
 	return nil // Currently, there is no meaningful error.
 }
 
-func (b *Builder) shouldFinishBlock(key y.Key, value y.ValueStruct) bool {
+func (b *Builder) flushSingleKeyOldVers() {
+	// numEntries
+	b.oldBlock = append(b.oldBlock, u32ToBytes(uint32(b.singleKeyOldVers.length()))...)
+	// endOffsets
+	b.oldBlock = append(b.oldBlock, u32SliceToBytes(b.singleKeyOldVers.endOffs)...)
+	// entries
+	b.oldBlock = append(b.oldBlock, b.singleKeyOldVers.data...)
+	b.singleKeyOldVers.reset()
+}
+
+func (b *Builder) shouldFinishBlock() bool {
 	// If there is no entry till now, we will return false.
-	if len(b.entryEndOffsets) == 0 {
+	if b.tmpKeys.length() == 0 {
 		return false
 	}
-
-	// We should include current entry also in size, that's why +1 to len(b.entryOffsets).
-	entriesOffsetsSize := uint32((len(b.entryEndOffsets)+1)*4 + 4)
-	estimatedSize := uint32(len(b.buf)) + uint32(6 /*header size for entry*/) +
-		uint32(key.Len()) + value.EncodedSize() + entriesOffsetsSize
-
-	return estimatedSize > uint32(b.opt.BlockSize)
+	return uint32(b.tmpKeys.size()+b.tmpVerAndVals.size()) > uint32(b.opt.BlockSize)
 }
 
 // ReachedCapacity returns true if we... roughly (?) reached capacity?
 func (b *Builder) ReachedCapacity(capacity int64) bool {
 	estimateSz := b.rawWrittenLen + len(b.buf) +
-		4*len(b.blockEndOffsets) +
-		len(b.baseKeysBuf) +
-		4*len(b.baseKeysEndOffs)
+		4*len(b.blockEndOffsets) + b.baseKeys.size()
 	return int64(estimateSz) > capacity
 }
 
 // EstimateSize returns the size of the SST to build.
 func (b *Builder) EstimateSize() int {
-	size := b.rawWrittenLen + len(b.buf) + 4*len(b.blockEndOffsets) + len(b.baseKeysBuf) + 4*len(b.baseKeysEndOffs)
+	size := b.rawWrittenLen + len(b.buf) + 4*len(b.blockEndOffsets) + b.baseKeys.size()
 	if !b.useSuRF {
 		size += 3 * int(float32(len(b.hashEntries))/b.opt.HashUtilRatio)
 	}
@@ -315,12 +375,22 @@ const (
 	idBloomFilter
 	idHashIndex
 	idSuRFIndex
+	idOldBlockLen
 )
 
 // Finish finishes the table by appending the index.
 func (b *Builder) Finish() error {
-	b.finishBlock() // This will never start a new block.
-	if err := b.w.Finish(); err != nil {
+	err := b.finishBlock() // This will never start a new block.
+	if err != nil {
+		return err
+	}
+	if len(b.oldBlock) > 1 {
+		err = b.w.Append(b.oldBlock)
+		if err != nil {
+			return err
+		}
+	}
+	if err = b.w.Finish(); err != nil {
 		return err
 	}
 	idxFile, err := y.OpenTruncFile(b.idxFileName, false)
@@ -338,13 +408,15 @@ func (b *Builder) Finish() error {
 	if err := b.w.Append(u64ToBytes(ts)); err != nil {
 		return err
 	}
-
 	encoder := metaEncoder{b.buf}
 	encoder.append(b.smallest.UserKey, idSmallest)
 	encoder.append(b.biggest.UserKey, idBiggest)
-	encoder.append(u32SliceToBytes(b.baseKeysEndOffs), idBaseKeysEndOffs)
-	encoder.append(b.baseKeysBuf, idBaseKeys)
+	encoder.append(u32SliceToBytes(b.baseKeys.endOffs), idBaseKeysEndOffs)
+	encoder.append(b.baseKeys.data, idBaseKeys)
 	encoder.append(u32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)
+	if len(b.oldBlock) > 1 {
+		encoder.append(u32ToBytes(uint32(len(b.oldBlock))), idOldBlockLen)
+	}
 
 	var bloomFilter []byte
 	if !b.useSuRF {
@@ -383,6 +455,10 @@ func (b *Builder) Finish() error {
 	}
 
 	return b.w.Finish()
+}
+
+func appendU16(buf []byte, v uint16) []byte {
+	return append(buf, byte(v), byte(v>>8))
 }
 
 func u32ToBytes(v uint32) []byte {

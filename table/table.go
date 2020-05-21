@@ -18,6 +18,7 @@ package table
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path"
@@ -49,20 +50,10 @@ func IndexFilename(tableFilename string) string { return tableFilename + idxFile
 
 type tableIndex struct {
 	blockEndOffsets []uint32
-	baseKeysEndOffs []uint32
-	baseKeys        []byte
+	baseKeys        entrySlice
 	bf              *bbloom.Bloom
 	hIdx            *hashIndex
 	surf            *surf.SuRF
-}
-
-func (i *tableIndex) getBlockBaseKey(idx int) []byte {
-	baseKeyStartOff := 0
-	if idx > 0 {
-		baseKeyStartOff = int(i.baseKeysEndOffs[idx-1])
-	}
-	baseKeyEndOff := i.baseKeysEndOffs[idx]
-	return i.baseKeys[baseKeyStartOff:baseKeyEndOff]
 }
 
 // Table represents a loaded table file with the info we have about it
@@ -89,6 +80,9 @@ type Table struct {
 	compacting int32
 
 	compression options.CompressionType
+
+	oldBlockLen int64
+	oldBlock    []byte
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -161,13 +155,13 @@ func OpenTable(filename string, compression options.CompressionType, blockCache 
 		t.Close()
 		return nil, err
 	}
-
-	if blockCache == nil {
+	if blockCache == nil || t.oldBlockLen > 0 {
 		t.blocksMmap, err = y.Mmap(fd, false, t.Size())
 		if err != nil {
 			t.Close()
 			return nil, y.Wrapf(err, "Unable to map file")
 		}
+		t.oldBlock = t.blocksMmap[t.tableSize-t.oldBlockLen : t.tableSize]
 	}
 	return t, nil
 }
@@ -265,6 +259,9 @@ func (t *Table) initTableInfo() error {
 			offsets := bytesToU32Slice(d.decode())
 			t.tableSize = int64(offsets[len(offsets)-1])
 			t.numBlocks = len(offsets)
+		case idOldBlockLen:
+			t.oldBlockLen = int64(bytesToU32(d.decode()))
+			t.tableSize += t.oldBlockLen
 		}
 	}
 	return nil
@@ -275,9 +272,9 @@ func (t *Table) readTableIndex(data []byte) *tableIndex {
 	for d := (metaDecoder{buf: data}); d.valid(); d.next() {
 		switch d.currentId() {
 		case idBaseKeysEndOffs:
-			idx.baseKeysEndOffs = bytesToU32Slice(d.decode())
+			idx.baseKeys.endOffs = bytesToU32Slice(d.decode())
 		case idBaseKeys:
-			idx.baseKeys = d.decode()
+			idx.baseKeys.data = d.decode()
 		case idBlockEndOffsets:
 			idx.blockEndOffsets = bytesToU32Slice(d.decode())
 		case idBloomFilter:
@@ -376,7 +373,7 @@ func (t *Table) block(idx int, index *tableIndex) (block, error) {
 	y.Assert(idx >= 0)
 
 	if idx >= len(index.blockEndOffsets) {
-		return block{}, errors.New("block out of index")
+		return block{}, io.EOF
 	}
 
 	if t.blockCache == nil {
@@ -419,7 +416,7 @@ func (t *Table) loadBlock(idx int, index *tableIndex) (block, error) {
 			"failed to decode compressed data in file: %s at offset: %d, len: %d",
 			t.fd.Name(), blk.offset, dataLen)
 	}
-	blk.baseKey = index.getBlockBaseKey(idx)
+	blk.baseKey = index.baseKeys.getEntry(idx)
 	return blk, nil
 }
 

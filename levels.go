@@ -486,8 +486,9 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 			numWrite++
 			bytesWrite += kvSize
 		}
-		// It was true that it.Valid() at least once in the loop above, which means we
-		// called Add() at least once, and builder is not Empty().
+		if builder.Empty() {
+			continue
+		}
 		if err = builder.Finish(); err != nil {
 			return
 		}
