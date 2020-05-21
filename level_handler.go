@@ -26,6 +26,8 @@ import (
 	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 type levelHandler struct {
@@ -35,7 +37,7 @@ type levelHandler struct {
 	// For level >= 1, tables are sorted by key ranges, which do not overlap.
 	// For level 0, tables are sorted by time.
 	// For level 0, newest table are at the back. Compact the oldest one first, which is at the front.
-	tables    []*table.Table
+	tables    []table.Table
 	totalSize int64
 
 	// The following are initialized once and const.
@@ -53,7 +55,7 @@ func (s *levelHandler) getTotalSize() int64 {
 }
 
 // initTables replaces s.tables with given tables. This is done during loading.
-func (s *levelHandler) initTables(tables []*table.Table) {
+func (s *levelHandler) initTables(tables []table.Table) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -76,7 +78,7 @@ func (s *levelHandler) initTables(tables []*table.Table) {
 }
 
 // deleteTables remove tables idx0, ..., idx1-1.
-func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, isMove bool) {
+func (s *levelHandler) deleteTables(toDel []table.Table, guard *epoch.Guard, isMove bool) {
 	s.Lock() // s.Unlock() below
 
 	toDelMap := make(map[uint64]struct{})
@@ -85,7 +87,7 @@ func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, is
 	}
 
 	// Make a copy as iterators might be keeping a slice of tables.
-	var newTables []*table.Table
+	var newTables []table.Table
 	for _, t := range s.tables {
 		_, found := toDelMap[t.ID()]
 		if !found {
@@ -108,7 +110,7 @@ func (s *levelHandler) deleteTables(toDel []*table.Table, guard *epoch.Guard, is
 	}
 }
 
-func assertTablesOrder(level int, tables []*table.Table, cd *compactDef) {
+func assertTablesOrder(level int, tables []table.Table, cd *compactDef) {
 	if level == 0 {
 		return
 	}
@@ -135,7 +137,7 @@ func assertTablesOrder(level int, tables []*table.Table, cd *compactDef) {
 	}
 }
 
-func sortTables(tables []*table.Table) {
+func sortTables(tables []table.Table) {
 	sort.Slice(tables, func(i, j int) bool {
 		return tables[i].Smallest().Compare(tables[j].Smallest()) < 0
 	})
@@ -143,7 +145,7 @@ func sortTables(tables []*table.Table) {
 
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
-func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, guard *epoch.Guard) {
+func (s *levelHandler) replaceTables(newTables []table.Table, cd *compactDef, guard *epoch.Guard) {
 	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
 	assertTablesOrder(s.level, newTables, cd)
 
@@ -163,7 +165,7 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, g
 			toDelete = append(toDelete, tbl)
 		}
 	}
-	tables := make([]*table.Table, 0, left+len(newTables)+len(cd.skippedTbls)+(len(s.tables)-right))
+	tables := make([]table.Table, 0, left+len(newTables)+len(cd.skippedTbls)+(len(s.tables)-right))
 	tables = append(tables, s.tables[:left]...)
 	tables = append(tables, newTables...)
 	tables = append(tables, cd.skippedTbls...)
@@ -175,7 +177,7 @@ func (s *levelHandler) replaceTables(newTables []*table.Table, cd *compactDef, g
 	guard.Delete(toDelete)
 }
 
-func containsTable(tables []*table.Table, tbl *table.Table) bool {
+func containsTable(tables []table.Table, tbl table.Table) bool {
 	for _, t := range tables {
 		if tbl == t {
 			return true
@@ -195,7 +197,7 @@ func newLevelHandler(db *DB, level int) *levelHandler {
 }
 
 // tryAddLevel0Table returns true if ok and no stalling.
-func (s *levelHandler) tryAddLevel0Table(t *table.Table) bool {
+func (s *levelHandler) tryAddLevel0Table(t table.Table) bool {
 	y.Assert(s.level == 0)
 	// Need lock as we may be deleting the first table during a level 0 compaction.
 	s.Lock()
@@ -212,7 +214,7 @@ func (s *levelHandler) tryAddLevel0Table(t *table.Table) bool {
 	return true
 }
 
-func (s *levelHandler) addTable(t *table.Table) {
+func (s *levelHandler) addTable(t table.Table) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -252,7 +254,7 @@ func (s *levelHandler) close() error {
 }
 
 // getTablesForKey acquires a read-lock to access s.tables. It returns a list of tables.
-func (s *levelHandler) getTablesForKey(key y.Key) []*table.Table {
+func (s *levelHandler) getTablesForKey(key y.Key) []table.Table {
 	s.RLock()
 	defer s.RUnlock()
 
@@ -263,37 +265,37 @@ func (s *levelHandler) getTablesForKey(key y.Key) []*table.Table {
 	if tbl == nil {
 		return nil
 	}
-	return []*table.Table{tbl}
+	return []table.Table{tbl}
 }
 
 // getTablesForKeys returns tables for pairs.
 // level0 returns all tables.
 // level1+ returns tables for every key.
-func (s *levelHandler) getTablesForKeys(pairs []keyValuePair) []*table.Table {
+func (s *levelHandler) getTablesForKeys(pairs []keyValuePair) []table.Table {
 	s.RLock()
 	defer s.RUnlock()
 	if s.level == 0 {
 		return s.getLevel0Tables()
 	}
-	out := make([]*table.Table, len(pairs))
+	out := make([]table.Table, len(pairs))
 	for i, pair := range pairs {
 		out[i] = s.getLevelNTable(pair.key)
 	}
 	return out
 }
 
-func (s *levelHandler) getLevel0Tables() []*table.Table {
+func (s *levelHandler) getLevel0Tables() []table.Table {
 	// For level 0, we need to check every table. Remember to make a copy as s.tables may change
 	// once we exit this function, and we don't want to lock s.tables while seeking in tables.
 	// CAUTION: Reverse the tables.
-	out := make([]*table.Table, 0, len(s.tables))
+	out := make([]table.Table, 0, len(s.tables))
 	for i := len(s.tables) - 1; i >= 0; i-- {
 		out = append(out, s.tables[i])
 	}
 	return out
 }
 
-func (s *levelHandler) getLevelNTable(key y.Key) *table.Table {
+func (s *levelHandler) getLevelNTable(key y.Key) table.Table {
 	// For level >= 1, we can do a binary search as key range does not overlap.
 	idx := sort.Search(len(s.tables), func(i int) bool {
 		return s.tables[i].Biggest().Compare(key) >= 0
@@ -312,7 +314,7 @@ func (s *levelHandler) get(key y.Key, keyHash uint64) y.ValueStruct {
 	return s.getInTables(key, keyHash, tables)
 }
 
-func (s *levelHandler) getInTables(key y.Key, keyHash uint64, tables []*table.Table) y.ValueStruct {
+func (s *levelHandler) getInTables(key y.Key, keyHash uint64, tables []table.Table) y.ValueStruct {
 	for _, table := range tables {
 		result := s.getInTable(key, keyHash, table)
 		if result.Valid() {
@@ -322,29 +324,17 @@ func (s *levelHandler) getInTables(key y.Key, keyHash uint64, tables []*table.Ta
 	return y.ValueStruct{}
 }
 
-func (s *levelHandler) getInTable(key y.Key, keyHash uint64, table *table.Table) (result y.ValueStruct) {
+func (s *levelHandler) getInTable(key y.Key, keyHash uint64, table table.Table) y.ValueStruct {
 	s.metrics.NumLSMGets.Inc()
 	// TODO: error handling here
-	resultKey, resultVs, ok, _ := table.PointGet(key, keyHash)
-	if !ok {
-		it := table.NewIterator(false)
-		it.Seek(key)
-		if !it.Valid() {
-			s.metrics.NumLSMBloomFalsePositive.Inc()
-			return
-		}
-		if !key.SameUserKey(it.Key()) {
-			s.metrics.NumLSMBloomFalsePositive.Inc()
-			return
-		}
-		resultKey, resultVs = it.Key(), it.Value()
-	} else if resultKey.IsEmpty() {
-		s.metrics.NumLSMBloomFalsePositive.Inc()
-		return
+	result, err := table.Get(key, keyHash)
+	if err != nil {
+		log.Error("get data in table failed", zap.Error(err))
 	}
-	result = resultVs
-	result.Version = resultKey.Version
-	return
+	if !result.Valid() {
+		s.metrics.NumLSMBloomFalsePositive.Inc()
+	}
+	return result
 }
 
 func (s *levelHandler) multiGet(pairs []keyValuePair) {
@@ -356,7 +346,7 @@ func (s *levelHandler) multiGet(pairs []keyValuePair) {
 	}
 }
 
-func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Table) {
+func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []table.Table) {
 	for _, table := range tables {
 		for i := range pairs {
 			pair := &pairs[i]
@@ -378,7 +368,7 @@ func (s *levelHandler) multiGetLevel0(pairs []keyValuePair, tables []*table.Tabl
 	}
 }
 
-func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []*table.Table) {
+func (s *levelHandler) multiGetLevelN(pairs []keyValuePair, tables []table.Table) {
 	for i := range pairs {
 		pair := &pairs[i]
 		if pair.found {
@@ -408,7 +398,7 @@ func (s *levelHandler) appendIterators(iters []y.Iterator, opts *IteratorOptions
 	if s.level == 0 {
 		// Remember to add in reverse order!
 		// The newer table at the end of s.tables should be added first as it takes precedence.
-		overlapTables := make([]*table.Table, 0, len(s.tables))
+		overlapTables := make([]table.Table, 0, len(s.tables))
 		for _, t := range s.tables {
 			if opts.OverlapTable(t) {
 				overlapTables = append(overlapTables, t)
@@ -432,7 +422,7 @@ func (s *levelHandler) overlappingTables(_ levelHandlerRLocked, kr keyRange) (in
 	return getTablesInRange(s.tables, kr.left, kr.right)
 }
 
-func getTablesInRange(tbls []*table.Table, start, end y.Key) (int, int) {
+func getTablesInRange(tbls []table.Table, start, end y.Key) (int, int) {
 	left := sort.Search(len(tbls), func(i int) bool {
 		return start.Compare(tbls[i].Biggest()) <= 0
 	})

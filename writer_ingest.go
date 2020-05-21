@@ -7,12 +7,13 @@ import (
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/sstable"
 	"github.com/coocood/badger/y"
 )
 
 type ingestTask struct {
 	sync.WaitGroup
-	tbls []*table.Table
+	tbls []table.Table
 	cnt  int
 	err  error
 }
@@ -34,7 +35,8 @@ func (w *writeWorker) ingestTables(task *ingestTask) {
 		ends := make([]y.Key, 0, len(task.tbls))
 
 		for _, t := range task.tbls {
-			if task.err = t.SetGlobalTs(ts); task.err != nil {
+			sst := t.(*sstable.Table)
+			if task.err = sst.SetGlobalTs(ts); task.err != nil {
 				return
 			}
 			ends = append(ends, t.Biggest())
@@ -45,7 +47,7 @@ func (w *writeWorker) ingestTables(task *ingestTask) {
 		}
 
 		for i, tbl := range task.tbls {
-			if task.err = w.ingestTable(tbl, ends[i+1:]); task.err != nil {
+			if task.err = w.ingestTable(tbl.(*sstable.Table), ends[i+1:]); task.err != nil {
 				return
 			}
 			task.cnt++
@@ -80,7 +82,7 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 	return
 }
 
-func (w *writeWorker) ingestTable(tbl *table.Table, splitHints []y.Key) error {
+func (w *writeWorker) ingestTable(tbl *sstable.Table, splitHints []y.Key) error {
 	cs := &w.lc.cstatus
 	kr := keyRange{
 		left:  tbl.Smallest(),
@@ -91,7 +93,7 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints []y.Key) error {
 
 	var (
 		targetLevel       int
-		overlappingTables []*table.Table
+		overlappingTables []table.Table
 	)
 
 	cs.Lock()
@@ -130,7 +132,7 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints []y.Key) error {
 		return w.runIngestCompact(targetLevel, tbl, overlappingTables, splitHints, ref)
 	}
 
-	change := newCreateChange(tbl.ID(), targetLevel, tbl.CompressionType())
+	change := newCreateChange(tbl.ID(), targetLevel)
 	if err := w.manifest.addChanges([]*protos.ManifestChange{change}, nil); err != nil {
 		return err
 	}
@@ -138,10 +140,10 @@ func (w *writeWorker) ingestTable(tbl *table.Table, splitHints []y.Key) error {
 	return nil
 }
 
-func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingTables []*table.Table, splitHints []y.Key, guard *epoch.Guard) error {
+func (w *writeWorker) runIngestCompact(level int, tbl *sstable.Table, overlappingTables []table.Table, splitHints []y.Key, guard *epoch.Guard) error {
 	cd := &compactDef{
 		nextLevel: w.lc.levels[level],
-		top:       []*table.Table{tbl},
+		top:       []table.Table{tbl},
 		nextRange: getKeyRange(overlappingTables),
 	}
 	w.lc.fillBottomTables(cd, overlappingTables)
@@ -152,7 +154,7 @@ func (w *writeWorker) runIngestCompact(level int, tbl *table.Table, overlappingT
 
 	var changes []*protos.ManifestChange
 	for _, t := range newTables {
-		changes = append(changes, newCreateChange(t.ID(), level, t.CompressionType()))
+		changes = append(changes, newCreateChange(t.ID(), level))
 	}
 	for _, t := range cd.bot {
 		changes = append(changes, newDeleteChange(t.ID()))
@@ -178,7 +180,7 @@ func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
 	return false
 }
 
-func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) (overlappingTables []*table.Table, overlap bool, ok bool) {
+func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) (overlappingTables []table.Table, overlap bool, ok bool) {
 	cs := &w.lc.cstatus
 	handler := w.lc.levels[level]
 	handler.RLock()

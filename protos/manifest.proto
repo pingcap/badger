@@ -40,5 +40,4 @@ message ManifestChange {
   }
   Operation Op   = 2;
   uint32 Level   = 3;       // Only used for CREATE.
-  uint32 compression = 6;   // Only used for CREATE Op.
 }

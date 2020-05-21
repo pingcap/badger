@@ -27,6 +27,7 @@ import (
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
 	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/sstable"
 	"github.com/coocood/badger/y"
 	"github.com/ncw/directio"
 	"github.com/pingcap/errors"
@@ -68,7 +69,7 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 	for id := range idMap {
 		if _, ok := mf.Tables[id]; !ok {
 			log.Info("table file not referenced in MANIFEST", zap.Uint64("id", id))
-			filename := table.NewFilename(id, kv.opt.Dir)
+			filename := sstable.NewFilename(id, kv.opt.Dir)
 			if err := os.Remove(filename); err != nil {
 				return y.Wrapf(err, "While removing table %d", id)
 			}
@@ -107,16 +108,16 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 	}
 
 	// Some files may be deleted. Let's reload.
-	tables := make([][]*table.Table, kv.opt.TableBuilderOptions.MaxLevels)
+	tables := make([][]table.Table, kv.opt.TableBuilderOptions.MaxLevels)
 	var maxFileID uint64
 	for fileID, tableManifest := range mf.Tables {
-		fname := table.NewFilename(fileID, kv.opt.Dir)
+		fname := sstable.NewFilename(fileID, kv.opt.Dir)
 		var flags uint32 = y.Sync
 		if kv.opt.ReadOnly {
 			flags |= y.ReadOnly
 		}
 
-		t, err := table.OpenTable(fname, tableManifest.Compression, kv.blockCache, kv.indexCache)
+		t, err := sstable.OpenTable(fname, kv.blockCache, kv.indexCache)
 		if err != nil {
 			closeAllTables(tables)
 			return nil, errors.Wrapf(err, "Opening table: %q", fname)
@@ -153,7 +154,7 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 // Closes the tables, for cleanup in newLevelsController.  (We Close() instead of using DecrRef()
 // because that would delete the underlying files.)  We ignore errors, which is OK because tables
 // are read-only.
-func closeAllTables(tables [][]*table.Table) {
+func closeAllTables(tables [][]table.Table) {
 	for _, tableSlice := range tables {
 		for _, table := range tableSlice {
 			_ = table.Close()
@@ -343,7 +344,7 @@ func searchGuard(key []byte, guards []Guard) *Guard {
 	return maxMatchGuard
 }
 
-func overSkipTables(key y.Key, skippedTables []*table.Table) (newSkippedTables []*table.Table, over bool) {
+func overSkipTables(key y.Key, skippedTables []table.Table) (newSkippedTables []table.Table, over bool) {
 	var i int
 	for i < len(skippedTables) {
 		t := skippedTables[i]
@@ -358,7 +359,7 @@ func overSkipTables(key y.Key, skippedTables []*table.Table) (newSkippedTables [
 
 // compactBuildTables merge topTables and botTables to form a list of new tables.
 func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
-	limiter *rate.Limiter, splitHints []y.Key) (newTables []*table.Table, err error) {
+	limiter *rate.Limiter, splitHints []y.Key) (newTables []table.Table, err error) {
 	topTables := cd.top
 	botTables := cd.bot
 
@@ -397,18 +398,18 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 	skippedTbls := cd.skippedTbls
 
 	var lastKey, skipKey y.Key
-	var builder *table.Builder
+	var builder *sstable.Builder
 	var bytesRead, bytesWrite, numRead, numWrite int
 	for it.Valid() {
 		fileID := lc.reserveFileID()
-		filename := table.NewFilename(fileID, lc.kv.opt.Dir)
+		filename := sstable.NewFilename(fileID, lc.kv.opt.Dir)
 		var fd *os.File
 		fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
 			return
 		}
 		if builder == nil {
-			builder = table.NewTableBuilder(fd, limiter, cd.nextLevel.level, lc.opt)
+			builder = sstable.NewTableBuilder(fd, limiter, cd.nextLevel.level, lc.opt)
 		} else {
 			builder.Reset(fd)
 		}
@@ -493,8 +494,8 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 			return
 		}
 		fd.Close()
-		var tbl *table.Table
-		tbl, err = table.OpenTable(filename, lc.opt.CompressionPerLevel[cd.nextLevel.level], lc.kv.blockCache, lc.kv.indexCache)
+		var tbl table.Table
+		tbl, err = sstable.OpenTable(filename, lc.kv.blockCache, lc.kv.indexCache)
 		if err != nil {
 			return
 		}
@@ -530,11 +531,11 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 	return
 }
 
-func buildChangeSet(cd *compactDef, newTables []*table.Table) protos.ManifestChangeSet {
+func buildChangeSet(cd *compactDef, newTables []table.Table) protos.ManifestChangeSet {
 	changes := []*protos.ManifestChange{}
 	for _, table := range newTables {
 		changes = append(changes,
-			newCreateChange(table.ID(), cd.nextLevel.level, table.CompressionType()))
+			newCreateChange(table.ID(), cd.nextLevel.level))
 	}
 	for _, table := range cd.top {
 		changes = append(changes, newDeleteChange(table.ID()))
@@ -549,10 +550,10 @@ type compactDef struct {
 	thisLevel *levelHandler
 	nextLevel *levelHandler
 
-	top []*table.Table
-	bot []*table.Table
+	top []table.Table
+	bot []table.Table
 
-	skippedTbls []*table.Table
+	skippedTbls []table.Table
 
 	thisRange keyRange
 	nextRange keyRange
@@ -615,7 +616,7 @@ func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 		return false
 	}
 
-	cd.top = make([]*table.Table, len(cd.thisLevel.tables))
+	cd.top = make([]table.Table, len(cd.thisLevel.tables))
 	copy(cd.top, cd.thisLevel.tables)
 	for _, t := range cd.top {
 		cd.topSize += t.Size()
@@ -649,7 +650,7 @@ func (lc *levelsController) fillTablesL0(cd *compactDef) bool {
 
 const minSkippedTableSize = 1024 * 1024
 
-func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables []*table.Table) {
+func (lc *levelsController) fillBottomTables(cd *compactDef, overlappingTables []table.Table) {
 	for _, t := range overlappingTables {
 		// If none of the top tables contains the range in an overlapping bottom table,
 		// we can skip it during compaction to reduce write amplification.
@@ -683,9 +684,9 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 	if len(cd.thisLevel.tables) == 0 {
 		return false
 	}
-	this := make([]*table.Table, len(cd.thisLevel.tables))
+	this := make([]table.Table, len(cd.thisLevel.tables))
 	copy(this, cd.thisLevel.tables)
-	next := make([]*table.Table, len(cd.nextLevel.tables))
+	next := make([]table.Table, len(cd.nextLevel.tables))
 	copy(next, cd.nextLevel.tables)
 
 	// First pick one table has max topSize/bottomSize ratio.
@@ -734,7 +735,7 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 		newBotSize := sumTableSize(next[left:cd.botLeftIdx]) + cd.botSize
 		newRatio := calcRatio(newTopSize, newBotSize)
 		if newRatio > candidateRatio && (newTopSize+newBotSize) < maxCompactionExpandSize {
-			cd.top = append([]*table.Table{t}, cd.top...)
+			cd.top = append([]table.Table{t}, cd.top...)
 			cd.topLeftIdx--
 			bots = append(next[left:cd.botLeftIdx:cd.botLeftIdx], bots...)
 			cd.botLeftIdx = left
@@ -786,7 +787,7 @@ func (lc *levelsController) fillTables(cd *compactDef) bool {
 	return lc.cstatus.compareAndAdd(thisAndNextLevelRLocked{}, *cd)
 }
 
-func sumTableSize(tables []*table.Table) int64 {
+func sumTableSize(tables []table.Table) int64 {
 	var size int64
 	for _, t := range tables {
 		size += t.Size()
@@ -801,7 +802,7 @@ func calcRatio(topSize, botSize int64) float64 {
 	return float64(topSize) / float64(botSize)
 }
 
-func (lc *levelsController) isCompacting(level int, tables ...*table.Table) bool {
+func (lc *levelsController) isCompacting(level int, tables ...table.Table) bool {
 	if len(tables) == 0 {
 		return false
 	}
@@ -820,7 +821,7 @@ func (lc *levelsController) runCompactDef(l int, cd *compactDef, limiter *rate.L
 	thisLevel := cd.thisLevel
 	nextLevel := cd.nextLevel
 
-	var newTables []*table.Table
+	var newTables []table.Table
 	var changeSet protos.ManifestChangeSet
 	var topMove bool
 	defer func() {
@@ -906,13 +907,13 @@ func (lc *levelsController) doCompact(p compactionPriority, guard *epoch.Guard) 
 	return true, nil
 }
 
-func (lc *levelsController) addLevel0Table(t *table.Table, head *protos.HeadInfo) error {
+func (lc *levelsController) addLevel0Table(t table.Table, head *protos.HeadInfo) error {
 	// We update the manifest _before_ the table becomes part of a levelHandler, because at that
 	// point it could get used in some compaction.  This ensures the manifest file gets updated in
 	// the proper order. (That means this update happens before that of some compaction which
 	// deletes the table.)
 	err := lc.kv.manifest.addChanges([]*protos.ManifestChange{
-		newCreateChange(t.ID(), 0, t.CompressionType()),
+		newCreateChange(t.ID(), 0),
 	}, head)
 	if err != nil {
 		return err
@@ -985,7 +986,7 @@ func (s *levelsController) multiGet(pairs []keyValuePair) {
 	s.kv.metrics.LSMMultiGetDuration.Observe(time.Since(start).Seconds())
 }
 
-func appendIteratorsReversed(out []y.Iterator, th []*table.Table, reversed bool) []y.Iterator {
+func appendIteratorsReversed(out []y.Iterator, th []table.Table, reversed bool) []y.Iterator {
 	for i := len(th) - 1; i >= 0; i-- {
 		// This will increment the reference of the table handler.
 		out = append(out, table.NewConcatIterator(th[i:i+1], reversed))

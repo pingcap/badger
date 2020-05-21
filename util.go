@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/sstable"
 	"github.com/coocood/badger/y"
 	"github.com/pingcap/errors"
 )
@@ -125,7 +125,7 @@ func getIDMap(dir string) map[uint64]struct{} {
 		if info.IsDir() {
 			continue
 		}
-		fileID, ok := table.ParseFileID(info.Name())
+		fileID, ok := sstable.ParseFileID(info.Name())
 		if !ok {
 			continue
 		}

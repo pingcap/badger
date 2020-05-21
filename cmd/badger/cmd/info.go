@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/coocood/badger"
-	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/sstable"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 )
@@ -156,7 +156,7 @@ func printInfo(dir, valueDir string) error {
 			return tableIDs[i] < tableIDs[j]
 		})
 		for _, tableID := range tableIDs {
-			tableFile := table.IDToFilename(tableID)
+			tableFile := sstable.IDToFilename(tableID)
 			file, ok := fileinfoByName[tableFile]
 			if ok {
 				fileinfoMarked[tableFile] = true

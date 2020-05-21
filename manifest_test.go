@@ -29,7 +29,7 @@ import (
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
-	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/sstable"
 	"github.com/coocood/badger/y"
 	"github.com/stretchr/testify/require"
 )
@@ -149,7 +149,7 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 
 	opts := DefaultOptions.TableBuilderOptions
 	opts.CompressionPerLevel = getTestCompression(options.ZSTD)
-	b := table.NewTableBuilder(f, nil, 0, opts)
+	b := sstable.NewTableBuilder(f, nil, 0, opts)
 	defer b.Close()
 	for _, kv := range keyValues {
 		y.Assert(len(kv) == 2)
@@ -184,7 +184,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)
 	f := buildTestTable(t, "k", 2)
-	t1, err := table.OpenTable(f.Name(), options.ZSTD, blkCache, idxCache)
+	t1, err := sstable.OpenTable(f.Name(), blkCache, idxCache)
 	require.NoError(t, err)
 	defer t1.Delete()
 
@@ -210,7 +210,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lc.runCompactDef(0, cd, nil, g)
 
 	f = buildTestTable(t, "l", 2)
-	t2, err := table.OpenTable(f.Name(), options.ZSTD, blkCache, idxCache)
+	t2, err := sstable.OpenTable(f.Name(), blkCache, idxCache)
 	require.NoError(t, err)
 	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)
@@ -244,14 +244,14 @@ func TestManifestRewrite(t *testing.T) {
 		LogOffset: 1,
 	}
 	err = mf.addChanges([]*protos.ManifestChange{
-		newCreateChange(0, 0, 0),
+		newCreateChange(0, 0),
 	}, head)
 	require.NoError(t, err)
 	require.NotNil(t, mf.manifest.Head)
 
 	for i := uint64(0); i < uint64(deletionsThreshold*3); i++ {
 		ch := []*protos.ManifestChange{
-			newCreateChange(i+1, 0, 0),
+			newCreateChange(i+1, 0),
 			newDeleteChange(i),
 		}
 		// Only add head for some change set to make sure head is not overwritten to nil.

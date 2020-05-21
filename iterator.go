@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 
 	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/memtable"
 	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
 )
@@ -188,7 +189,7 @@ func (opts *IteratorOptions) OverlapPending(it *pendingWritesIterator) bool {
 	return true
 }
 
-func (opts *IteratorOptions) OverlapMemTable(t *table.MemTable) bool {
+func (opts *IteratorOptions) OverlapMemTable(t *memtable.Table) bool {
 	if t.Empty() {
 		return false
 	}
@@ -206,14 +207,14 @@ func (opts *IteratorOptions) OverlapMemTable(t *table.MemTable) bool {
 	return true
 }
 
-func (opts *IteratorOptions) OverlapTable(t *table.Table) bool {
+func (opts *IteratorOptions) OverlapTable(t table.Table) bool {
 	if !opts.hasRange() {
 		return true
 	}
 	return t.HasOverlap(opts.StartKey, opts.EndKey, false)
 }
 
-func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table {
+func (opts *IteratorOptions) OverlapTables(tables []table.Table) []table.Table {
 	if len(tables) == 0 {
 		return nil
 	}
@@ -233,7 +234,7 @@ func (opts *IteratorOptions) OverlapTables(tables []*table.Table) []*table.Table
 		return t.Smallest().Compare(opts.EndKey) >= 0
 	})
 	tables = tables[:endIdx]
-	overlapTables := make([]*table.Table, 0, 8)
+	overlapTables := make([]table.Table, 0, 8)
 	for _, t := range tables {
 		if opts.OverlapTable(t) {
 			overlapTables = append(overlapTables, t)

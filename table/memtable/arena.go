@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package skl
+package memtable
 
 import (
 	"encoding/binary"
@@ -36,33 +36,33 @@ const (
 )
 
 // Arena should be lock-free.
-type Arena struct {
+type arena struct {
 	n   uint32
 	buf []byte
 }
 
 // newArena returns a new arena.
-func newArena(n int64) *Arena {
+func newArena(n int64) *arena {
 	// Don't store data at position 0 in order to reserve offset=0 as a kind
 	// of nil pointer.
-	out := &Arena{
+	out := &arena{
 		n:   1,
 		buf: make([]byte, n),
 	}
 	return out
 }
 
-func (s *Arena) size() int64 {
+func (s *arena) size() int64 {
 	return int64(atomic.LoadUint32(&s.n))
 }
 
-func (s *Arena) reset() {
+func (s *arena) reset() {
 	atomic.StoreUint32(&s.n, 0)
 }
 
 // putNode allocates a node in the arena. The node is aligned on a pointer-sized
 // boundary. The arena offset of the node is returned.
-func (s *Arena) putNode(height int) uint32 {
+func (s *arena) putNode(height int) uint32 {
 	// Compute the amount of the tower that will never be used, since the height
 	// is less than maxHeight.
 	unusedSize := (maxHeight - height) * offsetSize
@@ -81,7 +81,7 @@ func (s *Arena) putNode(height int) uint32 {
 // val buffer. Returns an offset into buf. User is responsible for remembering
 // size of val. We could also store this size inside arena but the encoding and
 // decoding will incur some overhead.
-func (s *Arena) putVal(v y.ValueStruct) uint32 {
+func (s *arena) putVal(v y.ValueStruct) uint32 {
 	l := v.EncodedSize()
 	n := atomic.AddUint32(&s.n, l)
 	y.Assert(int(n) <= len(s.buf))
@@ -90,7 +90,7 @@ func (s *Arena) putVal(v y.ValueStruct) uint32 {
 	return m
 }
 
-func (s *Arena) putKey(key y.Key) uint32 {
+func (s *arena) putKey(key y.Key) uint32 {
 	l := uint32(key.Len())
 	n := atomic.AddUint32(&s.n, l)
 	y.Assert(int(n) <= len(s.buf))
@@ -102,7 +102,7 @@ func (s *Arena) putKey(key y.Key) uint32 {
 
 // getNode returns a pointer to the node located at offset. If the offset is
 // zero, then the nil node pointer is returned.
-func (s *Arena) getNode(offset uint32) *node {
+func (s *arena) getNode(offset uint32) *node {
 	if offset == 0 {
 		return nil
 	}
@@ -111,7 +111,7 @@ func (s *Arena) getNode(offset uint32) *node {
 }
 
 // getKey returns byte slice at offset.
-func (s *Arena) getKey(offset uint32, size uint16) (k y.Key) {
+func (s *arena) getKey(offset uint32, size uint16) (k y.Key) {
 	rawKey := s.buf[offset : offset+uint32(size)]
 	k.UserKey = rawKey[:len(rawKey)-8]
 	k.Version = math.MaxUint64 - binary.BigEndian.Uint64(rawKey[len(rawKey)-8:])
@@ -120,18 +120,18 @@ func (s *Arena) getKey(offset uint32, size uint16) (k y.Key) {
 
 // getVal returns byte slice at offset. The given size should be just the value
 // size and should NOT include the meta bytes.
-func (s *Arena) getVal(offset uint32, size uint32) (ret y.ValueStruct) {
+func (s *arena) getVal(offset uint32, size uint32) (ret y.ValueStruct) {
 	ret.Decode(s.buf[offset : offset+size])
 	return
 }
 
-func (s *Arena) fillVal(vs *y.ValueStruct, offset uint32, size uint32) {
+func (s *arena) fillVal(vs *y.ValueStruct, offset uint32, size uint32) {
 	vs.Decode(s.buf[offset : offset+size])
 }
 
 // getNodeOffset returns the offset of node in the arena. If the node pointer is
 // nil, then the zero offset is returned.
-func (s *Arena) getNodeOffset(nd *node) uint32 {
+func (s *arena) getNodeOffset(nd *node) uint32 {
 	if nd == nil {
 		return 0
 	}

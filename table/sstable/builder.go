@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package table
+package sstable
 
 import (
 	"bytes"
@@ -30,8 +30,6 @@ import (
 	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
 	"github.com/dgryski/go-farm"
-	"github.com/golang/snappy"
-	"github.com/pingcap/errors"
 	"golang.org/x/time/rate"
 )
 
@@ -283,20 +281,13 @@ func (b *Builder) finishBlock() error {
 	// Add base key.
 	b.baseKeys.append(firstKey)
 
-	data := b.buf
-	if b.compression != options.None {
-		var err error
-		// TODO: Find a way to reuse buffers. Current implementation creates a
-		// new buffer for each compressData call.
-		data, err = b.compressData(b.buf)
-		y.Check(err)
-	}
-
-	if err := b.w.Append(data); err != nil {
+	before := b.w.Offset()
+	if err := b.compression.Compress(b.w, b.buf); err != nil {
 		return err
 	}
-	b.blockEndOffsets = append(b.blockEndOffsets, uint32(b.writtenLen+len(data)))
-	b.writtenLen += len(data)
+	size := b.w.Offset() - before
+	b.blockEndOffsets = append(b.blockEndOffsets, uint32(b.writtenLen+int(size)))
+	b.writtenLen += int(size)
 	b.rawWrittenLen += len(b.buf)
 
 	// Reset the block for the next build.
@@ -405,10 +396,8 @@ func (b *Builder) Finish() error {
 		// External builder doesn't append ts to the keys, the output sst should has a non-zero global ts.
 		ts = 1
 	}
-	if err := b.w.Append(u64ToBytes(ts)); err != nil {
-		return err
-	}
-	encoder := metaEncoder{b.buf}
+
+	encoder := newMetaEncoder(b.buf, b.compression, ts)
 	encoder.append(b.smallest.UserKey, idSmallest)
 	encoder.append(b.biggest.UserKey, idBiggest)
 	encoder.append(u32SliceToBytes(b.baseKeys.endOffs), idBaseKeysEndOffs)
@@ -444,13 +433,7 @@ func (b *Builder) Finish() error {
 	}
 	encoder.append(surfIndex, idSuRFIndex)
 
-	idxData := encoder.buf
-	if b.compression != options.None {
-		if idxData, err = b.compressData(idxData); err != nil {
-			return err
-		}
-	}
-	if err := b.w.Append(idxData); err != nil {
+	if err := encoder.finish(b.w); err != nil {
 		return err
 	}
 
@@ -505,21 +488,18 @@ func bytesToU64(b []byte) uint64 {
 	return binary.LittleEndian.Uint64(b)
 }
 
-// compressData compresses the given data.
-func (b *Builder) compressData(data []byte) ([]byte, error) {
-	switch b.compression {
-	case options.None:
-		return data, nil
-	case options.Snappy:
-		return snappy.Encode(nil, data), nil
-	case options.ZSTD:
-		return compress(data)
-	}
-	return nil, errors.New("Unsupported compression type")
+type metaEncoder struct {
+	buf         []byte
+	compression options.CompressionType
 }
 
-type metaEncoder struct {
-	buf []byte
+func newMetaEncoder(buf []byte, compression options.CompressionType, globalTS uint64) *metaEncoder {
+	buf = append(buf, u64ToBytes(globalTS)...)
+	buf = append(buf, byte(compression))
+	return &metaEncoder{
+		buf:         buf,
+		compression: compression,
+	}
 }
 
 func (e *metaEncoder) append(d []byte, id byte) {
@@ -528,9 +508,41 @@ func (e *metaEncoder) append(d []byte, id byte) {
 	e.buf = append(e.buf, d...)
 }
 
+func (e *metaEncoder) finish(w *fileutil.DirectWriter) error {
+	if e.compression == options.None {
+		return w.Append(e.buf)
+	}
+
+	if err := w.Append(e.buf[:9]); err != nil {
+		return err
+	}
+	return e.compression.Compress(w, e.buf[9:])
+}
+
 type metaDecoder struct {
-	buf    []byte
+	buf         []byte
+	globalTS    uint64
+	compression options.CompressionType
+
 	cursor int
+}
+
+func newMetaDecoder(buf []byte) (*metaDecoder, error) {
+	globalTS := bytesToU64(buf[:8])
+	compression := options.CompressionType(buf[8])
+	buf = buf[9:]
+	if compression != options.None {
+		buf1, err := compression.Decompress(buf)
+		if err != nil {
+			return nil, err
+		}
+		buf = buf1
+	}
+	return &metaDecoder{
+		buf:         buf,
+		globalTS:    globalTS,
+		compression: compression,
+	}, nil
 }
 
 func (e *metaDecoder) valid() bool {

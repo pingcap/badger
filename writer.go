@@ -23,7 +23,7 @@ import (
 
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/memtable"
 	"github.com/coocood/badger/y"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
@@ -37,7 +37,7 @@ type writeWorker struct {
 }
 
 type mergeLSMTask struct {
-	mt    *table.MemTable
+	mt    *memtable.Table
 	guard *epoch.Guard
 }
 
@@ -213,8 +213,8 @@ func (w *writeWorker) done(reqs []*request, err error) {
 	}
 }
 
-func newEntry(entry *Entry) table.Entry {
-	return table.Entry{
+func newEntry(entry *Entry) memtable.Entry {
+	return memtable.Entry{
 		Key: entry.Key,
 		Value: y.ValueStruct{
 			Value:    entry.Value,
@@ -234,7 +234,7 @@ func (w *writeWorker) writeToLSM(entries []*Entry) error {
 			mTbls = w.mtbls.Load().(*memTables)
 		}
 
-		es := make([]table.Entry, 0, len(entries))
+		es := make([]memtable.Entry, 0, len(entries))
 		var i int
 		for i = 0; i < len(entries); i++ {
 			entry := entries[i]

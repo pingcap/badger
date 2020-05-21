@@ -1,11 +1,11 @@
-package table
+package memtable
 
 import (
 	"sort"
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/coocood/badger/skl"
+	"github.com/coocood/badger/table"
 	"github.com/coocood/badger/y"
 )
 
@@ -15,44 +15,57 @@ type Entry struct {
 }
 
 func (e *Entry) EstimateSize() int64 {
-	return int64(e.Key.Len() + int(e.Value.EncodedSize()) + skl.EstimateNodeSize)
+	return int64(e.Key.Len() + int(e.Value.EncodedSize()) + EstimateNodeSize)
 }
 
-type MemTable struct {
-	skl         *skl.Skiplist
+type Table struct {
+	skl         *skiplist
+	id          uint64
 	pendingList unsafe.Pointer // *listNode
+	compacting  int32
 }
 
-func NewMemTable(arenaSize int64) *MemTable {
-	return &MemTable{skl: skl.NewSkiplist(arenaSize)}
+func New(arenaSize int64, id uint64) *Table {
+	return &Table{
+		skl: newSkiplist(arenaSize),
+		id:  id,
+	}
 }
 
-func (mt *MemTable) Delete() error {
-	mt.skl.Delete()
+func (t *Table) ID() uint64 {
+	return t.id
+}
+
+func (t *Table) Delete() error {
+	t.skl.Delete()
 	return nil
 }
 
-func (mt *MemTable) Empty() bool {
-	return atomic.LoadPointer(&mt.pendingList) == nil && mt.skl.Empty()
+func (t *Table) Close() error {
+	return nil
 }
 
-func (mt *MemTable) Get(key y.Key) y.ValueStruct {
-	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
+func (t *Table) Empty() bool {
+	return atomic.LoadPointer(&t.pendingList) == nil && t.skl.Empty()
+}
+
+func (t *Table) Get(key y.Key, keyHash uint64) (y.ValueStruct, error) {
+	curr := (*listNode)(atomic.LoadPointer(&t.pendingList))
 	for curr != nil {
 		if v, ok := curr.get(key); ok {
-			return v
+			return v, nil
 		}
 		curr = (*listNode)(atomic.LoadPointer(&curr.next))
 	}
-	return mt.skl.Get(key)
+	return t.skl.Get(key), nil
 }
 
-func (mt *MemTable) NewIterator(reverse bool) y.Iterator {
+func (t *Table) NewIterator(reverse bool) y.Iterator {
 	var (
-		sklItr = mt.skl.NewUniIterator(reverse)
+		sklItr = t.skl.NewUniIterator(reverse)
 		its    []y.Iterator
 	)
-	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
+	curr := (*listNode)(atomic.LoadPointer(&t.pendingList))
 	for curr != nil {
 		its = append(its, curr.newIterator(reverse))
 		curr = (*listNode)(atomic.LoadPointer(&curr.next))
@@ -62,43 +75,80 @@ func (mt *MemTable) NewIterator(reverse bool) y.Iterator {
 		return sklItr
 	}
 	its = append(its, sklItr)
-	return NewMergeIterator(its, reverse)
+	return table.NewMergeIterator(its, reverse)
 }
 
-func (mt *MemTable) MemSize() int64 {
+func (t *Table) Size() int64 {
 	var sz int64
-	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
+	curr := (*listNode)(atomic.LoadPointer(&t.pendingList))
 	for curr != nil {
 		sz += curr.memSize
 		curr = (*listNode)(atomic.LoadPointer(&curr.next))
 	}
-	return mt.skl.MemSize() + sz
+	return t.skl.MemSize() + sz
+}
+
+func (t *Table) Smallest() y.Key {
+	it := t.NewIterator(false)
+	it.Rewind()
+	return it.Key()
+}
+
+func (t *Table) Biggest() y.Key {
+	it := t.NewIterator(true)
+	it.Rewind()
+	return it.Key()
+}
+
+func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
+	it := t.NewIterator(false)
+	it.Seek(start)
+	if !it.Valid() {
+		return false
+	}
+	if cmp := it.Key().Compare(end); cmp > 0 {
+		return false
+	} else if cmp == 0 {
+		return includeEnd
+	}
+	return true
+}
+
+func (t *Table) MarkCompacting(flag bool) {
+	if flag {
+		atomic.StoreInt32(&t.compacting, 1)
+	}
+	atomic.StoreInt32(&t.compacting, 0)
+}
+
+func (t *Table) IsCompacting() bool {
+	return atomic.LoadInt32(&t.compacting) == 1
 }
 
 // PutToSkl directly insert entry into SkipList.
-func (mt *MemTable) PutToSkl(key y.Key, v y.ValueStruct) {
-	mt.skl.Put(key, v)
+func (t *Table) PutToSkl(key y.Key, v y.ValueStruct) {
+	t.skl.Put(key, v)
 }
 
 // PutToPendingList put entries to pending list, and you can call MergeListToSkl to merge them to SkipList later.
-func (mt *MemTable) PutToPendingList(entries []Entry) {
-	mt.putToList(entries)
+func (t *Table) PutToPendingList(entries []Entry) {
+	t.putToList(entries)
 }
 
 // MergeListToSkl merge all entries in pending list to SkipList.
-func (mt *MemTable) MergeListToSkl() {
-	head := (*listNode)(atomic.LoadPointer(&mt.pendingList))
+func (t *Table) MergeListToSkl() {
+	head := (*listNode)(atomic.LoadPointer(&t.pendingList))
 	if head == nil {
 		return
 	}
 
-	head.mergeToSkl(mt.skl)
+	head.mergeToSkl(t.skl)
 	// No new node inserted, just update head of list.
-	if atomic.CompareAndSwapPointer(&mt.pendingList, unsafe.Pointer(head), nil) {
+	if atomic.CompareAndSwapPointer(&t.pendingList, unsafe.Pointer(head), nil) {
 		return
 	}
 	// New node inserted, iterate to find `prev` of old head.
-	curr := (*listNode)(atomic.LoadPointer(&mt.pendingList))
+	curr := (*listNode)(atomic.LoadPointer(&t.pendingList))
 	for curr != nil {
 		next := atomic.LoadPointer(&curr.next)
 		if unsafe.Pointer(head) == next {
@@ -109,12 +159,12 @@ func (mt *MemTable) MergeListToSkl() {
 	}
 }
 
-func (mt *MemTable) putToList(entries []Entry) {
+func (t *Table) putToList(entries []Entry) {
 	n := newListNode(entries)
 	for {
-		old := atomic.LoadPointer(&mt.pendingList)
+		old := atomic.LoadPointer(&t.pendingList)
 		n.next = old
-		if atomic.CompareAndSwapPointer(&mt.pendingList, old, unsafe.Pointer(n)) {
+		if atomic.CompareAndSwapPointer(&t.pendingList, old, unsafe.Pointer(n)) {
 			return
 		}
 	}
@@ -138,14 +188,14 @@ func newListNode(entries []Entry) *listNode {
 	return n
 }
 
-func (n *listNode) putToSkl(s *skl.Skiplist, entries []Entry) {
-	var hint skl.Hint
+func (n *listNode) putToSkl(s *skiplist, entries []Entry) {
+	var h hint
 	for _, e := range entries {
-		s.PutWithHint(e.Key, e.Value, &hint)
+		s.PutWithHint(e.Key, e.Value, &h)
 	}
 }
 
-func (n *listNode) mergeToSkl(skl *skl.Skiplist) {
+func (n *listNode) mergeToSkl(skl *skiplist) {
 	next := (*listNode)(atomic.LoadPointer(&n.next))
 	if next != nil {
 		next.mergeToSkl(skl)

@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/coocood/badger/options"
-	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/sstable"
 	"github.com/coocood/badger/y"
 	"github.com/stretchr/testify/require"
 )
@@ -1399,7 +1399,7 @@ func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.OpenSyncedFile(filename, true)
 	require.NoError(t, err)
-	builder := table.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions, options.ZSTD)
+	builder := sstable.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions, options.ZSTD)
 
 	for i, k := range keys {
 		err := builder.Add(y.KeyWithTs(k, 0), y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})
@@ -1436,7 +1436,7 @@ func TestIngestSimple(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	cnt, err := db.IngestExternalFiles([]ExternalTableSpec{{f.Name(), options.ZSTD}})
+	cnt, err := db.IngestExternalFiles([]ExternalTableSpec{{f.Name()}})
 	require.NoError(t, err)
 	require.Equal(t, 1, cnt)
 
@@ -1483,7 +1483,7 @@ func TestIngestOverwrite(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	cnt, err := db.IngestExternalFiles([]ExternalTableSpec{{f.Name(), options.ZSTD}})
+	cnt, err := db.IngestExternalFiles([]ExternalTableSpec{{f.Name()}})
 	require.NoError(t, err)
 	require.Equal(t, 1, cnt)
 
@@ -1551,8 +1551,7 @@ func TestIngestWhileWrite(t *testing.T) {
 	specs := make([]ExternalTableSpec, len(files))
 	for i := range specs {
 		specs[i] = ExternalTableSpec{
-			Filename:    files[i].Name(),
-			Compression: options.ZSTD,
+			Filename: files[i].Name(),
 		}
 	}
 	cnt, err := db.IngestExternalFiles(specs)
@@ -1638,8 +1637,7 @@ func TestIngestSplit(t *testing.T) {
 	specs := make([]ExternalTableSpec, len(files))
 	for i := range specs {
 		specs[i] = ExternalTableSpec{
-			Filename:    files[i].Name(),
-			Compression: options.ZSTD,
+			Filename: files[i].Name(),
 		}
 	}
 	cnt, err := db.IngestExternalFiles(specs)
@@ -1658,7 +1656,7 @@ func TestIngestSplit(t *testing.T) {
 	l1.RLock()
 	tblCnt := 0
 	for _, t := range l1.tables {
-		if t.HasGlobalTs() {
+		if t.(*sstable.Table).HasGlobalTs() {
 			tblCnt++
 		}
 	}

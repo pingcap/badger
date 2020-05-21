@@ -102,7 +102,7 @@ const (
 func (m *Manifest) asChanges() []*protos.ManifestChange {
 	changes := make([]*protos.ManifestChange, 0, len(m.Tables))
 	for id, tm := range m.Tables {
-		changes = append(changes, newCreateChange(id, int(tm.Level), tm.Compression))
+		changes = append(changes, newCreateChange(id, int(tm.Level)))
 	}
 	return changes
 }
@@ -384,8 +384,7 @@ func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error
 
 func addNewToManifest(build *Manifest, tc *protos.ManifestChange) {
 	build.Tables[tc.Id] = tableManifest{
-		Level:       uint8(tc.Level),
-		Compression: options.CompressionType(tc.Compression),
+		Level: uint8(tc.Level),
 	}
 	for len(build.Levels) <= int(tc.Level) {
 		build.Levels = append(build.Levels, levelManifest{make(map[uint64]struct{})})
@@ -417,7 +416,6 @@ func applyManifestChange(build *Manifest, tc *protos.ManifestChange) error {
 		delete(build.Levels[tm.Level].Tables, tc.Id)
 		delete(build.Tables, tc.Id)
 		build.Deletions++
-		tc.Compression = uint32(tm.Compression)
 		addNewToManifest(build, tc)
 	default:
 		return fmt.Errorf("MANIFEST file has invalid manifestChange op")
@@ -440,12 +438,11 @@ func applyChangeSet(build *Manifest, changeSet *protos.ManifestChangeSet) error 
 }
 
 func newCreateChange(
-	id uint64, level int, c options.CompressionType) *protos.ManifestChange {
+	id uint64, level int) *protos.ManifestChange {
 	return &protos.ManifestChange{
-		Id:          id,
-		Op:          protos.ManifestChange_CREATE,
-		Level:       uint32(level),
-		Compression: uint32(c),
+		Id:    id,
+		Op:    protos.ManifestChange_CREATE,
+		Level: uint32(level),
 	}
 }
 

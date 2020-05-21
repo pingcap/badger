@@ -32,8 +32,9 @@ import (
 	"github.com/coocood/badger/epoch"
 	"github.com/coocood/badger/options"
 	"github.com/coocood/badger/protos"
-	"github.com/coocood/badger/skl"
 	"github.com/coocood/badger/table"
+	"github.com/coocood/badger/table/memtable"
+	"github.com/coocood/badger/table/sstable"
 	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
 	"github.com/ncw/directio"
@@ -76,7 +77,7 @@ type DB struct {
 	ingestCh  chan *ingestTask
 
 	// mem table buffer to avoid expensive allocating big chunk of memory
-	memTableCh chan *table.MemTable
+	memTableCh chan *memtable.Table
 
 	orc           *oracle
 	safeTsTracker safeTsTracker
@@ -97,17 +98,17 @@ type DB struct {
 }
 
 type memTables struct {
-	tables []*table.MemTable // tables from new to old, the first one is mutable.
+	tables []*memtable.Table // tables from new to old, the first one is mutable.
 	length uint32            // The length is updated by the flusher.
 }
 
-func (tbls *memTables) getMutable() *table.MemTable {
+func (tbls *memTables) getMutable() *memtable.Table {
 	return tbls.tables[0]
 }
 
-func newMemTables(mt *table.MemTable, old *memTables) *memTables {
+func newMemTables(mt *memtable.Table, old *memTables) *memTables {
 	newTbls := &memTables{}
-	newTbls.tables = make([]*table.MemTable, 1+atomic.LoadUint32(&old.length))
+	newTbls.tables = make([]*memtable.Table, 1+atomic.LoadUint32(&old.length))
 	newTbls.tables[0] = mt
 	copy(newTbls.tables[1:], old.tables)
 	newTbls.length = uint32(len(newTbls.tables))
@@ -128,7 +129,7 @@ func replayFunction(out *DB) func(Entry) error {
 	var lastCommit uint64
 
 	toLSM := func(nk y.Key, vs y.ValueStruct) {
-		e := table.Entry{Key: nk, Value: vs}
+		e := memtable.Entry{Key: nk, Value: vs}
 		mTbls := out.mtbls.Load().(*memTables)
 		if out.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize()) == out.opt.MaxMemTableSize {
 			mTbls = out.mtbls.Load().(*memTables)
@@ -199,7 +200,7 @@ func replayFunction(out *DB) func(Entry) error {
 // Open returns a new DB object.
 func Open(opt Options) (db *DB, err error) {
 	opt.maxBatchSize = (15 * opt.MaxMemTableSize) / 100
-	opt.maxBatchCount = opt.maxBatchSize / int64(skl.MaxNodeSize)
+	opt.maxBatchCount = opt.maxBatchSize / int64(memtable.MaxNodeSize)
 
 	if opt.ValueThreshold > math.MaxUint16-16 {
 		return nil, ErrValueThreshold
@@ -300,7 +301,7 @@ func Open(opt Options) (db *DB, err error) {
 	db = &DB{
 		flushChan:     make(chan *flushTask, opt.NumMemtables),
 		writeCh:       make(chan *request, kvWriteChCapacity),
-		memTableCh:    make(chan *table.MemTable, 1),
+		memTableCh:    make(chan *memtable.Table, 1),
 		ingestCh:      make(chan *ingestTask),
 		opt:           opt,
 		manifest:      manifestFile,
@@ -319,24 +320,10 @@ func Open(opt Options) (db *DB, err error) {
 		db.limiter = rate.NewLimiter(rate.Limit(rateLimit), rateLimit)
 	}
 
-	db.closers.memtable = y.NewCloser(1)
-	go func() {
-		lc := db.closers.memtable
-		for {
-			select {
-			case db.memTableCh <- table.NewMemTable(arenaSize(db.opt)):
-			case <-lc.HasBeenClosed():
-				lc.Done()
-				return
-			}
-		}
-	}()
-
 	// Calculate initial size.
 	db.calculateSize()
 	db.closers.updateSize = y.NewCloser(1)
 	go db.updateSize(db.closers.updateSize)
-	db.mtbls.Store(newMemTables(<-db.memTableCh, &memTables{}))
 
 	db.closers.resourceManager = y.NewCloser(0)
 	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
@@ -345,6 +332,21 @@ func Open(opt Options) (db *DB, err error) {
 	if db.lc, err = newLevelsController(db, &manifest, db.resourceMgr, opt.TableBuilderOptions); err != nil {
 		return nil, err
 	}
+
+	db.closers.memtable = y.NewCloser(1)
+	go func() {
+		lc := db.closers.memtable
+		for {
+			select {
+			case db.memTableCh <- memtable.New(arenaSize(db.opt), db.lc.reserveFileID()):
+			case <-lc.HasBeenClosed():
+				lc.Done()
+				return
+			}
+		}
+	}()
+	db.mtbls.Store(newMemTables(<-db.memTableCh, &memTables{}))
+
 	if err = db.blobManger.Open(db, opt); err != nil {
 		return nil, err
 	}
@@ -405,7 +407,7 @@ func Open(opt Options) (db *DB, err error) {
 func (db *DB) DeleteFilesInRange(start, end []byte) {
 	var (
 		changes   []*protos.ManifestChange
-		pruneTbls []*table.Table
+		pruneTbls []table.Table
 		startKey  = y.KeyWithTs(start, math.MaxUint64)
 		endKey    = y.KeyWithTs(end, 0)
 		guard     = db.resourceMgr.Acquire()
@@ -458,23 +460,22 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 	guard.Done()
 }
 
-func isRangeCoversTable(start, end y.Key, t *table.Table) bool {
+func isRangeCoversTable(start, end y.Key, t table.Table) bool {
 	left := start.Compare(t.Smallest()) <= 0
 	right := t.Biggest().Compare(end) < 0
 	return left && right
 }
 
 // NewExternalTableBuilder returns a new sst builder.
-func (db *DB) NewExternalTableBuilder(f *os.File, compression options.CompressionType, limiter *rate.Limiter) *table.Builder {
-	return table.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions, compression)
+func (db *DB) NewExternalTableBuilder(f *os.File, compression options.CompressionType, limiter *rate.Limiter) *sstable.Builder {
+	return sstable.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions, compression)
 }
 
 // ErrExternalTableOverlap returned by IngestExternalFiles when files overlaps.
 var ErrExternalTableOverlap = errors.New("keys of external tables has overlap")
 
 type ExternalTableSpec struct {
-	Filename    string
-	Compression options.CompressionType
+	Filename string
 }
 
 // IngestExternalFiles ingest external constructed tables into DB.
@@ -496,23 +497,23 @@ func (db *DB) IngestExternalFiles(files []ExternalTableSpec) (int, error) {
 	return task.cnt, task.err
 }
 
-func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]*table.Table, error) {
-	tbls := make([]*table.Table, len(specs))
+func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]table.Table, error) {
+	tbls := make([]table.Table, len(specs))
 	for i, spec := range specs {
 		id := db.lc.reserveFileID()
-		filename := table.NewFilename(id, db.opt.Dir)
+		filename := sstable.NewFilename(id, db.opt.Dir)
 
 		err := os.Link(spec.Filename, filename)
 		if err != nil {
 			return nil, err
 		}
 
-		err = os.Link(table.IndexFilename(spec.Filename), table.IndexFilename(filename))
+		err = os.Link(sstable.IndexFilename(spec.Filename), sstable.IndexFilename(filename))
 		if err != nil {
 			return nil, err
 		}
 
-		tbl, err := table.OpenTable(filename, spec.Compression, db.blockCache, db.indexCache)
+		tbl, err := sstable.OpenTable(filename, db.blockCache, db.indexCache)
 		if err != nil {
 			return nil, err
 		}
@@ -527,7 +528,7 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]*table.Table, e
 	return tbls, syncDir(db.lc.kv.opt.Dir)
 }
 
-func (db *DB) checkExternalTables(tbls []*table.Table) error {
+func (db *DB) checkExternalTables(tbls []table.Table) error {
 	keys := make([][]byte, 0, len(tbls)*2)
 	for _, t := range tbls {
 		keys = append(keys, t.Smallest().UserKey, t.Biggest().UserKey)
@@ -675,7 +676,7 @@ func syncDir(dir string) error {
 }
 
 // getMemtables returns the current memtables.
-func (db *DB) getMemTables() []*table.MemTable {
+func (db *DB) getMemTables() []*memtable.Table {
 	tbls := db.mtbls.Load().(*memTables)
 	l := atomic.LoadUint32(&tbls.length)
 	return tbls.tables[:l]
@@ -694,8 +695,11 @@ func (db *DB) get(key y.Key) y.ValueStruct {
 
 	db.metrics.NumGets.Inc()
 	for _, table := range tables {
-		vs := table.Get(key)
 		db.metrics.NumMemtableGets.Inc()
+		vs, err := table.Get(key, 0)
+		if err != nil {
+			log.Error("search table meets error", zap.Error(err))
+		}
 		if vs.Valid() {
 			return vs
 		}
@@ -715,7 +719,10 @@ func (db *DB) multiGet(pairs []keyValuePair) {
 				continue
 			}
 			for {
-				val := table.Get(pair.key)
+				val, err := table.Get(pair.key, 0)
+				if err != nil {
+					log.Error("search table meets error", zap.Error(err))
+				}
 				if val.Valid() {
 					pair.val = val
 					pair.found = true
@@ -802,8 +809,8 @@ func (db *DB) batchSetAsync(entries []*Entry, f func(error)) error {
 }
 
 // ensureRoomForWrite is always called serially.
-func (db *DB) ensureRoomForWrite(mt *table.MemTable, minSize int64) int64 {
-	free := db.opt.MaxMemTableSize - mt.MemSize()
+func (db *DB) ensureRoomForWrite(mt *memtable.Table, minSize int64) int64 {
+	free := db.opt.MaxMemTableSize - mt.Size()
 	if free >= minSize {
 		return free
 	}
@@ -817,25 +824,25 @@ func (db *DB) flushMemTable() *sync.WaitGroup {
 	db.mtbls.Store(newTbls)
 	ft := newFlushTask(mTbls.getMutable(), db.logOff)
 	db.flushChan <- ft
-	log.Info("flushing memtable", zap.Int64("memtable size", mTbls.getMutable().MemSize()), zap.Int("size of flushChan", len(db.flushChan)))
+	log.Info("flushing memtable", zap.Int64("memtable size", mTbls.getMutable().Size()), zap.Int("size of flushChan", len(db.flushChan)))
 
 	// New memtable is empty. We certainly have room.
 	return &ft.wg
 }
 
 func arenaSize(opt Options) int64 {
-	return opt.MaxMemTableSize + opt.maxBatchCount*int64(skl.MaxNodeSize)
+	return opt.MaxMemTableSize + opt.maxBatchCount*int64(memtable.MaxNodeSize)
 }
 
 // WriteLevel0Table flushes memtable. It drops deleteValues.
-func (db *DB) writeLevel0Table(s *table.MemTable, f *os.File) error {
+func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
 	iter := s.NewIterator(false)
 	var (
 		bb                   *blobFileBuilder
 		numWrite, bytesWrite int
 		err                  error
 	)
-	b := table.NewTableBuilder(f, db.limiter, 0, db.opt.TableBuilderOptions)
+	b := sstable.NewTableBuilder(f, db.limiter, 0, db.opt.TableBuilderOptions)
 	defer b.Close()
 
 	for iter.Rewind(); iter.Valid(); iter.Next() {
@@ -889,15 +896,36 @@ func (db *DB) newBlobFileBuilder() (*blobFileBuilder, error) {
 }
 
 type flushTask struct {
-	mt  *table.MemTable
+	mt  *memtable.Table
 	off logOffset
 	wg  sync.WaitGroup
 }
 
-func newFlushTask(mt *table.MemTable, off logOffset) *flushTask {
+func newFlushTask(mt *memtable.Table, off logOffset) *flushTask {
 	ft := &flushTask{mt: mt, off: off}
 	ft.wg.Add(1)
 	return ft
+}
+
+type fastL0Table struct {
+	*memtable.Table
+	sst *sstable.Table
+}
+
+func newFastL0Table(mt *memtable.Table, sst *sstable.Table) *fastL0Table {
+	return &fastL0Table{
+		Table: mt,
+		sst:   sst,
+	}
+}
+
+func (t *fastL0Table) Close() error {
+	return t.sst.Close()
+}
+
+func (t *fastL0Table) Delete() error {
+	_ = t.Table.Delete()
+	return t.sst.Delete()
 }
 
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
@@ -909,7 +937,6 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if ft.mt == nil {
 			return nil
 		}
-		guard := db.resourceMgr.Acquire()
 		var headInfo *protos.HeadInfo
 		if !ft.mt.Empty() {
 			headInfo = &protos.HeadInfo{
@@ -923,10 +950,11 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 			log.Info("flush memtable storing offset", zap.Uint32("fid", ft.off.fid), zap.Uint32("offset", ft.off.offset))
 		}
 
-		fileID := db.lc.reserveFileID()
-		filename := table.NewFilename(fileID, db.opt.Dir)
+		fileID := ft.mt.ID()
+		filename := sstable.NewFilename(fileID, db.opt.Dir)
 		fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
+			log.Error("error while writing to level 0", zap.Error(err))
 			return y.Wrap(err)
 		}
 
@@ -946,13 +974,14 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		tbl, err := table.OpenTable(filename, db.opt.TableBuilderOptions.CompressionPerLevel[0], db.blockCache, db.indexCache)
+		tbl, err := sstable.OpenTable(filename, db.blockCache, db.indexCache)
 		if err != nil {
 			log.Info("error while opening table", zap.Error(err))
 			return err
 		}
-		err = db.lc.addLevel0Table(tbl, headInfo)
+		err = db.lc.addLevel0Table(newFastL0Table(ft.mt, tbl), headInfo)
 		if err != nil {
+			log.Error("error while syncing level directory", zap.Error(err))
 			return err
 		}
 		mTbls := db.mtbls.Load().(*memTables)
@@ -963,8 +992,6 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 				break
 			}
 		}
-		guard.Delete([]epoch.Resource{ft.mt})
-		guard.Done()
 		ft.wg.Done()
 	}
 	return nil
