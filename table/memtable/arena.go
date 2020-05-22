@@ -18,7 +18,6 @@ package memtable
 
 import (
 	"encoding/binary"
-	"math"
 	"sync/atomic"
 	"unsafe"
 
@@ -30,7 +29,7 @@ const (
 
 	// Always align nodes on 64-bit boundaries, even on 32-bit architectures,
 	// so that the node.value field is 64-bit aligned. This is necessary because
-	// node.getValueOffset uses atomic.LoadUint64, which expects its input
+	// node.getValueAddr uses atomic.LoadUint64, which expects its input
 	// pointer to be 64-bit aligned.
 	nodeAlign = int(unsafe.Sizeof(uint64(0))) - 1
 )
@@ -90,13 +89,12 @@ func (s *arena) putVal(v y.ValueStruct) uint32 {
 	return m
 }
 
-func (s *arena) putKey(key y.Key) uint32 {
-	l := uint32(key.Len())
+func (s *arena) putKey(key []byte) uint32 {
+	l := uint32(len(key))
 	n := atomic.AddUint32(&s.n, l)
 	y.Assert(int(n) <= len(s.buf))
 	m := n - l
-	copy(s.buf[m:], key.UserKey)
-	binary.BigEndian.PutUint64(s.buf[n-8:], math.MaxUint64-key.Version)
+	copy(s.buf[m:], key)
 	return m
 }
 
@@ -111,11 +109,8 @@ func (s *arena) getNode(offset uint32) *node {
 }
 
 // getKey returns byte slice at offset.
-func (s *arena) getKey(offset uint32, size uint16) (k y.Key) {
-	rawKey := s.buf[offset : offset+uint32(size)]
-	k.UserKey = rawKey[:len(rawKey)-8]
-	k.Version = math.MaxUint64 - binary.BigEndian.Uint64(rawKey[len(rawKey)-8:])
-	return
+func (s *arena) getKey(offset uint32, size uint16) (k []byte) {
+	return s.buf[offset : offset+uint32(size)]
 }
 
 // getVal returns byte slice at offset. The given size should be just the value
@@ -137,4 +132,38 @@ func (s *arena) getNodeOffset(nd *node) uint32 {
 	}
 
 	return uint32(uintptr(unsafe.Pointer(nd)) - uintptr(unsafe.Pointer(&s.buf[0])))
+}
+
+const valueNodeSize = uint32(unsafe.Sizeof(valueNode{}))
+
+// valueNode is used to store multiple versions of a key.
+// We enforce that the newly put value must have a greater version, so the single linked list is in descending order
+// by version.
+type valueNode struct {
+	valAddr     uint64
+	nextValAddr uint64
+}
+
+func (vn valueNode) encode(b []byte) {
+	binary.LittleEndian.PutUint64(b, vn.valAddr)
+	binary.LittleEndian.PutUint64(b[8:], vn.nextValAddr)
+}
+
+func (vn *valueNode) decode(b []byte) {
+	vn.valAddr = binary.LittleEndian.Uint64(b)
+	vn.nextValAddr = binary.LittleEndian.Uint64(b[8:])
+}
+
+func (s *arena) putValueNode(vn valueNode) uint32 {
+	n := atomic.AddUint32(&s.n, valueNodeSize)
+	y.Assert(int(n) <= len(s.buf))
+	m := n - valueNodeSize
+	vn.encode(s.buf[m:])
+	return m
+}
+
+func (s *arena) getValueNode(offset uint32) valueNode {
+	var vl valueNode
+	vl.decode(s.buf[offset : offset+valueNodeSize])
+	return vl
 }

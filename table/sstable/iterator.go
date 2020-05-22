@@ -29,14 +29,13 @@ import (
 
 type singleKeyIterator struct {
 	oldOffset uint32
-	latestVer uint64
 	latestVal []byte
 	oldVals   entrySlice
 	idx       int
 	oldBlock  []byte
 }
 
-func (ski *singleKeyIterator) set(oldOffset uint32, latestVer uint64, latestVal []byte) {
+func (ski *singleKeyIterator) set(oldOffset uint32, latestVal []byte) {
 	ski.oldOffset = oldOffset
 	numEntries := bytesToU32(ski.oldBlock[oldOffset:])
 	endOffsStartIdx := oldOffset + 4
@@ -44,26 +43,25 @@ func (ski *singleKeyIterator) set(oldOffset uint32, latestVer uint64, latestVal 
 	ski.oldVals.endOffs = bytesToU32Slice(ski.oldBlock[endOffsStartIdx:endOffsEndIdx])
 	valueEndOff := endOffsEndIdx + ski.oldVals.endOffs[numEntries-1]
 	ski.oldVals.data = ski.oldBlock[endOffsEndIdx:valueEndOff]
-	ski.latestVer = latestVer
 	ski.latestVal = latestVal
 }
 
-func (ski *singleKeyIterator) versionAndVal() (ver uint64, val []byte) {
+func (ski *singleKeyIterator) getVal() (val []byte) {
 	if ski.idx == 0 {
-		return ski.latestVer, ski.latestVal
+		return ski.latestVal
 	}
 	oldEntry := ski.oldVals.getEntry(ski.idx - 1)
-	return bytesToU64(oldEntry), oldEntry[8:]
+	return oldEntry
 }
 
 func (ski *singleKeyIterator) length() int {
 	return ski.oldVals.length() + 1
 }
 
-func (ski *singleKeyIterator) seekVersion(sVer uint64) (ver uint64, val []byte) {
+func (ski *singleKeyIterator) seekVersion(sVer uint64) (val []byte) {
 	for ski.idx = 0; ski.idx < ski.length(); ski.idx++ {
-		ver, val = ski.versionAndVal()
-		if sVer >= ver {
+		val = ski.getVal()
+		if sVer >= binary.LittleEndian.Uint64(val) {
 			return
 		}
 	}
@@ -126,7 +124,8 @@ func (itr *blockIterator) seek(key y.Key) {
 	}
 	if itr.key.Version > key.Version && bytes.Equal(key.UserKey, itr.key.UserKey) {
 		if itr.hasOldVersion() {
-			itr.key.Version, itr.val = itr.ski.seekVersion(key.Version)
+			itr.val = itr.ski.seekVersion(key.Version)
+			itr.key.Version = binary.LittleEndian.Uint64(itr.val)
 		}
 		if itr.key.Version > key.Version {
 			itr.setIdx(foundEntryIdx + 1)
@@ -169,12 +168,11 @@ func (itr *blockIterator) setIdx(i int) {
 		itr.key.Version = itr.globalTs
 	} else {
 		itr.key.Version = bytesToU64(entryData)
-		entryData = entryData[8:]
 	}
 	itr.val = entryData
 	itr.ski.idx = 0
 	if hasOld {
-		itr.ski.set(oldOffset, itr.key.Version, itr.val)
+		itr.ski.set(oldOffset, itr.val)
 	}
 }
 
@@ -184,9 +182,7 @@ func (itr *blockIterator) hasOldVersion() bool {
 
 func (itr *blockIterator) next() {
 	if itr.hasOldVersion() {
-		itr.ski.idx++
-		if itr.ski.idx < itr.ski.oldVals.length() {
-			itr.key.Version, itr.val = itr.ski.versionAndVal()
+		if itr.setVersionIdx(itr.ski.idx + 1) {
 			return
 		}
 	}
@@ -203,9 +199,7 @@ func (itr *blockIterator) prev() {
 
 func (itr *blockIterator) prevVersion() bool {
 	if itr.hasOldVersion() {
-		itr.ski.idx--
-		if itr.ski.idx >= 0 {
-			itr.key.Version, itr.val = itr.ski.versionAndVal()
+		if itr.setVersionIdx(itr.ski.idx - 1) {
 			return true
 		}
 	}
@@ -214,9 +208,18 @@ func (itr *blockIterator) prevVersion() bool {
 
 func (itr *blockIterator) seekToLastVersion() {
 	if itr.hasOldVersion() {
-		itr.ski.idx = itr.ski.length() - 1
-		itr.key.Version, itr.val = itr.ski.versionAndVal()
+		itr.setVersionIdx(itr.ski.length() - 1)
 	}
+}
+
+func (itr *blockIterator) setVersionIdx(idx int) bool {
+	if idx >= 0 && idx < itr.ski.length() {
+		itr.ski.idx = idx
+		itr.val = itr.ski.getVal()
+		itr.key.Version = bytesToU64(itr.val)
+		return true
+	}
+	return false
 }
 
 // Iterator is an iterator for a Table.

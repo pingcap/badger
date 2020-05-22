@@ -129,12 +129,12 @@ func replayFunction(out *DB) func(Entry) error {
 	var lastCommit uint64
 
 	toLSM := func(nk y.Key, vs y.ValueStruct) {
-		e := memtable.Entry{Key: nk, Value: vs}
+		e := memtable.Entry{Key: nk.UserKey, Value: vs}
 		mTbls := out.mtbls.Load().(*memTables)
 		if out.ensureRoomForWrite(mTbls.getMutable(), e.EstimateSize()) == out.opt.MaxMemTableSize {
 			mTbls = out.mtbls.Load().(*memTables)
 		}
-		mTbls.getMutable().PutToSkl(nk, vs)
+		mTbls.getMutable().PutToSkl(nk.UserKey, vs)
 	}
 
 	first := true
@@ -157,6 +157,7 @@ func replayFunction(out *DB) func(Entry) error {
 			Value:    nv,
 			Meta:     e.meta,
 			UserMeta: e.UserMeta,
+			Version:  nk.Version,
 		}
 
 		if e.meta&bitFinTxn > 0 {

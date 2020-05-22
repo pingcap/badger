@@ -1,6 +1,7 @@
 package memtable
 
 import (
+	"bytes"
 	"sort"
 	"sync/atomic"
 	"unsafe"
@@ -10,12 +11,12 @@ import (
 )
 
 type Entry struct {
-	Key   y.Key
+	Key   []byte
 	Value y.ValueStruct
 }
 
 func (e *Entry) EstimateSize() int64 {
-	return int64(e.Key.Len() + int(e.Value.EncodedSize()) + EstimateNodeSize)
+	return int64(len(e.Key) + int(e.Value.EncodedSize()) + EstimateNodeSize)
 }
 
 type Table struct {
@@ -57,7 +58,7 @@ func (t *Table) Get(key y.Key, keyHash uint64) (y.ValueStruct, error) {
 		}
 		curr = (*listNode)(atomic.LoadPointer(&curr.next))
 	}
-	return t.skl.Get(key), nil
+	return t.skl.Get(key.UserKey, key.Version), nil
 }
 
 func (t *Table) NewIterator(reverse bool) y.Iterator {
@@ -126,7 +127,7 @@ func (t *Table) IsCompacting() bool {
 }
 
 // PutToSkl directly insert entry into SkipList.
-func (t *Table) PutToSkl(key y.Key, v y.ValueStruct) {
+func (t *Table) PutToSkl(key []byte, v y.ValueStruct) {
 	t.skl.Put(key, v)
 }
 
@@ -182,9 +183,6 @@ func newListNode(entries []Entry) *listNode {
 		sz := e.EstimateSize()
 		n.memSize += sz
 	}
-	for _, e := range entries {
-		e.Value.Version = e.Key.Version
-	}
 	return n
 }
 
@@ -206,9 +204,10 @@ func (n *listNode) mergeToSkl(skl *skiplist) {
 
 func (n *listNode) get(key y.Key) (y.ValueStruct, bool) {
 	i := sort.Search(len(n.entries), func(i int) bool {
-		return n.entries[i].Key.Compare(key) >= 0
+		e := n.entries[i]
+		return y.KeyWithTs(e.Key, e.Value.Version).Compare(key) >= 0
 	})
-	if i < len(n.entries) && key.SameUserKey(n.entries[i].Key) {
+	if i < len(n.entries) && bytes.Equal(key.UserKey, n.entries[i].Key) {
 		return n.entries[i].Value, true
 	}
 	return y.ValueStruct{}, false
@@ -242,7 +241,8 @@ func (it *listNodeIterator) Rewind() {
 
 func (it *listNodeIterator) Seek(key y.Key) {
 	it.idx = sort.Search(len(it.n.entries), func(i int) bool {
-		return it.n.entries[i].Key.Compare(key) >= 0
+		e := it.n.entries[i]
+		return y.KeyWithTs(e.Key, e.Value.Version).Compare(key) >= 0
 	})
 	if it.reversed {
 		if !it.Valid() || !it.Key().Equal(key) {
@@ -251,7 +251,10 @@ func (it *listNodeIterator) Seek(key y.Key) {
 	}
 }
 
-func (it *listNodeIterator) Key() y.Key { return it.n.entries[it.idx].Key }
+func (it *listNodeIterator) Key() y.Key {
+	e := it.n.entries[it.idx]
+	return y.KeyWithTs(e.Key, e.Value.Version)
+}
 
 func (it *listNodeIterator) Value() y.ValueStruct { return it.n.entries[it.idx].Value }
 

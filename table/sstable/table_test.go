@@ -190,7 +190,7 @@ func TestHashIndexTS(t *testing.T) {
 	rk, _, ok, err := table.pointGet(y.KeyWithTs([]byte("key"), 10), keyHash)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.True(t, rk.Equal(keys[0]))
+	require.True(t, rk.Equal(keys[0]), "%s", string(rk.UserKey))
 
 	rk, _, ok, err = table.pointGet(y.KeyWithTs([]byte("key"), 6), keyHash)
 	require.NoError(t, err)

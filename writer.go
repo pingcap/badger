@@ -215,7 +215,7 @@ func (w *writeWorker) done(reqs []*request, err error) {
 
 func newEntry(entry *Entry) memtable.Entry {
 	return memtable.Entry{
-		Key: entry.Key,
+		Key: entry.Key.UserKey,
 		Value: y.ValueStruct{
 			Value:    entry.Value,
 			Meta:     entry.meta,

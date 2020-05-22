@@ -107,9 +107,9 @@ type Builder struct {
 	surfKeys [][]byte
 	surfVals [][]byte
 
-	tmpKeys       entrySlice
-	tmpVerAndVals entrySlice
-	tmpOldOffs    []uint32
+	tmpKeys    entrySlice
+	tmpVals    entrySlice
+	tmpOldOffs []uint32
 
 	singleKeyOldVers entrySlice
 	oldBlock         []byte
@@ -222,10 +222,8 @@ func (b *Builder) addHelper(key y.Key, v y.ValueStruct) {
 		b.addIndex(key)
 	}
 	b.tmpKeys.append(key.UserKey)
-	if !b.useGlobalTS {
-		b.tmpVerAndVals.data = append(b.tmpVerAndVals.data, u64ToBytes(key.Version)...)
-	}
-	b.tmpVerAndVals.appendVal(&v)
+	v.Version = key.Version
+	b.tmpVals.appendVal(&v)
 	b.tmpOldOffs = append(b.tmpOldOffs, 0)
 	b.counter++
 }
@@ -236,13 +234,13 @@ func (b *Builder) addHelper(key y.Key, v y.ValueStruct) {
 // entry format:
 //   version(8) | value
 func (b *Builder) addOld(key y.Key, v y.ValueStruct) {
+	v.Version = key.Version
 	keyIdx := b.tmpKeys.length() - 1
 	startOff := b.tmpOldOffs[keyIdx]
 	if startOff == 0 {
 		startOff = uint32(len(b.oldBlock))
 		b.tmpOldOffs[keyIdx] = startOff
 	}
-	b.singleKeyOldVers.data = append(b.singleKeyOldVers.data, u64ToBytes(key.Version)...)
 	b.singleKeyOldVers.appendVal(&v)
 }
 
@@ -271,7 +269,7 @@ func (b *Builder) finishBlock() error {
 			b.buf = append(b.buf, 1)
 			b.buf = append(b.buf, u32ToBytes(b.tmpOldOffs[i])...)
 		}
-		b.buf = append(b.buf, b.tmpVerAndVals.getEntry(i)...)
+		b.buf = append(b.buf, b.tmpVals.getEntry(i)...)
 		b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
 	}
 	b.buf = append(b.buf, u32SliceToBytes(b.entryEndOffsets)...)
@@ -295,7 +293,7 @@ func (b *Builder) finishBlock() error {
 	b.counter = 0
 	b.buf = b.buf[:0]
 	b.tmpKeys.reset()
-	b.tmpVerAndVals.reset()
+	b.tmpVals.reset()
 	b.tmpOldOffs = b.tmpOldOffs[:0]
 	return nil
 }
@@ -338,7 +336,7 @@ func (b *Builder) shouldFinishBlock() bool {
 	if b.tmpKeys.length() == 0 {
 		return false
 	}
-	return uint32(b.tmpKeys.size()+b.tmpVerAndVals.size()) > uint32(b.opt.BlockSize)
+	return uint32(b.tmpKeys.size()+b.tmpVals.size()) > uint32(b.opt.BlockSize)
 }
 
 // ReachedCapacity returns true if we... roughly (?) reached capacity?

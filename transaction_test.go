@@ -619,15 +619,10 @@ func TestIteratorAllVersionsWithDeleted(t *testing.T) {
 		require.NoError(t, err)
 
 		// Delete the specific key version from underlying db directly
-		err = db.View(func(txn *Txn) error {
+		err = db.Update(func(txn *Txn) error {
 			item, err := txn.Get([]byte("answer1"))
 			require.NoError(t, err)
-			err = txn.db.batchSet([]*Entry{
-				{
-					Key:  item.key,
-					meta: bitDelete,
-				},
-			})
+			err = txn.Delete(item.KeyCopy(nil))
 			require.NoError(t, err)
 			return err
 		})
@@ -647,11 +642,11 @@ func TestIteratorAllVersionsWithDeleted(t *testing.T) {
 				if count == 1 {
 					require.Equal(t, []byte("answer1"), item.Key())
 					require.True(t, item.meta&bitDelete > 0)
-				} else {
+				} else if count == 3 {
 					require.Equal(t, []byte("answer2"), item.Key())
 				}
 			}
-			require.Equal(t, 2, count)
+			require.Equal(t, 3, count)
 			return nil
 		})
 		require.NoError(t, err)
