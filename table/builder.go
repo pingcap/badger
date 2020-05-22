@@ -353,13 +353,13 @@ func (b *Builder) shouldFinishBlock() bool {
 // ReachedCapacity returns true if we... roughly (?) reached capacity?
 func (b *Builder) ReachedCapacity(capacity int64) bool {
 	estimateSz := b.rawWrittenLen + len(b.buf) +
-		4*len(b.blockEndOffsets) + b.baseKeys.size()
+		4*len(b.blockEndOffsets) + b.baseKeys.size() + len(b.oldBlock)
 	return int64(estimateSz) > capacity
 }
 
 // EstimateSize returns the size of the SST to build.
 func (b *Builder) EstimateSize() int {
-	size := b.rawWrittenLen + len(b.buf) + 4*len(b.blockEndOffsets) + b.baseKeys.size()
+	size := b.rawWrittenLen + len(b.buf) + 4*len(b.blockEndOffsets) + b.baseKeys.size() + len(b.oldBlock)
 	if !b.useSuRF {
 		size += 3 * int(float32(len(b.hashEntries))/b.opt.HashUtilRatio)
 	}
