@@ -16,7 +16,9 @@
 
 package y
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+)
 
 // ValueStruct represents the value info that can be associated with a key, but also the internal
 // Meta field.
@@ -76,11 +78,37 @@ func (v *ValueStruct) EncodeTo(buf []byte) []byte {
 
 // Iterator is an interface for a basic iterator.
 type Iterator interface {
+	// Next returns the next entry with different key on the latest version.
+	// If old version is needed, call NextVersion.
 	Next()
+	// NextVersion set the current entry to an older version.
+	// The iterator must be valid to call this method.
+	// It returns true if there is an older version, returns false if there is no older version.
+	// The iterator is still valid and on the same key.
+	NextVersion() bool
 	Rewind()
-	Seek(key Key)
+	Seek(key []byte)
 	Key() Key
 	Value() ValueStruct
 	FillValue(vs *ValueStruct)
 	Valid() bool
+}
+
+// SeekToVersion seeks a valid Iterator to the version that <= the given version.
+func SeekToVersion(it Iterator, version uint64) bool {
+	if version >= it.Key().Version {
+		return true
+	}
+	for it.NextVersion() {
+		if version >= it.Key().Version {
+			return true
+		}
+	}
+	return false
+}
+
+func NextAllVersion(it Iterator) {
+	if !it.NextVersion() {
+		it.Next()
+	}
 }

@@ -171,12 +171,7 @@ func TestTxnVersions(t *testing.T) {
 		}
 
 		checkAllVersions := func(itr *Iterator, i int) {
-			var version uint64
-			if itr.opt.Reverse {
-				version = 1
-			} else {
-				version = uint64(i)
-			}
+			version := uint64(i)
 
 			count := 0
 			for itr.Rewind(); itr.Valid(); itr.Next() {
@@ -189,12 +184,7 @@ func TestTxnVersions(t *testing.T) {
 				exp := fmt.Sprintf("valversion=%d", version)
 				require.Equal(t, exp, string(val), "v=%d", version)
 				count++
-
-				if itr.opt.Reverse {
-					version++
-				} else {
-					version--
-				}
+				version--
 			}
 			require.Equal(t, i, count, "i=%d", i) // Should loop as many times as i.
 		}

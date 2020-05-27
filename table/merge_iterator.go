@@ -1,18 +1,21 @@
 package table
 
 import (
+	"bytes"
+
 	"github.com/coocood/badger/y"
 )
 
 // MergeTowIterator is a specialized MergeIterator that only merge tow iterators.
 // It is an optimization for compaction.
 type MergeIterator struct {
-	smaller mergeIteratorChild
-	bigger  mergeIteratorChild
+	smaller *mergeIteratorChild
+	bigger  *mergeIteratorChild
 
 	// when the two iterators has the same value, the value in the second iterator is ignored.
 	second  y.Iterator
 	reverse bool
+	sameKey bool
 }
 
 type mergeIteratorChild struct {
@@ -55,26 +58,15 @@ func (mt *MergeIterator) fix() {
 		return
 	}
 	for mt.smaller.valid {
-		cmp := mt.smaller.key.Compare(mt.bigger.key)
+		cmp := bytes.Compare(mt.smaller.key.UserKey, mt.bigger.key.UserKey)
 		if cmp == 0 {
-			// Ignore the value in second iterator.
-			mt.second.Next()
-			var secondValid bool
-			if mt.second == mt.smaller.iter {
-				mt.smaller.reset()
-				secondValid = mt.smaller.valid
-			} else {
-				mt.bigger.reset()
-				secondValid = mt.bigger.valid
+			mt.sameKey = true
+			if mt.smaller.iter == mt.second {
+				mt.swap()
 			}
-			if !secondValid {
-				if mt.second == mt.smaller.iter && mt.bigger.valid {
-					mt.swap()
-				}
-				return
-			}
-			continue
+			return
 		}
+		mt.sameKey = false
 		if mt.reverse {
 			if cmp < 0 {
 				mt.swap()
@@ -103,7 +95,46 @@ func (mt *MergeIterator) Next() {
 		mt.smaller.iter.Next()
 	}
 	mt.smaller.reset()
+	if mt.sameKey && mt.bigger.valid {
+		if mt.bigger.merge != nil {
+			mt.bigger.merge.Next()
+		} else if mt.bigger.concat != nil {
+			mt.bigger.concat.Next()
+		} else {
+			mt.bigger.iter.Next()
+		}
+		mt.bigger.reset()
+	}
 	mt.fix()
+}
+
+func (mt *MergeIterator) NextVersion() bool {
+	if mt.smaller.iter.NextVersion() {
+		mt.smaller.reset()
+		return true
+	}
+	if !mt.sameKey {
+		return false
+	}
+	if !mt.bigger.valid {
+		return false
+	}
+	if mt.smaller.key.Version < mt.bigger.key.Version {
+		// The smaller is second iterator, the bigger is first iterator.
+		// We have swapped already, no more versions.
+		return false
+	}
+	if mt.smaller.key.Version == mt.bigger.key.Version {
+		// have duplicated key in the two iterators.
+		if mt.bigger.iter.NextVersion() {
+			mt.bigger.reset()
+			mt.swap()
+			return true
+		}
+		return false
+	}
+	mt.swap()
+	return true
 }
 
 // Rewind seeks to first element (or last element for reverse iterator).
@@ -116,7 +147,7 @@ func (mt *MergeIterator) Rewind() {
 }
 
 // Seek brings us to element with key >= given key.
-func (mt *MergeIterator) Seek(key y.Key) {
+func (mt *MergeIterator) Seek(key []byte) {
 	mt.smaller.iter.Seek(key)
 	mt.smaller.reset()
 	mt.bigger.iter.Seek(key)
@@ -159,6 +190,8 @@ func NewMergeIterator(iters []y.Iterator, reverse bool) y.Iterator {
 		mi := &MergeIterator{
 			second:  iters[1],
 			reverse: reverse,
+			smaller: new(mergeIteratorChild),
+			bigger:  new(mergeIteratorChild),
 		}
 		mi.smaller.setIterator(iters[0])
 		mi.bigger.setIterator(iters[1])
@@ -172,9 +205,13 @@ type EmptyIterator struct{}
 
 func (e *EmptyIterator) Next() {}
 
+func (e *EmptyIterator) NextVersion() bool {
+	return false
+}
+
 func (e *EmptyIterator) Rewind() {}
 
-func (e *EmptyIterator) Seek(key y.Key) {}
+func (e *EmptyIterator) Seek(key []byte) {}
 
 func (e *EmptyIterator) Key() y.Key {
 	return y.Key{}

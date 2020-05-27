@@ -73,7 +73,7 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 	y.Assert(mTbls.tables[0] != nil)
 	it := mTbls.getMutable().NewIterator(false)
 	for _, t := range task.tbls {
-		it.Seek(t.Smallest())
+		it.Seek(t.Smallest().UserKey)
 		if it.Valid() && it.Key().Compare(t.Biggest()) <= 0 {
 			wg = w.flushMemTable()
 			break
@@ -172,7 +172,7 @@ func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
 	imms := tbls.tables[:atomic.LoadUint32(&tbls.length)]
 	for _, mt := range imms {
 		it := mt.NewIterator(false)
-		it.Seek(kr.left)
+		it.Seek(kr.left.UserKey)
 		if !it.Valid() || it.Key().Compare(kr.right) <= 0 {
 			return true
 		}
@@ -204,7 +204,7 @@ func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) (overlappingTabl
 
 	for i := left; i < right; i++ {
 		it := handler.tables[i].NewIterator(false)
-		it.Seek(kr.left)
+		it.Seek(kr.left.UserKey)
 		if it.Valid() && it.Key().Compare(kr.right) <= 0 {
 			overlap = true
 			break

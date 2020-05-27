@@ -189,7 +189,7 @@ func (t *Table) Get(key y.Key, keyHash uint64) (y.ValueStruct, error) {
 	}
 	if !ok {
 		it := t.NewIterator(false)
-		it.Seek(key)
+		it.Seek(key.UserKey)
 		if !it.Valid() {
 			return y.ValueStruct{}, nil
 		}
@@ -239,9 +239,12 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 	}
 
 	it := t.newIterator(false)
-	it.seekFromOffset(int(blkIdx), int(offset), key)
+	it.seekFromOffset(int(blkIdx), int(offset), key.UserKey)
 
 	if !it.Valid() || !key.SameUserKey(it.Key()) {
+		return y.Key{}, y.ValueStruct{}, true, it.Error()
+	}
+	if !y.SeekToVersion(it, key.Version) {
 		return y.Key{}, y.ValueStruct{}, true, it.Error()
 	}
 	return it.Key(), it.Value(), true, nil
@@ -511,7 +514,7 @@ func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 	// If there are errors occurred during seeking,
 	// we assume the table has overlapped with the range to prevent data loss.
 	it := t.newIteratorWithIdx(false, idx)
-	it.Seek(start)
+	it.Seek(start.UserKey)
 	if !it.Valid() {
 		return it.Error() != nil
 	}

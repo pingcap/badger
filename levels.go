@@ -415,7 +415,7 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 		}
 		lastKey.Reset()
 		guard := searchGuard(it.Key().UserKey, guards)
-		for ; it.Valid(); it.Next() {
+		for ; it.Valid(); y.NextAllVersion(it) {
 			numRead++
 			vs := it.Value()
 			key := it.Key()

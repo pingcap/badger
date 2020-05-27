@@ -1,6 +1,7 @@
 package table
 
 import (
+	"bytes"
 	"sort"
 
 	"github.com/coocood/badger/y"
@@ -73,16 +74,16 @@ func (s *ConcatIterator) FillValue(vs *y.ValueStruct) {
 }
 
 // Seek brings us to element >= key if reversed is false. Otherwise, <= key.
-func (s *ConcatIterator) Seek(key y.Key) {
+func (s *ConcatIterator) Seek(key []byte) {
 	var idx int
 	if !s.reversed {
 		idx = sort.Search(len(s.tables), func(i int) bool {
-			return s.tables[i].Biggest().Compare(key) >= 0
+			return bytes.Compare(s.tables[i].Biggest().UserKey, key) >= 0
 		})
 	} else {
 		n := len(s.tables)
 		idx = n - 1 - sort.Search(n, func(i int) bool {
-			return s.tables[n-1-i].Smallest().Compare(key) <= 0
+			return bytes.Compare(s.tables[n-1-i].Smallest().UserKey, key) <= 0
 		})
 	}
 	if idx >= len(s.tables) || idx < 0 {
@@ -117,4 +118,8 @@ func (s *ConcatIterator) Next() {
 			break
 		}
 	}
+}
+
+func (s *ConcatIterator) NextVersion() bool {
+	return s.cur.NextVersion()
 }

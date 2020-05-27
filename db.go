@@ -449,7 +449,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 	for i, tbl := range pruneTbls {
 		it := tbl.NewIterator(false)
 		// TODO: use rate limiter to avoid burst IO.
-		for it.Rewind(); it.Valid(); it.Next() {
+		for it.Rewind(); it.Valid(); y.NextAllVersion(it) {
 			discardStats.collect(it.Value())
 		}
 		deletes[i] = tbl
@@ -846,7 +846,7 @@ func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
 	b := sstable.NewTableBuilder(f, db.limiter, 0, db.opt.TableBuilderOptions)
 	defer b.Close()
 
-	for iter.Rewind(); iter.Valid(); iter.Next() {
+	for iter.Rewind(); iter.Valid(); y.NextAllVersion(iter) {
 		key := iter.Key()
 		value := iter.Value()
 		if db.opt.ValueThreshold > 0 && len(value.Value) > db.opt.ValueThreshold {

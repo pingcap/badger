@@ -578,43 +578,29 @@ func (s *Iterator) FillValue(vs *y.ValueStruct) {
 // Next advances to the next position.
 func (s *Iterator) Next() {
 	y.Assert(s.Valid())
+	s.n = s.list.getNext(s.n, 0)
+	s.loadNode()
+}
+
+func (s *Iterator) NextVersion() bool {
 	if s.valListIdx+1 < len(s.valList) {
 		s.setValueListIdx(s.valListIdx + 1)
-	} else {
-		s.n = s.list.getNext(s.n, 0)
-		s.loadNode()
+		return true
 	}
+	return false
 }
 
 // Prev advances to the previous position.
 func (s *Iterator) Prev() {
 	y.Assert(s.Valid())
-	if s.valListIdx > 0 {
-		s.setValueListIdx(s.valListIdx - 1)
-		return
-	}
 	s.n, _ = s.list.findNear(s.uk, true, false) // find <. No equality allowed.
 	s.loadNode()
-	if len(s.valList) > 0 {
-		s.setValueListIdx(len(s.valList) - 1)
-	}
 }
 
 // Seek advances to the first entry with a key >= target.
-func (s *Iterator) Seek(target y.Key) {
-	s.n, _ = s.list.findNear(target.UserKey, false, true) // find >=.
+func (s *Iterator) Seek(target []byte) {
+	s.n, _ = s.list.findNear(target, false, true) // find >=.
 	s.loadNode()
-	if target.Version < s.v.Version && bytes.Equal(target.UserKey, s.uk) {
-		if len(s.valList) > 0 {
-			for i := 1; i < len(s.valList); i++ {
-				s.setValueListIdx(i)
-				if target.Version >= s.v.Version {
-					return
-				}
-			}
-		}
-		s.Next()
-	}
 }
 
 func (s *Iterator) loadNode() {
@@ -650,20 +636,9 @@ func (s *Iterator) setValueListIdx(idx int) {
 }
 
 // SeekForPrev finds an entry with key <= target.
-func (s *Iterator) SeekForPrev(target y.Key) {
-	s.n, _ = s.list.findNear(target.UserKey, true, true) // find <=.
+func (s *Iterator) SeekForPrev(target []byte) {
+	s.n, _ = s.list.findNear(target, true, true) // find <=.
 	s.loadNode()
-	if target.Version > s.v.Version {
-		if len(s.valList) > 0 {
-			for i := len(s.valList) - 1; i >= 0; i-- {
-				s.setValueListIdx(i)
-				if target.Version <= s.v.Version {
-					return
-				}
-			}
-		}
-		s.Prev()
-	}
 }
 
 // SeekToFirst seeks position at the first entry in list.
@@ -678,9 +653,6 @@ func (s *Iterator) SeekToFirst() {
 func (s *Iterator) SeekToLast() {
 	s.n = s.list.findLast()
 	s.loadNode()
-	if len(s.valList) > 0 {
-		s.setValueListIdx(len(s.valList) - 1)
-	}
 }
 
 // UniIterator is a unidirectional memtable iterator. It is a thin wrapper around
@@ -708,6 +680,10 @@ func (s *UniIterator) Next() {
 	}
 }
 
+func (s *UniIterator) NextVersion() bool {
+	return s.iter.NextVersion()
+}
+
 // Rewind implements y.Interface
 func (s *UniIterator) Rewind() {
 	if !s.reversed {
@@ -718,7 +694,7 @@ func (s *UniIterator) Rewind() {
 }
 
 // Seek implements y.Interface
-func (s *UniIterator) Seek(key y.Key) {
+func (s *UniIterator) Seek(key []byte) {
 	if !s.reversed {
 		s.iter.Seek(key)
 	} else {

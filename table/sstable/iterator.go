@@ -29,6 +29,7 @@ import (
 
 type singleKeyIterator struct {
 	oldOffset uint32
+	loaded    bool
 	latestVal []byte
 	oldVals   entrySlice
 	idx       int
@@ -37,13 +38,9 @@ type singleKeyIterator struct {
 
 func (ski *singleKeyIterator) set(oldOffset uint32, latestVal []byte) {
 	ski.oldOffset = oldOffset
-	numEntries := bytesToU32(ski.oldBlock[oldOffset:])
-	endOffsStartIdx := oldOffset + 4
-	endOffsEndIdx := endOffsStartIdx + 4*numEntries
-	ski.oldVals.endOffs = bytesToU32Slice(ski.oldBlock[endOffsStartIdx:endOffsEndIdx])
-	valueEndOff := endOffsEndIdx + ski.oldVals.endOffs[numEntries-1]
-	ski.oldVals.data = ski.oldBlock[endOffsEndIdx:valueEndOff]
 	ski.latestVal = latestVal
+	ski.loaded = false
+	ski.idx = 0
 }
 
 func (ski *singleKeyIterator) getVal() (val []byte) {
@@ -54,18 +51,18 @@ func (ski *singleKeyIterator) getVal() (val []byte) {
 	return oldEntry
 }
 
-func (ski *singleKeyIterator) length() int {
-	return ski.oldVals.length() + 1
+func (ski *singleKeyIterator) loadOld() {
+	numEntries := bytesToU32(ski.oldBlock[ski.oldOffset:])
+	endOffsStartIdx := ski.oldOffset + 4
+	endOffsEndIdx := endOffsStartIdx + 4*numEntries
+	ski.oldVals.endOffs = bytesToU32Slice(ski.oldBlock[endOffsStartIdx:endOffsEndIdx])
+	valueEndOff := endOffsEndIdx + ski.oldVals.endOffs[numEntries-1]
+	ski.oldVals.data = ski.oldBlock[endOffsEndIdx:valueEndOff]
+	ski.loaded = true
 }
 
-func (ski *singleKeyIterator) seekVersion(sVer uint64) (val []byte) {
-	for ski.idx = 0; ski.idx < ski.length(); ski.idx++ {
-		val = ski.getVal()
-		if sVer >= binary.LittleEndian.Uint64(val) {
-			return
-		}
-	}
-	return
+func (ski *singleKeyIterator) length() int {
+	return ski.oldVals.length() + 1
 }
 
 type blockIterator struct {
@@ -113,24 +110,12 @@ func (itr *blockIterator) loadEntries(data []byte) {
 
 // Seek brings us to the first block element that is >= input key.
 // The binary search will begin at `start`, you can use it to skip some items.
-func (itr *blockIterator) seek(key y.Key) {
+func (itr *blockIterator) seek(key []byte) {
 	foundEntryIdx := sort.Search(itr.entries.length(), func(idx int) bool {
 		itr.setIdx(idx)
-		return bytes.Compare(itr.key.UserKey, key.UserKey) >= 0
+		return bytes.Compare(itr.key.UserKey, key) >= 0
 	})
 	itr.setIdx(foundEntryIdx)
-	if itr.err != nil {
-		return
-	}
-	if itr.key.Version > key.Version && bytes.Equal(key.UserKey, itr.key.UserKey) {
-		if itr.hasOldVersion() {
-			itr.val = itr.ski.seekVersion(key.Version)
-			itr.key.Version = binary.LittleEndian.Uint64(itr.val)
-		}
-		if itr.key.Version > key.Version {
-			itr.setIdx(foundEntryIdx + 1)
-		}
-	}
 }
 
 // seekToFirst brings us to the first element. Valid should return true.
@@ -141,7 +126,6 @@ func (itr *blockIterator) seekToFirst() {
 // seekToLast brings us to the last element. Valid should return true.
 func (itr *blockIterator) seekToLast() {
 	itr.setIdx(itr.entries.length() - 1)
-	itr.seekToLastVersion()
 }
 
 // setIdx sets the iterator to the entry index and set the current key and value.
@@ -181,45 +165,11 @@ func (itr *blockIterator) hasOldVersion() bool {
 }
 
 func (itr *blockIterator) next() {
-	if itr.hasOldVersion() {
-		if itr.setVersionIdx(itr.ski.idx + 1) {
-			return
-		}
-	}
 	itr.setIdx(itr.idx + 1)
 }
 
 func (itr *blockIterator) prev() {
-	if itr.prevVersion() {
-		return
-	}
 	itr.setIdx(itr.idx - 1)
-	itr.seekToLastVersion()
-}
-
-func (itr *blockIterator) prevVersion() bool {
-	if itr.hasOldVersion() {
-		if itr.setVersionIdx(itr.ski.idx - 1) {
-			return true
-		}
-	}
-	return false
-}
-
-func (itr *blockIterator) seekToLastVersion() {
-	if itr.hasOldVersion() {
-		itr.setVersionIdx(itr.ski.length() - 1)
-	}
-}
-
-func (itr *blockIterator) setVersionIdx(idx int) bool {
-	if idx >= 0 && idx < itr.ski.length() {
-		itr.ski.idx = idx
-		itr.val = itr.ski.getVal()
-		itr.key.Version = bytesToU64(itr.val)
-		return true
-	}
-	return false
 }
 
 // Iterator is an iterator for a Table.
@@ -310,7 +260,7 @@ func (itr *Iterator) seekToLast() {
 	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekInBlock(blockIdx int, key y.Key) {
+func (itr *Iterator) seekInBlock(blockIdx int, key []byte) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx, itr.tIdx)
 	if err != nil {
@@ -322,7 +272,7 @@ func (itr *Iterator) seekInBlock(blockIdx int, key y.Key) {
 	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key y.Key) {
+func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx, itr.tIdx)
 	if err != nil {
@@ -331,22 +281,22 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key y.Key) {
 	}
 	itr.bi.setBlock(block)
 	itr.bi.setIdx(offset)
-	if itr.bi.key.Compare(key) >= 0 {
+	if bytes.Compare(itr.bi.key.UserKey, key) >= 0 {
 		return
 	}
 	itr.bi.seek(key)
 	itr.err = itr.bi.err
 }
 
-func (itr *Iterator) seekBlock(key y.Key) int {
+func (itr *Iterator) seekBlock(key []byte) int {
 	return sort.Search(len(itr.tIdx.blockEndOffsets), func(idx int) bool {
 		blockBaseKey := itr.tIdx.baseKeys.getEntry(idx)
-		return bytes.Compare(blockBaseKey, key.UserKey) > 0
+		return bytes.Compare(blockBaseKey, key) > 0
 	})
 }
 
 // seekFrom brings us to a key that is >= input key.
-func (itr *Iterator) seekFrom(key y.Key) {
+func (itr *Iterator) seekFrom(key []byte) {
 	itr.err = nil
 	itr.reset()
 
@@ -382,7 +332,7 @@ func (itr *Iterator) seekFrom(key y.Key) {
 }
 
 // seek will reset iterator and seek to >= key.
-func (itr *Iterator) seek(key y.Key) {
+func (itr *Iterator) seek(key []byte) {
 	itr.err = nil
 	itr.reset()
 	if itr.surf == nil {
@@ -391,7 +341,7 @@ func (itr *Iterator) seek(key y.Key) {
 	}
 
 	sit := itr.surf
-	sit.Seek(key.UserKey)
+	sit.Seek(key)
 	if !sit.Valid() {
 		itr.err = io.EOF
 		return
@@ -403,10 +353,10 @@ func (itr *Iterator) seek(key y.Key) {
 }
 
 // seekForPrev will reset iterator and seek to <= key.
-func (itr *Iterator) seekForPrev(key y.Key) {
+func (itr *Iterator) seekForPrev(key []byte) {
 	// TODO: Optimize this. We shouldn't have to take a Prev step.
 	itr.seekFrom(key)
-	if !itr.Key().Equal(key) {
+	if !bytes.Equal(itr.Key().UserKey, key) {
 		itr.prev()
 	}
 }
@@ -493,6 +443,22 @@ func (itr *Iterator) Next() {
 	}
 }
 
+func (itr *Iterator) NextVersion() bool {
+	if itr.bi.ski.oldOffset == 0 {
+		return false
+	}
+	if !itr.bi.ski.loaded {
+		itr.bi.ski.loadOld()
+	}
+	if itr.bi.ski.idx+1 < itr.bi.ski.length() {
+		itr.bi.ski.idx++
+		itr.bi.val = itr.bi.ski.getVal()
+		itr.bi.key.Version = bytesToU64(itr.bi.val)
+		return true
+	}
+	return false
+}
+
 // Rewind follows the y.Iterator interface
 func (itr *Iterator) Rewind() {
 	if !itr.reversed {
@@ -503,7 +469,7 @@ func (itr *Iterator) Rewind() {
 }
 
 // Seek follows the y.Iterator interface
-func (itr *Iterator) Seek(key y.Key) {
+func (itr *Iterator) Seek(key []byte) {
 	if !itr.reversed {
 		itr.seek(key)
 	} else {

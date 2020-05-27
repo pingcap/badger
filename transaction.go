@@ -173,13 +173,18 @@ func (pi *pendingWritesIterator) Next() {
 	pi.nextIdx++
 }
 
+func (pi *pendingWritesIterator) NextVersion() bool {
+	// We do not support adding multiple versions in a transaction.
+	return false
+}
+
 func (pi *pendingWritesIterator) Rewind() {
 	pi.nextIdx = 0
 }
 
-func (pi *pendingWritesIterator) Seek(key y.Key) {
+func (pi *pendingWritesIterator) Seek(key []byte) {
 	pi.nextIdx = sort.Search(len(pi.entries), func(idx int) bool {
-		cmp := pi.entries[idx].Key.Compare(key)
+		cmp := bytes.Compare(pi.entries[idx].Key.UserKey, key)
 		if !pi.reversed {
 			return cmp >= 0
 		}

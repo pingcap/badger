@@ -49,15 +49,15 @@ func length(s *skiplist) int {
 }
 
 func TestEmpty(t *testing.T) {
-	key := y.Key{UserKey: []byte("aaa"), Version: 1}
+	key := []byte("aaa")
 	l := newSkiplist(arenaSize)
 
-	v := l.Get(key.UserKey, key.Version)
+	v := l.Get(key, 1)
 	require.True(t, v.Value == nil) // Cannot use require.Nil for unsafe.Pointer nil.
 
 	for _, less := range []bool{true, false} {
 		for _, allowEqual := range []bool{true, false} {
-			n, found := l.findNear(key.UserKey, less, allowEqual)
+			n, found := l.findNear(key, less, allowEqual)
 			require.Nil(t, n)
 			require.False(t, found)
 		}
@@ -317,44 +317,44 @@ func TestIteratorSeek(t *testing.T) {
 	v := it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("01000"), 0))
+	it.Seek([]byte("01000"))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("01005"), 0))
+	it.Seek([]byte("01005"))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01010", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("01010"), 0))
+	it.Seek([]byte("01010"))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01010", v.Value)
 
-	it.Seek(y.KeyWithTs([]byte("99999"), 0))
+	it.Seek([]byte("99999"))
 	require.False(t, it.Valid())
 
 	// Try SeekForPrev.
-	it.SeekForPrev(y.KeyWithTs([]byte("00"), 0))
+	it.SeekForPrev([]byte("00"))
 	require.False(t, it.Valid())
 
-	it.SeekForPrev(y.KeyWithTs([]byte("01000"), 0))
+	it.SeekForPrev([]byte("01000"))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.SeekForPrev(y.KeyWithTs([]byte("01005"), 0))
+	it.SeekForPrev([]byte("01005"))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01000", v.Value)
 
-	it.SeekForPrev(y.KeyWithTs([]byte("01010"), 0))
+	it.SeekForPrev([]byte("01010"))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01010", v.Value)
 
-	it.SeekForPrev(y.KeyWithTs([]byte("99999"), 0))
+	it.SeekForPrev([]byte("99999"))
 	require.True(t, it.Valid())
 	v = it.Value()
 	require.EqualValues(t, "01990", v.Value)
@@ -459,7 +459,7 @@ func TestIterateMultiVersion(t *testing.T) {
 	var lastKey y.Key
 	for it.SeekToFirst(); it.Valid(); it.Next() {
 		if !lastKey.IsEmpty() {
-			require.True(t, lastKey.Compare(it.Key()) < 0)
+			require.True(t, bytes.Compare(lastKey.UserKey, it.Key().UserKey) < 0)
 		}
 		lastKey.Copy(it.Key())
 	}
@@ -471,14 +471,14 @@ func TestIterateMultiVersion(t *testing.T) {
 			valStr := fmt.Sprintf("%d_%d", id, k.Version)
 			require.Equal(t, valStr, string(val.Value))
 		} else {
-			it.Seek(k)
+			it.Seek(k.UserKey)
 			if it.Valid() {
-				require.True(t, it.Key().Compare(k) >= 0)
+				require.True(t, bytes.Compare(it.Key().UserKey, k.UserKey) >= 0)
 				var cpKey y.Key
 				cpKey.Copy(it.Key())
 				it.Prev()
 				if it.Valid() {
-					require.True(t, it.Key().Compare(k) < 0, "%s %s %s", it.Key(), cpKey, k)
+					require.True(t, bytes.Compare(it.Key().UserKey, k.UserKey) < 0, "%s %s %s", it.Key(), cpKey, k)
 				}
 			}
 		}
@@ -487,18 +487,18 @@ func TestIterateMultiVersion(t *testing.T) {
 	lastKey.Reset()
 	for revIt.Rewind(); revIt.Valid(); revIt.Next() {
 		if !lastKey.IsEmpty() {
-			require.Truef(t, lastKey.Compare(revIt.Key()) > 0, "%v %v", lastKey.String(), revIt.Key().String())
+			require.Truef(t, bytes.Compare(lastKey.UserKey, revIt.Key().UserKey) > 0, "%v %v", lastKey.String(), revIt.Key().String())
 		}
 		lastKey.Copy(revIt.Key())
 	}
 	for i := 0; i < 1000; i++ {
 		k := y.KeyWithTs([]byte(key("key", int(z.FastRand()%4000))), uint64(5+z.FastRand()%5))
 		// reverse iterator never seek to the same key with smaller version.
-		revIt.Seek(k)
+		revIt.Seek(k.UserKey)
 		if !revIt.Valid() {
 			continue
 		}
-		require.True(t, revIt.Key().Compare(k) <= 0, "%s %s", revIt.Key(), k)
+		require.True(t, bytes.Compare(revIt.Key().UserKey, k.UserKey) <= 0, "%s %s", revIt.Key(), k)
 	}
 }
 

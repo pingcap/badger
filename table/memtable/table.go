@@ -103,7 +103,7 @@ func (t *Table) Biggest() y.Key {
 
 func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 	it := t.NewIterator(false)
-	it.Seek(start)
+	it.Seek(start.UserKey)
 	if !it.Valid() {
 		return false
 	}
@@ -172,16 +172,22 @@ func (t *Table) putToList(entries []Entry) {
 }
 
 type listNode struct {
-	next    unsafe.Pointer // *listNode
-	entries []Entry
-	memSize int64
+	next       unsafe.Pointer // *listNode
+	entries    []Entry
+	latestOffs []uint32
+	memSize    int64
 }
 
 func newListNode(entries []Entry) *listNode {
-	n := &listNode{entries: entries}
-	for _, e := range n.entries {
+	n := &listNode{entries: entries, latestOffs: make([]uint32, 0, len(entries))}
+	var curKey []byte
+	for i, e := range n.entries {
 		sz := e.EstimateSize()
 		n.memSize += sz
+		if !bytes.Equal(e.Key, curKey) {
+			n.latestOffs = append(n.latestOffs, uint32(i))
+			curKey = e.Key
+		}
 	}
 	return n
 }
@@ -219,6 +225,7 @@ func (n *listNode) newIterator(reverse bool) *listNodeIterator {
 
 type listNodeIterator struct {
 	idx      int
+	verIdx   uint32
 	n        *listNode
 	reversed bool
 }
@@ -226,33 +233,54 @@ type listNodeIterator struct {
 func (it *listNodeIterator) Next() {
 	if !it.reversed {
 		it.idx++
+		it.verIdx = 0
 	} else {
 		it.idx--
+		it.verIdx = 0
 	}
+}
+
+func (it *listNodeIterator) NextVersion() bool {
+	nextKeyEntryOff := uint32(len(it.n.entries))
+	if it.idx+1 < len(it.n.latestOffs) {
+		nextKeyEntryOff = it.n.latestOffs[it.idx+1]
+	}
+	if it.getEntryIdx()+1 < nextKeyEntryOff {
+		it.verIdx++
+		return true
+	}
+	return false
+}
+
+func (it *listNodeIterator) getEntryIdx() uint32 {
+	return it.n.latestOffs[it.idx] + it.verIdx
 }
 
 func (it *listNodeIterator) Rewind() {
 	if !it.reversed {
 		it.idx = 0
+		it.verIdx = 0
 	} else {
-		it.idx = len(it.n.entries) - 1
+		it.idx = len(it.n.latestOffs) - 1
+		it.verIdx = 0
 	}
 }
 
-func (it *listNodeIterator) Seek(key y.Key) {
-	it.idx = sort.Search(len(it.n.entries), func(i int) bool {
-		e := it.n.entries[i]
-		return y.KeyWithTs(e.Key, e.Value.Version).Compare(key) >= 0
+func (it *listNodeIterator) Seek(key []byte) {
+	it.idx = sort.Search(len(it.n.latestOffs), func(i int) bool {
+		e := &it.n.entries[it.n.latestOffs[i]]
+		return bytes.Compare(e.Key, key) >= 0
 	})
+	it.verIdx = 0
 	if it.reversed {
-		if !it.Valid() || !it.Key().Equal(key) {
+		if !it.Valid() || !bytes.Equal(it.Key().UserKey, key) {
 			it.idx--
 		}
 	}
 }
 
 func (it *listNodeIterator) Key() y.Key {
-	e := it.n.entries[it.idx]
+	e := &it.n.entries[it.getEntryIdx()]
 	return y.KeyWithTs(e.Key, e.Value.Version)
 }
 
@@ -260,4 +288,4 @@ func (it *listNodeIterator) Value() y.ValueStruct { return it.n.entries[it.idx].
 
 func (it *listNodeIterator) FillValue(vs *y.ValueStruct) { *vs = it.Value() }
 
-func (it *listNodeIterator) Valid() bool { return it.idx >= 0 && it.idx < len(it.n.entries) }
+func (it *listNodeIterator) Valid() bool { return it.idx >= 0 && it.idx < len(it.n.latestOffs) }

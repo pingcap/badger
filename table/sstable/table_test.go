@@ -344,7 +344,7 @@ func TestSeekBasic(t *testing.T) {
 	}
 
 	for _, tt := range data {
-		it.seek(y.KeyWithTs([]byte(tt.in), 0))
+		it.seek([]byte(tt.in))
 		if !tt.valid {
 			require.False(t, it.Valid())
 			continue
@@ -378,7 +378,7 @@ func TestSeekForPrev(t *testing.T) {
 	}
 
 	for _, tt := range data {
-		it.seekForPrev(y.KeyWithTs([]byte(tt.in), 0))
+		it.seekForPrev([]byte(tt.in))
 		if !tt.valid {
 			require.False(t, it.Valid())
 			continue
@@ -425,7 +425,7 @@ func TestIterateFromEnd(t *testing.T) {
 			defer table.Delete()
 			ti := table.newIterator(false)
 			ti.reset()
-			ti.seek(y.KeyWithTs([]byte("zzzzzz"), 0)) // Seek to end, an invalid element.
+			ti.seek([]byte("zzzzzz")) // Seek to end, an invalid element.
 			require.False(t, ti.Valid())
 			ti.seekToLast()
 			for i := n - 1; i >= 0; i-- {
@@ -449,7 +449,7 @@ func TestTable(t *testing.T) {
 	ti := table.newIterator(false)
 	kid := 1010
 	seek := y.KeyWithTs([]byte(key("key", kid)), 0)
-	for ti.seek(seek); ti.Valid(); ti.next() {
+	for ti.seek(seek.UserKey); ti.Valid(); ti.next() {
 		k := ti.Key()
 		require.EqualValues(t, string(k.UserKey), key("key", kid))
 		kid++
@@ -458,10 +458,10 @@ func TestTable(t *testing.T) {
 		t.Errorf("Expected kid: 10000. Got: %v", kid)
 	}
 
-	ti.seek(y.KeyWithTs([]byte(key("key", 99999)), 0))
+	ti.seek([]byte(key("key", 99999)))
 	require.False(t, ti.Valid())
 
-	ti.seek(y.KeyWithTs([]byte(key("key", -1)), 0))
+	ti.seek([]byte(key("key", -1)))
 	require.True(t, ti.Valid())
 	k := ti.Key()
 	require.EqualValues(t, string(k.UserKey), key("key", 0))
@@ -475,7 +475,7 @@ func TestIterateBackAndForth(t *testing.T) {
 
 	seek := y.KeyWithTs([]byte(key("key", 1010)), 0)
 	it := table.newIterator(false)
-	it.seek(seek)
+	it.seek(seek.UserKey)
 	require.True(t, it.Valid())
 	k := it.Key()
 	require.EqualValues(t, seek, k)
@@ -492,7 +492,7 @@ func TestIterateBackAndForth(t *testing.T) {
 	k = it.Key()
 	require.EqualValues(t, key("key", 1010), k.UserKey)
 
-	it.seek(y.KeyWithTs([]byte(key("key", 2000)), 0))
+	it.seek([]byte(key("key", 2000)))
 	require.True(t, it.Valid())
 	k = it.Key()
 	require.EqualValues(t, key("key", 2000), k.UserKey)
@@ -525,17 +525,17 @@ func TestIterateMultiVersion(t *testing.T) {
 		kHash := farm.Fingerprint64(k.UserKey)
 		gotKey, _, ok, _ := table.pointGet(k, kHash)
 		if ok {
-			require.True(t, gotKey.SameUserKey(k))
-			require.True(t, gotKey.Compare(k) >= 0)
+			if !gotKey.IsEmpty() {
+				require.True(t, gotKey.SameUserKey(k))
+				require.True(t, gotKey.Compare(k) >= 0)
+			}
 		} else {
-			it.Seek(k)
+			it.Seek(k.UserKey)
 			if it.Valid() {
-				require.True(t, it.Key().Compare(k) >= 0)
-				var cpKey y.Key
-				cpKey.Copy(it.Key())
-				it.prev()
-				if it.Valid() {
-					require.True(t, it.Key().Compare(k) < 0, "%s %s %s", it.Key(), cpKey, k)
+				require.True(t, it.Key().Version == 9)
+				require.True(t, bytes.Compare(it.Key().UserKey, k.UserKey) >= 0)
+				if y.SeekToVersion(it, k.Version) {
+					require.True(t, it.Key().Version <= k.Version)
 				}
 			}
 		}
@@ -551,10 +551,11 @@ func TestIterateMultiVersion(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		k := y.KeyWithTs([]byte(key("key", int(z.FastRand()%4000))), uint64(5+z.FastRand()%5))
 		// reverse iterator never seek to the same key with smaller version.
-		revIt.Seek(k)
+		revIt.Seek(k.UserKey)
 		if !revIt.Valid() {
 			continue
 		}
+		require.True(t, revIt.Key().Version == 9)
 		require.True(t, revIt.Key().Compare(k) <= 0, "%s %s", revIt.Key(), k)
 	}
 }
@@ -638,22 +639,22 @@ func TestConcatIterator(t *testing.T) {
 		}
 		require.EqualValues(t, 30000, count)
 
-		it.Seek(y.KeyWithTs([]byte("a"), 0))
+		it.Seek([]byte("a"))
 		require.EqualValues(t, "keya0000", string(it.Key().UserKey))
 		vs := it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyb"), 0))
+		it.Seek([]byte("keyb"))
 		require.EqualValues(t, "keyb0000", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyb9999b"), 0))
+		it.Seek([]byte("keyb9999b"))
 		require.EqualValues(t, "keyc0000", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "0", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyd"), 0))
+		it.Seek([]byte("keyd"))
 		require.False(t, it.Valid())
 	}
 	{
@@ -669,20 +670,20 @@ func TestConcatIterator(t *testing.T) {
 		}
 		require.EqualValues(t, 30000, count)
 
-		it.Seek(y.KeyWithTs([]byte("a"), 0))
+		it.Seek([]byte("a"))
 		require.False(t, it.Valid())
 
-		it.Seek(y.KeyWithTs([]byte("keyb"), 0))
+		it.Seek([]byte("keyb"))
 		require.EqualValues(t, "keya9999", string(it.Key().UserKey))
 		vs := it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyb9999b"), 0))
+		it.Seek([]byte("keyb9999b"))
 		require.EqualValues(t, "keyb9999", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
 
-		it.Seek(y.KeyWithTs([]byte("keyd"), 0))
+		it.Seek([]byte("keyd"))
 		require.EqualValues(t, "keyc9999", string(it.Key().UserKey))
 		vs = it.Value()
 		require.EqualValues(t, "9999", string(vs.Value))
@@ -973,7 +974,7 @@ func BenchmarkPointGet(b *testing.B) {
 				for i := 0; i < n; i++ {
 					k := keys[rand.Intn(n)]
 					it := tbl.newIterator(false)
-					it.Seek(k)
+					it.Seek(k.UserKey)
 					if !it.Valid() {
 						continue
 					}
@@ -1001,7 +1002,7 @@ func BenchmarkPointGet(b *testing.B) {
 					resultKey, resultVs, ok, _ = tbl.pointGet(k, keyHash)
 					if !ok {
 						it := tbl.newIterator(false)
-						it.Seek(k)
+						it.Seek(k.UserKey)
 						if !it.Valid() {
 							continue
 						}
@@ -1108,7 +1109,7 @@ func BenchmarkRandomRead(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		itr := tbl.newIterator(false)
 		no := r.Intn(n)
-		k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", no)), 0)
+		k := []byte(fmt.Sprintf("%016x", no))
 		v := []byte(fmt.Sprintf("%d", no))
 		itr.Seek(k)
 		if !itr.Valid() {
