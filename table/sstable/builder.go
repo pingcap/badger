@@ -113,6 +113,8 @@ type Builder struct {
 
 	singleKeyOldVers entrySlice
 	oldBlock         []byte
+
+	keyDiffs []uint64
 }
 
 // NewTableBuilder makes a new TableBuilder.
@@ -258,11 +260,15 @@ func (b *Builder) finishBlock() error {
 	}
 	firstKey := b.tmpKeys.getEntry(0)
 	lastKey := b.tmpKeys.getLast()
-	blockCommonLen := keyDiffIdx(firstKey, lastKey)
+	baseLen := keyDiffIdx(firstKey, lastKey)
 	for i := 0; i < b.tmpKeys.length(); i++ {
 		key := b.tmpKeys.getEntry(i)
-		b.buf = appendU16(b.buf, uint16(len(key)-blockCommonLen))
-		b.buf = append(b.buf, key[blockCommonLen:]...)
+		keyDiff := extractKeyDiff(key, baseLen)
+		b.keyDiffs = append(b.keyDiffs, keyDiff)
+		keyDiffLen := int(byte(keyDiff))
+		keySuffix := key[baseLen+keyDiffLen:]
+		b.buf = appendU16(b.buf, uint16(len(keySuffix)))
+		b.buf = append(b.buf, keySuffix...)
 		if b.tmpOldOffs[i] == 0 {
 			b.buf = append(b.buf, 0)
 		} else {
@@ -272,9 +278,10 @@ func (b *Builder) finishBlock() error {
 		b.buf = append(b.buf, b.tmpVals.getEntry(i)...)
 		b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
 	}
+	b.buf = append(b.buf, u64SliceToBytes(b.keyDiffs)...)
 	b.buf = append(b.buf, u32SliceToBytes(b.entryEndOffsets)...)
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.entryEndOffsets)))...)
-	b.buf = appendU16(b.buf, uint16(blockCommonLen))
+	b.buf = appendU16(b.buf, uint16(baseLen))
 
 	// Add base key.
 	b.baseKeys.append(firstKey)
@@ -295,6 +302,7 @@ func (b *Builder) finishBlock() error {
 	b.tmpKeys.reset()
 	b.tmpVals.reset()
 	b.tmpOldOffs = b.tmpOldOffs[:0]
+	b.keyDiffs = b.keyDiffs[:0]
 	return nil
 }
 
@@ -365,6 +373,7 @@ const (
 	idHashIndex
 	idSuRFIndex
 	idOldBlockLen
+	idBaseKeyDiffs
 )
 
 // Finish finishes the table by appending the index.
@@ -399,6 +408,7 @@ func (b *Builder) Finish() error {
 	encoder.append(b.smallest.UserKey, idSmallest)
 	encoder.append(b.biggest.UserKey, idBiggest)
 	encoder.append(u32SliceToBytes(b.baseKeys.endOffs), idBaseKeysEndOffs)
+	encoder.append(u64SliceToBytes(b.getBaseKeyDiffs()), idBaseKeyDiffs)
 	encoder.append(b.baseKeys.data, idBaseKeys)
 	encoder.append(u32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)
 	if len(b.oldBlock) > 1 {
@@ -436,6 +446,16 @@ func (b *Builder) Finish() error {
 	}
 
 	return b.w.Finish()
+}
+
+func (b *Builder) getBaseKeyDiffs() []uint64 {
+	commonLen := keyDiffIdx(b.smallest.UserKey, b.biggest.UserKey)
+	baseKeyDiffs := make([]uint64, b.baseKeys.length())
+	for i := 0; i < b.baseKeys.length(); i++ {
+		key := b.baseKeys.getEntry(i)
+		baseKeyDiffs[i] = extractKeyDiff(key, commonLen)
+	}
+	return baseKeyDiffs
 }
 
 func appendU16(buf []byte, v uint16) []byte {
@@ -476,6 +496,30 @@ func bytesToU32Slice(b []byte) []uint32 {
 	hdr.Cap = hdr.Len
 	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
 	return u32s
+}
+
+func u64SliceToBytes(u64s []uint64) []byte {
+	if len(u64s) == 0 {
+		return nil
+	}
+	var b []byte
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	hdr.Len = len(u64s) * 8
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&u64s[0]))
+	return b
+}
+
+func bytesToU64Slice(b []byte) []uint64 {
+	if len(b) == 0 {
+		return nil
+	}
+	var u64s []uint64
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&u64s))
+	hdr.Len = len(b) / 8
+	hdr.Cap = hdr.Len
+	hdr.Data = uintptr(unsafe.Pointer(&b[0]))
+	return u64s
 }
 
 func bytesToU32(b []byte) uint32 {

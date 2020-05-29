@@ -53,6 +53,7 @@ type tableIndex struct {
 	bf              *bbloom.Bloom
 	hIdx            *hashIndex
 	surf            *surf.SuRF
+	baseKeyDiffs    []uint64
 }
 
 // Table represents a loaded table file with the info we have about it
@@ -82,6 +83,7 @@ type Table struct {
 
 	oldBlockLen int64
 	oldBlock    []byte
+	commonLen   int
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -290,6 +292,7 @@ func (t *Table) initTableInfo() error {
 			t.tableSize += t.oldBlockLen
 		}
 	}
+	t.commonLen = keyDiffIdx(t.smallest.UserKey, t.biggest.UserKey)
 	return nil
 }
 
@@ -318,6 +321,8 @@ func (t *Table) readTableIndex(d *metaDecoder) *tableIndex {
 				idx.surf = new(surf.SuRF)
 				idx.surf.Unmarshal(d)
 			}
+		case idBaseKeyDiffs:
+			idx.baseKeyDiffs = bytesToU64Slice(d.decode())
 		}
 	}
 	return idx
