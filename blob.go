@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/coocood/badger/epoch"
-	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/y"
 	"github.com/ncw/directio"
+	"github.com/pingcap/badger/epoch"
+	"github.com/pingcap/badger/fileutil"
+	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"

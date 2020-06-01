@@ -24,12 +24,12 @@ import (
 	"reflect"
 	"unsafe"
 
-	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/options"
-	"github.com/coocood/badger/surf"
-	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
 	"github.com/dgryski/go-farm"
+	"github.com/pingcap/badger/fileutil"
+	"github.com/pingcap/badger/options"
+	"github.com/pingcap/badger/surf"
+	"github.com/pingcap/badger/y"
 	"golang.org/x/time/rate"
 )
 

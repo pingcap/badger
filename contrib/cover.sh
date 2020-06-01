@@ -18,6 +18,6 @@ for PKG in $(go list ./...|grep -v -E 'vendor'); do
 done
 
 # Another round of tests after turning off mmap
-go test -v -vlog_mmap=false github.com/coocood/badger
+go test -v -vlog_mmap=false github.com/pingcap/badger
 
 popd &> /dev/null

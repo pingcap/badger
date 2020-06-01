@@ -1,8 +1,8 @@
 package table
 
 import (
-	"github.com/coocood/badger/epoch"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/epoch"
+	"github.com/pingcap/badger/y"
 )
 
 type Table interface {

@@ -49,16 +49,16 @@ Results seem to vary quite a bit between runs.
 Dropped 30 nodes (cum <= 6.69MB)
 Showing top 10 nodes out of 37 (cum >= 12.50MB)
       flat  flat%   sum%        cum   cum%
-  523.04MB 39.07% 39.07%   523.04MB 39.07%  github.com/coocood/badger/skl.(*Skiplist).Put
+  523.04MB 39.07% 39.07%   523.04MB 39.07%  github.com/pingcap/badger/skl.(*Skiplist).Put
   184.51MB 13.78% 52.85%   184.51MB 13.78%  runtime.stringtoslicebyte
-  166.01MB 12.40% 65.25%   689.04MB 51.47%  github.com/coocood/badger/mem.(*Table).Put
+  166.01MB 12.40% 65.25%   689.04MB 51.47%  github.com/pingcap/badger/mem.(*Table).Put
      165MB 12.33% 77.58%      165MB 12.33%  runtime.convT2E
   116.92MB  8.73% 86.31%   116.92MB  8.73%  bytes.makeSlice
    62.50MB  4.67% 90.98%    62.50MB  4.67%  main.newValue
-   34.50MB  2.58% 93.56%    34.50MB  2.58%  github.com/coocood/badger/table.(*BlockIterator).parseKV
-   25.50MB  1.90% 95.46%   100.06MB  7.47%  github.com/coocood/badger/y.(*MergeIterator).Next
-   21.06MB  1.57% 97.04%    21.06MB  1.57%  github.com/coocood/badger/table.(*Table).read
-   12.50MB  0.93% 97.97%    12.50MB  0.93%  github.com/coocood/badger/table.header.Encode
+   34.50MB  2.58% 93.56%    34.50MB  2.58%  github.com/pingcap/badger/table.(*BlockIterator).parseKV
+   25.50MB  1.90% 95.46%   100.06MB  7.47%  github.com/pingcap/badger/y.(*MergeIterator).Next
+   21.06MB  1.57% 97.04%    21.06MB  1.57%  github.com/pingcap/badger/table.(*Table).read
+   12.50MB  0.93% 97.97%    12.50MB  0.93%  github.com/pingcap/badger/table.header.Encode
 
       128.31 real       329.37 user        17.11 sys
 3355660288  maximum resident set size
@@ -84,16 +84,16 @@ Showing top 10 nodes out of 37 (cum >= 12.50MB)
 Dropped 29 nodes (cum <= 10.13MB)
 Showing top 10 nodes out of 41 (cum >= 185.62MB)
       flat  flat%   sum%        cum   cum%
-  658.05MB 32.48% 32.48%   658.05MB 32.48%  github.com/coocood/badger/skl.glob..func1
+  658.05MB 32.48% 32.48%   658.05MB 32.48%  github.com/pingcap/badger/skl.glob..func1
   297.51MB 14.68% 47.16%   297.51MB 14.68%  runtime.convT2E
   257.51MB 12.71% 59.87%   257.51MB 12.71%  runtime.stringtoslicebyte
-  249.01MB 12.29% 72.16%  1007.06MB 49.70%  github.com/coocood/badger/mem.(*Table).Put
+  249.01MB 12.29% 72.16%  1007.06MB 49.70%  github.com/pingcap/badger/mem.(*Table).Put
   142.43MB  7.03% 79.19%   142.43MB  7.03%  bytes.makeSlice
-     100MB  4.94% 84.13%   758.05MB 37.41%  github.com/coocood/badger/skl.newNode
+     100MB  4.94% 84.13%   758.05MB 37.41%  github.com/pingcap/badger/skl.newNode
    99.50MB  4.91% 89.04%    99.50MB  4.91%  main.newValue
-      75MB  3.70% 92.74%       75MB  3.70%  github.com/coocood/badger/table.(*BlockIterator).parseKV
-   44.62MB  2.20% 94.94%    44.62MB  2.20%  github.com/coocood/badger/table.(*Table).read
-   39.50MB  1.95% 96.89%   185.62MB  9.16%  github.com/coocood/badger/y.(*MergeIterator).Next
+      75MB  3.70% 92.74%       75MB  3.70%  github.com/pingcap/badger/table.(*BlockIterator).parseKV
+   44.62MB  2.20% 94.94%    44.62MB  2.20%  github.com/pingcap/badger/table.(*Table).read
+   39.50MB  1.95% 96.89%   185.62MB  9.16%  github.com/pingcap/badger/y.(*MergeIterator).Next
 
       135.58 real       374.29 user        17.65 sys
 3740614656  maximum resident set size

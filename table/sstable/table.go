@@ -29,12 +29,12 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/coocood/badger/cache"
-	"github.com/coocood/badger/fileutil"
-	"github.com/coocood/badger/options"
-	"github.com/coocood/badger/surf"
-	"github.com/coocood/badger/y"
 	"github.com/coocood/bbloom"
+	"github.com/pingcap/badger/cache"
+	"github.com/pingcap/badger/fileutil"
+	"github.com/pingcap/badger/options"
+	"github.com/pingcap/badger/surf"
+	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 )
 

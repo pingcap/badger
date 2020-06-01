@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coocood/badger/cache/sim"
+	"github.com/pingcap/badger/cache/sim"
 )
 
 func TestStressSetGet(t *testing.T) {

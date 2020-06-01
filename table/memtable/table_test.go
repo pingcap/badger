@@ -2,7 +2,7 @@ package memtable
 
 import (
 	"fmt"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/y"
 	"github.com/stretchr/testify/require"
 	"testing"
 )

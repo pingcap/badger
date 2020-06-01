@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/y"
 )
 
 // header is used in value log as a header before Entry.

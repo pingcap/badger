@@ -1,4 +1,4 @@
-module github.com/coocood/badger
+module github.com/pingcap/badger
 
 go 1.13
 

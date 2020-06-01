@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coocood/badger/cache/z"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/cache/z"
+	"github.com/pingcap/badger/y"
 	"github.com/stretchr/testify/require"
 )
 

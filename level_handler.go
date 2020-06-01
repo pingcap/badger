@@ -22,9 +22,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/coocood/badger/epoch"
-	"github.com/coocood/badger/table"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/epoch"
+	"github.com/pingcap/badger/table"
+	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"

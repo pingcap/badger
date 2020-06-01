@@ -22,8 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coocood/badger/table/sstable"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/table/sstable"
+	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 )
 
