@@ -25,12 +25,12 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/coocood/badger/cache"
-	"github.com/coocood/badger/epoch"
-	"github.com/coocood/badger/options"
-	"github.com/coocood/badger/protos"
-	"github.com/coocood/badger/table"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/cache"
+	"github.com/pingcap/badger/epoch"
+	"github.com/pingcap/badger/options"
+	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/table"
+	"github.com/pingcap/badger/y"
 	"github.com/stretchr/testify/require"
 )
 

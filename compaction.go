@@ -22,8 +22,8 @@ import (
 	"log"
 	"sync"
 
-	"github.com/coocood/badger/table"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/table"
+	"github.com/pingcap/badger/y"
 )
 
 type keyRange struct {

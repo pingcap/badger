@@ -20,7 +20,7 @@ import (
 	"math"
 	"sync"
 
-	"github.com/coocood/badger/cache/z"
+	"github.com/pingcap/badger/cache/z"
 )
 
 const (

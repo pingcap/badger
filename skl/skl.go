@@ -37,8 +37,8 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/coocood/badger/y"
 	"github.com/coocood/rtutil"
+	"github.com/pingcap/badger/y"
 )
 
 const (

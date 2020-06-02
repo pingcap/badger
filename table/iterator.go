@@ -23,8 +23,8 @@ import (
 	"math"
 	"sort"
 
-	"github.com/coocood/badger/surf"
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/surf"
+	"github.com/pingcap/badger/y"
 )
 
 type blockIterator struct {

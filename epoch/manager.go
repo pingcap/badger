@@ -4,7 +4,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/y"
 )
 
 type GuardsInspector interface {

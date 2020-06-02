@@ -23,9 +23,9 @@ import (
 	"sort"
 	"sync/atomic"
 
-	"github.com/coocood/badger/table"
-	"github.com/coocood/badger/y"
 	"github.com/dgryski/go-farm"
+	"github.com/pingcap/badger/table"
+	"github.com/pingcap/badger/y"
 )
 
 // Item is returned during iteration. Both the Key() and Value() output is only valid until

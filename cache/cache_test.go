@@ -141,13 +141,7 @@ func TestCacheProcessItems(t *testing.T) {
 		t.Fatal("cache processItems not evicting or calling OnEvict")
 	}
 	m.Unlock()
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("cache processItems didn't stop")
-		}
-	}()
 	c.Close()
-	c.Set(0, 0, 0)
 }
 
 func TestCacheGet(t *testing.T) {

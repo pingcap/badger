@@ -72,7 +72,7 @@ package main
 import (
 	"log"
 
-	"github.com/coocood/badger"
+	"github.com/pingcap/badger"
 )
 
 func main() {

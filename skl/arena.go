@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/coocood/badger/y"
+	"github.com/pingcap/badger/y"
 )
 
 const (
