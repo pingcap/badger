@@ -241,7 +241,7 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 	}
 
 	it := t.newIterator(false)
-	it.seekFromOffset(int(blkIdx), int(offset), key.UserKey)
+	it.err = it.seekFromOffset(int(blkIdx), int(offset), key.UserKey)
 
 	if !it.Valid() || !key.SameUserKey(it.Key()) {
 		return y.Key{}, y.ValueStruct{}, true, it.Error()
