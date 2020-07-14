@@ -18,7 +18,6 @@ package sstable
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
@@ -55,24 +54,6 @@ var defaultBuilderOpt = options.TableBuilderOptions{
 	MaxLevels:           1,
 	LevelSizeMultiplier: 10,
 	LogicalBloomFPR:     0.01,
-}
-
-var defaultBuilderOptBench = options.TableBuilderOptions{
-	SuRFStartLevel:      8,
-	HashUtilRatio:       0.75,
-	WriteBufferSize:     2 * 1024 * 1024,
-	BytesPerSecond:      -1,
-	MaxLevels:           7,
-	LevelSizeMultiplier: 10,
-	BlockSize:           64 * 1024,
-	// TODO: use lz4 instead of snappy for better (de)compress performance.
-	CompressionPerLevel: []options.CompressionType{options.None, options.None, options.Snappy, options.Snappy, options.Snappy, options.ZSTD, options.ZSTD},
-	LogicalBloomFPR:     0.01,
-	SuRFOptions: options.SuRFOptions{
-		HashSuffixLen:  8,
-		RealSuffixLen:  8,
-		BitsPerKeyHint: 40,
-	},
 }
 
 func testCache() *cache.Cache {
@@ -363,7 +344,7 @@ func TestSeekBasic(t *testing.T) {
 	}
 
 	for _, tt := range data {
-		it.Seek([]byte(tt.in))
+		it.seek([]byte(tt.in))
 		if !tt.valid {
 			require.False(t, it.Valid())
 			continue
@@ -380,7 +361,7 @@ func TestSeekForPrev(t *testing.T) {
 	require.NoError(t, err)
 	defer table.Delete()
 
-	it := table.newIterator(true)
+	it := table.newIterator(false)
 
 	var data = []struct {
 		in    string
@@ -397,7 +378,7 @@ func TestSeekForPrev(t *testing.T) {
 	}
 
 	for _, tt := range data {
-		it.Seek([]byte(tt.in))
+		it.seekForPrev([]byte(tt.in))
 		if !tt.valid {
 			require.False(t, it.Valid())
 			continue
@@ -418,12 +399,12 @@ func TestIterateFromStart(t *testing.T) {
 			defer table.Delete()
 			ti := table.newIterator(false)
 			ti.reset()
-			ti.Rewind()
+			ti.seekToFirst()
 			require.True(t, ti.Valid())
 			// No need to do a Next.
 			// ti.Seek brings us to the first key >= "". Essentially a SeekToFirst.
 			var count int
-			for ; ti.Valid(); ti.Next() {
+			for ; ti.Valid(); ti.next() {
 				v := ti.Value()
 				require.EqualValues(t, fmt.Sprintf("%d", count), string(v.Value))
 				require.EqualValues(t, 'A', v.Meta)
@@ -444,17 +425,17 @@ func TestIterateFromEnd(t *testing.T) {
 			defer table.Delete()
 			ti := table.newIterator(false)
 			ti.reset()
-			ti.Seek([]byte("zzzzzz")) // Seek to end, an invalid element.
+			ti.seek([]byte("zzzzzz")) // Seek to end, an invalid element.
 			require.False(t, ti.Valid())
-			ti.err = ti.seekToLast()
+			ti.seekToLast()
 			for i := n - 1; i >= 0; i-- {
 				require.True(t, ti.Valid())
 				v := ti.Value()
 				require.EqualValues(t, fmt.Sprintf("%d", i), string(v.Value))
 				require.EqualValues(t, 'A', v.Meta)
-				ti.err = ti.prev()
+				ti.prev()
 			}
-			ti.err = ti.prev()
+			ti.prev()
 			require.False(t, ti.Valid())
 		})
 	}
@@ -468,7 +449,7 @@ func TestTable(t *testing.T) {
 	ti := table.newIterator(false)
 	kid := 1010
 	seek := y.KeyWithTs([]byte(key("key", kid)), 0)
-	for ti.Seek(seek.UserKey); ti.Valid(); ti.Next() {
+	for ti.seek(seek.UserKey); ti.Valid(); ti.next() {
 		k := ti.Key()
 		require.EqualValues(t, string(k.UserKey), key("key", kid))
 		kid++
@@ -477,10 +458,10 @@ func TestTable(t *testing.T) {
 		t.Errorf("Expected kid: 10000. Got: %v", kid)
 	}
 
-	ti.Seek([]byte(key("key", 99999)))
+	ti.seek([]byte(key("key", 99999)))
 	require.False(t, ti.Valid())
 
-	ti.Seek([]byte(key("key", -1)))
+	ti.seek([]byte(key("key", -1)))
 	require.True(t, ti.Valid())
 	k := ti.Key()
 	require.EqualValues(t, string(k.UserKey), key("key", 0))
@@ -883,44 +864,6 @@ func TestMergingIteratorTakeTwo(t *testing.T) {
 	require.False(t, it.Valid())
 }
 
-func TestRandomSeek(t *testing.T) {
-	n := int(5 * 1e5)
-	for _, varlen := range []bool{true, false} {
-		for _, reverse := range []bool{true, false} {
-			tbl := getTableForTest(t, n, varlen)
-			r := rand.New(rand.NewSource(time.Now().Unix()))
-			itr := tbl.newIterator(reverse)
-			for i := 0; i < n; i++ {
-				no := r.Intn(n)
-				var k y.Key
-				if varlen {
-					k = genVarLenKey(no)
-				} else {
-					k = genKey(no)
-				}
-				keyLen := len(k.UserKey)
-				if i%2 == 0 {
-					// Seek on non-exist key
-					if reverse {
-						k.UserKey = append(k.UserKey, 0)
-					} else {
-						k.UserKey = k.UserKey[:len(k.UserKey)-1]
-						keyLen--
-					}
-				}
-				itr.Seek(k.UserKey)
-				if !itr.Valid() {
-					t.Fatal("itr should be valid")
-				}
-				v1 := itr.Value().Value
-				if !bytes.Equal(k.UserKey[:keyLen], v1[:keyLen]) {
-					t.Fatal("value does not match", keyLen, k.UserKey[:keyLen], v1[:keyLen])
-				}
-			}
-		}
-	}
-}
-
 func BenchmarkRead(b *testing.B) {
 	n := 5 << 20
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
@@ -1157,100 +1100,46 @@ func BenchmarkReadMerged(b *testing.B) {
 }
 
 func BenchmarkRandomRead(b *testing.B) {
-	n := int(5 * 1e5)
-	tbl := getTableForTest(b, n, false)
+	n := int(5 * 1e6)
+	tbl := getTableForBenchmarks(b, n, testCache(), testCache())
 
 	r := rand.New(rand.NewSource(time.Now().Unix()))
 
 	b.ResetTimer()
-	itr := tbl.newIterator(false)
 	for i := 0; i < b.N; i++ {
+		itr := tbl.newIterator(false)
 		no := r.Intn(n)
-		k := genKey(no)
-		keyLen := len(k.UserKey)
-		if i%2 == 0 {
-			// Seek on exist key
-			keyLen--
-		}
-		itr.Seek(k.UserKey[:keyLen])
+		k := []byte(fmt.Sprintf("%016x", no))
+		v := []byte(fmt.Sprintf("%d", no))
+		itr.Seek(k)
 		if !itr.Valid() {
 			b.Fatal("itr should be valid")
 		}
 		v1 := itr.Value().Value
-		if !bytes.Equal(k.UserKey[:keyLen], v1[:keyLen]) {
+
+		if !bytes.Equal(v, v1) {
 			fmt.Println("value does not match")
 			b.Fatal()
 		}
 	}
 }
 
-func BenchmarkRandomReadVarLen(b *testing.B) {
-	n := int(5 * 1e5)
-	tbl := getTableForTest(b, n, true)
-
-	r := rand.New(rand.NewSource(time.Now().Unix()))
-
-	b.ResetTimer()
-	itr := tbl.newIterator(false)
-	for i := 0; i < b.N; i++ {
-		no := r.Intn(n)
-		k := genVarLenKey(no)
-		itr.Seek(k.UserKey)
-		if !itr.Valid() {
-			b.Fatalf("itr should be valid %x %d", k.UserKey, i)
-		}
-		v1 := itr.Value().Value
-		if !bytes.Equal(k.UserKey, v1) {
-			b.Fatalf("value does not match %x %x %d", k.UserKey, v1, i)
-		}
-	}
-}
-
-func genKey(i int) y.Key {
-	kBin := make([]byte, 19)
-	binary.BigEndian.PutUint64(kBin[11:], uint64(i))
-	k := y.KeyWithTs(kBin, 1)
-	return k
-}
-
-func genVarLenKey(i int) y.Key {
-	iMod := i % 256
-	var kBin []byte
-	if iMod > 128 {
-		kBin = make([]byte, 19)
-		binary.BigEndian.PutUint64(kBin[11:], uint64(i))
-	} else if iMod > 64 {
-		kBin = make([]byte, 19+8)
-		binary.BigEndian.PutUint64(kBin[11:], uint64(i-iMod))
-		binary.BigEndian.PutUint64(kBin[19:], uint64(iMod))
-	} else {
-		kBin = make([]byte, 19+16)
-		binary.BigEndian.PutUint64(kBin[11:], uint64(i-iMod))
-		binary.BigEndian.PutUint64(kBin[27:], uint64(iMod))
-	}
-	return y.KeyWithTs(kBin, 1)
-}
-
-func getTableForTest(t require.TestingT, count int, varlen bool) *Table {
+func getTableForBenchmarks(b *testing.B, count int, blkCache, idxCache *cache.Cache) *Table {
 	rand.Seed(time.Now().Unix())
-	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
 	f, err := y.OpenSyncedFile(filename, false)
-	builder := NewTableBuilder(f, nil, 0, defaultBuilderOptBench)
-	require.NoError(t, err)
+	builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
+	require.NoError(b, err)
 	for i := 0; i < count; i++ {
-		var k y.Key
-		if varlen {
-			k = genVarLenKey(i)
-		} else {
-			k = genKey(i)
-		}
-		builder.Add(k, y.ValueStruct{Value: k.UserKey})
+		k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
+		v := fmt.Sprintf("%d", i)
+		builder.Add(k, y.ValueStruct{Value: []byte(v)})
 	}
 
 	err = builder.Finish()
-	require.NoError(t, err, "unable to write to file")
-	tbl, err := OpenTable(f.Name(), nil, nil)
-	require.NoError(t, err, "unable to open table")
+	require.NoError(b, err, "unable to write to file")
+	tbl, err := OpenTable(f.Name(), blkCache, idxCache)
+	require.NoError(b, err, "unable to open table")
 	return tbl
 }
 

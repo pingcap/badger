@@ -53,7 +53,6 @@ type tableIndex struct {
 	bf              *bbloom.Bloom
 	hIdx            *hashIndex
 	surf            *surf.SuRF
-	baseKeyDiffs    []uint64
 }
 
 // Table represents a loaded table file with the info we have about it
@@ -83,7 +82,6 @@ type Table struct {
 
 	oldBlockLen int64
 	oldBlock    []byte
-	commonLen   int
 }
 
 // CompressionType returns the compression algorithm used for block compression.
@@ -241,7 +239,7 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 	}
 
 	it := t.newIterator(false)
-	it.err = it.seekFromOffset(int(blkIdx), int(offset), key.UserKey)
+	it.seekFromOffset(int(blkIdx), int(offset), key.UserKey)
 
 	if !it.Valid() || !key.SameUserKey(it.Key()) {
 		return y.Key{}, y.ValueStruct{}, true, it.Error()
@@ -292,7 +290,6 @@ func (t *Table) initTableInfo() error {
 			t.tableSize += t.oldBlockLen
 		}
 	}
-	t.commonLen = keyDiffIdx(t.smallest.UserKey, t.biggest.UserKey)
 	return nil
 }
 
@@ -321,8 +318,6 @@ func (t *Table) readTableIndex(d *metaDecoder) *tableIndex {
 				idx.surf = new(surf.SuRF)
 				idx.surf.Unmarshal(d)
 			}
-		case idBaseKeyDiffs:
-			idx.baseKeyDiffs = bytesToU64Slice(d.decode())
 		}
 	}
 	return idx

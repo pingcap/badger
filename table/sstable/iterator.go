@@ -18,11 +18,11 @@ package sstable
 
 import (
 	"bytes"
-	"github.com/pingcap/log"
+	"encoding/binary"
 	"io"
 	"math"
+	"sort"
 
-	"encoding/binary"
 	"github.com/pingcap/badger/surf"
 	"github.com/pingcap/badger/y"
 )
@@ -68,6 +68,7 @@ func (ski *singleKeyIterator) length() int {
 type blockIterator struct {
 	entries entrySlice
 	idx     int
+	err     error
 
 	globalTsBytes [8]byte
 	globalTs      uint64
@@ -76,16 +77,23 @@ type blockIterator struct {
 
 	baseLen uint16
 	ski     singleKeyIterator
-
-	keyDiffs []uint64
 }
 
 func (itr *blockIterator) setBlock(b block) {
+	itr.err = nil
 	itr.idx = 0
 	itr.key.Reset()
 	itr.val = itr.val[:0]
 	itr.loadEntries(b.data)
 	itr.key.UserKey = append(itr.key.UserKey[:0], b.baseKey[:itr.baseLen]...)
+}
+
+func (itr *blockIterator) valid() bool {
+	return itr != nil && itr.err == nil
+}
+
+func (itr *blockIterator) Error() error {
+	return itr.err
 }
 
 // loadEntries loads the entryEndOffsets for binary searching for a key.
@@ -97,38 +105,42 @@ func (itr *blockIterator) loadEntries(data []byte) {
 	entriesEnd := dataLen - 6
 	entriesStart := entriesEnd - entriesNum*4
 	itr.entries.endOffs = bytesToU32Slice(data[entriesStart:entriesEnd])
-	data = data[:entriesStart]
-	keyDiffsOff := len(data) - itr.entries.length()*8
-	itr.keyDiffs = bytesToU64Slice(data[keyDiffsOff:])
-	data = data[:keyDiffsOff]
-	itr.entries.data = data
+	itr.entries.data = data[:entriesStart]
+}
+
+// Seek brings us to the first block element that is >= input key.
+// The binary search will begin at `start`, you can use it to skip some items.
+func (itr *blockIterator) seek(key []byte) {
+	foundEntryIdx := sort.Search(itr.entries.length(), func(idx int) bool {
+		itr.setIdx(idx)
+		return bytes.Compare(itr.key.UserKey, key) >= 0
+	})
+	itr.setIdx(foundEntryIdx)
 }
 
 // seekToFirst brings us to the first element. Valid should return true.
-func (itr *blockIterator) seekToFirst() error {
-	return itr.setIdx(0)
+func (itr *blockIterator) seekToFirst() {
+	itr.setIdx(0)
 }
 
 // seekToLast brings us to the last element. Valid should return true.
-func (itr *blockIterator) seekToLast() error {
-	return itr.setIdx(itr.entries.length() - 1)
+func (itr *blockIterator) seekToLast() {
+	itr.setIdx(itr.entries.length() - 1)
 }
 
 // setIdx sets the iterator to the entry index and set the current key and value.
-func (itr *blockIterator) setIdx(i int) error {
+func (itr *blockIterator) setIdx(i int) {
 	itr.idx = i
 	if i >= itr.entries.length() || i < 0 {
-		return io.EOF
+		itr.err = io.EOF
+		return
 	}
+	itr.err = nil
 	entryData := itr.entries.getEntry(i)
-	keyDiff := itr.keyDiffs[i]
-	var keyDiffBuf [8]byte
-	binary.BigEndian.PutUint64(keyDiffBuf[:], keyDiff)
-	itr.key.UserKey = append(itr.key.UserKey[:itr.baseLen], keyDiffBuf[:byte(keyDiff)]...)
-	keySuffixLen := binary.LittleEndian.Uint16(entryData)
+	diffKeyLen := binary.LittleEndian.Uint16(entryData)
 	entryData = entryData[2:]
-	itr.key.UserKey = append(itr.key.UserKey, entryData[:keySuffixLen]...)
-	entryData = entryData[keySuffixLen:]
+	itr.key.UserKey = append(itr.key.UserKey[:itr.baseLen], entryData[:diffKeyLen]...)
+	entryData = entryData[diffKeyLen:]
 	hasOld := entryData[0] != 0
 	entryData = entryData[1:]
 	var oldOffset uint32
@@ -146,86 +158,18 @@ func (itr *blockIterator) setIdx(i int) error {
 	if hasOld {
 		itr.ski.set(oldOffset, itr.val)
 	}
-	return nil
 }
 
 func (itr *blockIterator) hasOldVersion() bool {
 	return itr.ski.oldOffset != 0
 }
 
-func (itr *blockIterator) next() error {
-	return itr.setIdx(itr.idx + 1)
+func (itr *blockIterator) next() {
+	itr.setIdx(itr.idx + 1)
 }
 
-func (itr *blockIterator) prev() error {
-	return itr.setIdx(itr.idx - 1)
-}
-
-func (itr *blockIterator) seek(key []byte) error {
-	keyDiff := extractKeyDiff(key, int(itr.baseLen))
-	i, j := 0, len(itr.keyDiffs)
-	k := j
-	for i < j {
-		h := int(uint(i+j) >> 1) // avoid overflow when computing h
-		// i ≤ h < j
-		hKeyDiff := itr.keyDiffs[h]
-		if keyDiff > hKeyDiff {
-			i = h + 1
-		} else {
-			j = h
-			if keyDiff < hKeyDiff {
-				// ensure keyDiff < itr.keyDiffs[k]
-				k = h
-			}
-		}
-	}
-	if i+1 < len(itr.keyDiffs) && keyDiff == itr.keyDiffs[i+1] {
-		// The keyDiff is not unique, we need to fallback to suffix binary search.
-		suffixStart := int(itr.baseLen + 7)
-		if suffixStart > len(key) {
-			suffixStart = len(key)
-		}
-		keySuffix := key[suffixStart:]
-		j = k
-		for i < j {
-			h := int(uint(i+j) >> 1)
-			if keyDiff != itr.keyDiffs[h] {
-				j = h
-				continue
-			}
-			// i ≤ h < j
-			hKeySuffix := itr.getKeySuffix(h)
-			cmp := bytes.Compare(keySuffix, hKeySuffix)
-			if cmp > 0 {
-				i = h + 1
-			} else {
-				j = h
-			}
-		}
-	}
-	err := itr.setIdx(i)
-	if err != nil {
-		return err
-	}
-	if i < len(itr.keyDiffs)-1 && itr.keyDiffs[i] == keyDiff {
-		if bytes.Compare(itr.key.UserKey[itr.baseLen:], key[itr.baseLen:]) < 0 {
-			err = itr.setIdx(i + 1)
-		}
-	}
-	return err
-}
-
-func (itr *blockIterator) getKeySuffix(i int) []byte {
-	entryData := itr.entries.getEntry(i)
-	keySuffixLen := binary.LittleEndian.Uint16(entryData)
-	entryData = entryData[2:]
-	return entryData[:keySuffixLen]
-}
-
-func extractKeyDiff(key []byte, baseLen int) uint64 {
-	buf := make([]byte, 8)
-	n := copy(buf[:7], key[baseLen:])
-	return binary.BigEndian.Uint64(buf) + uint64(n)
+func (itr *blockIterator) prev() {
+	itr.setIdx(itr.idx - 1)
 }
 
 // Iterator is an iterator for a Table.
@@ -267,6 +211,7 @@ func (t *Table) newIteratorWithIdx(reversed bool, index *tableIndex) *Iterator {
 
 func (itr *Iterator) reset() {
 	itr.bpos = 0
+	itr.err = nil
 }
 
 // Valid follows the y.Iterator interface
@@ -281,220 +226,196 @@ func (itr *Iterator) Error() error {
 	return itr.err
 }
 
-func (itr *Iterator) seekToFirst() error {
+func (itr *Iterator) seekToFirst() {
 	numBlocks := len(itr.tIdx.blockEndOffsets)
 	if numBlocks == 0 {
-		return io.EOF
+		itr.err = io.EOF
+		return
 	}
 	itr.bpos = 0
 	block, err := itr.t.block(itr.bpos, itr.tIdx)
 	if err != nil {
-		return err
+		itr.err = err
+		return
 	}
 	itr.bi.setBlock(block)
-	return itr.bi.seekToFirst()
+	itr.bi.seekToFirst()
+	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekToLast() error {
+func (itr *Iterator) seekToLast() {
 	numBlocks := len(itr.tIdx.blockEndOffsets)
 	if numBlocks == 0 {
-		return io.EOF
+		itr.err = io.EOF
+		return
 	}
 	itr.bpos = numBlocks - 1
 	block, err := itr.t.block(itr.bpos, itr.tIdx)
 	if err != nil {
-		return err
+		itr.err = err
+		return
 	}
 	itr.bi.setBlock(block)
-	return itr.bi.seekToLast()
+	itr.bi.seekToLast()
+	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekInBlock(blockIdx int, key []byte) error {
+func (itr *Iterator) seekInBlock(blockIdx int, key []byte) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx, itr.tIdx)
 	if err != nil {
-		return err
+		itr.err = err
+		return
 	}
 	itr.bi.setBlock(block)
-	return itr.bi.seek(key)
+	itr.bi.seek(key)
+	itr.err = itr.bi.Error()
 }
 
-func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) error {
+func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 	itr.bpos = blockIdx
 	block, err := itr.t.block(blockIdx, itr.tIdx)
 	if err != nil {
-		return err
+		itr.err = err
+		return
 	}
 	itr.bi.setBlock(block)
-	if err = itr.bi.setIdx(offset); err != nil {
-		return err
-	}
+	itr.bi.setIdx(offset)
 	if bytes.Compare(itr.bi.key.UserKey, key) >= 0 {
-		return nil
+		return
 	}
-	return itr.bi.seek(key)
+	itr.bi.seek(key)
+	itr.err = itr.bi.err
 }
 
 func (itr *Iterator) seekBlock(key []byte) int {
-	keyDiff := extractKeyDiff(key, itr.t.commonLen)
-	baseKeyDiffs := itr.tIdx.baseKeyDiffs
-	i, j := 0, len(baseKeyDiffs)
-	k := j
-	for i < j {
-		h := int(uint(i+j) >> 1) // avoid overflow when computing h
-		// i ≤ h < j
-		hBaseKeyDiff := baseKeyDiffs[h]
-		if keyDiff > hBaseKeyDiff {
-			i = h + 1
-		} else {
-			j = h
-			if keyDiff < hBaseKeyDiff {
-				// ensure keyDiff < baseKeyDiffs[k]
-				k = h
-			}
-		}
-	}
-	if i+1 < len(baseKeyDiffs) && keyDiff == baseKeyDiffs[i+1] {
-		// fallback to binary search on base key
-		j = k
-		for i < j {
-			h := int(uint(i+j) >> 1)
-			if baseKeyDiffs[h] != keyDiff {
-				j = h
-				continue
-			}
-			blockBaseKey := itr.tIdx.baseKeys.getEntry(h)
-			cmp := bytes.Compare(key, blockBaseKey)
-			if cmp > 0 {
-				i = h + 1
-			} else {
-				j = h
-			}
-		}
-	}
-	if i < len(baseKeyDiffs) && keyDiff == baseKeyDiffs[i] {
-		baseKey := itr.tIdx.baseKeys.getEntry(i)
-		if bytes.Compare(baseKey, key) <= 0 {
-			return i
-		}
-	}
-	return i - 1
+	return sort.Search(len(itr.tIdx.blockEndOffsets), func(idx int) bool {
+		blockBaseKey := itr.tIdx.baseKeys.getEntry(idx)
+		return bytes.Compare(blockBaseKey, key) > 0
+	})
 }
 
-// seek brings us to a key that is >= input key.
-func (itr *Iterator) seek(key []byte) (err error) {
-	var idx int
-	defer func() {
-		if err != nil && len(key) > 30 {
-			log.S().Infof("seek %x invalid idx %d", key, idx)
-			if idx < len(itr.tIdx.baseKeyDiffs) {
-				log.S().Infof("base key %d %x", idx, itr.tIdx.baseKeys.getEntry(idx))
-				if idx > 0 {
-					log.S().Infof("base key %d %x", idx-1, itr.tIdx.baseKeys.getEntry(idx-1))
-				}
-				if idx < len(itr.tIdx.baseKeyDiffs)-1 {
-					log.S().Infof("base key %d %x", idx+1, itr.tIdx.baseKeys.getEntry(idx+1))
-				}
-			}
-		}
-	}()
+// seekFrom brings us to a key that is >= input key.
+func (itr *Iterator) seekFrom(key []byte) {
+	itr.err = nil
 	itr.reset()
-	cmp := itr.comparePrefix(key)
-	if cmp > 0 {
-		if itr.reversed {
-			return itr.seekToLast()
+
+	idx := itr.seekBlock(key)
+	if itr.err != nil {
+		return
+	}
+	if idx == 0 {
+		// The smallest key in our table is already strictly > key. We can return that.
+		// This is like a SeekToFirst.
+		itr.seekInBlock(0, key)
+		return
+	}
+
+	// block[idx].smallest is > key.
+	// Since idx>0, we know block[idx-1].smallest is <= key.
+	// There are two cases.
+	// 1) Everything in block[idx-1] is strictly < key. In this case, we should go to the first
+	//    element of block[idx].
+	// 2) Some element in block[idx-1] is >= key. We should go to that element.
+	itr.seekInBlock(idx-1, key)
+	if itr.err == io.EOF {
+		// Case 1. Need to visit block[idx].
+		if idx == len(itr.tIdx.blockEndOffsets) {
+			// If idx == len(itr.t.blockEndOffsets), then input key is greater than ANY element of table.
+			// There's nothing we can do. Valid() should return false as we seek to end of table.
+			return
 		}
-		return io.EOF
+		// Since block[idx].smallest is > key. This is essentially a block[idx].SeekToFirst.
+		itr.seekFromOffset(idx, 0, key)
 	}
-	if cmp < 0 {
-		if itr.reversed {
-			return io.EOF
-		}
-		return itr.seekToFirst()
-	}
-	idx = itr.seekBlock(key)
-	if idx < 0 && !itr.reversed {
-		return itr.seekToFirst()
-	}
-	err = itr.seekInBlock(idx, key)
-	if err == io.EOF && !itr.reversed {
-		return itr.next()
-	}
-	if itr.reversed && !bytes.Equal(itr.Key().UserKey, key) {
-		return itr.prev()
-	}
-	return err
+	// Case 2: No need to do anything. We already did the seek in block[idx-1].
 }
 
-// comparePrefix compares the key prefix to the common key of the table.
-func (itr *Iterator) comparePrefix(key []byte) int {
-	var keyPrefix []byte
-	if len(key) < itr.t.commonLen {
-		keyPrefix = key
-	} else {
-		keyPrefix = key[:itr.t.commonLen]
-	}
-	commonKey := itr.t.smallest.UserKey[:itr.t.commonLen]
-	return bytes.Compare(keyPrefix, commonKey)
-}
-
-func (itr *Iterator) seekSurf(key []byte) error {
+// seek will reset iterator and seek to >= key.
+func (itr *Iterator) seek(key []byte) {
+	itr.err = nil
 	itr.reset()
+	if itr.surf == nil {
+		itr.seekFrom(key)
+		return
+	}
+
 	sit := itr.surf
 	sit.Seek(key)
 	if !sit.Valid() {
-		return io.EOF
+		itr.err = io.EOF
+		return
 	}
 
 	var pos entryPosition
 	pos.decode(sit.Value())
-	return itr.seekFromOffset(int(pos.blockIdx), int(pos.offset), key)
+	itr.seekFromOffset(int(pos.blockIdx), int(pos.offset), key)
 }
 
-func (itr *Iterator) next() error {
+// seekForPrev will reset iterator and seek to <= key.
+func (itr *Iterator) seekForPrev(key []byte) {
+	// TODO: Optimize this. We shouldn't have to take a Prev step.
+	itr.seekFrom(key)
+	if !bytes.Equal(itr.Key().UserKey, key) {
+		itr.prev()
+	}
+}
+
+func (itr *Iterator) next() {
+	itr.err = nil
+
 	if itr.bpos >= len(itr.tIdx.blockEndOffsets) {
-		return io.EOF
+		itr.err = io.EOF
+		return
 	}
 
 	if itr.bi.entries.length() == 0 {
 		block, err := itr.t.block(itr.bpos, itr.tIdx)
 		if err != nil {
-			return err
+			itr.err = err
+			return
 		}
 		itr.bi.setBlock(block)
-		return itr.bi.seekToFirst()
+		itr.bi.seekToFirst()
+		itr.err = itr.bi.Error()
+		return
 	}
 
-	err := itr.bi.next()
-	if err != nil {
+	itr.bi.next()
+	if !itr.bi.valid() {
 		itr.bpos++
 		itr.bi.entries.reset()
-		return itr.next()
+		itr.next()
+		return
 	}
-	return nil
 }
 
-func (itr *Iterator) prev() error {
+func (itr *Iterator) prev() {
+	itr.err = nil
 	if itr.bpos < 0 {
-		return io.EOF
+		itr.err = io.EOF
+		return
 	}
 
 	if itr.bi.entries.length() == 0 {
 		block, err := itr.t.block(itr.bpos, itr.tIdx)
 		if err != nil {
-			return err
+			itr.err = err
+			return
 		}
 		itr.bi.setBlock(block)
-		return itr.bi.seekToLast()
+		itr.bi.seekToLast()
+		itr.err = itr.bi.Error()
+		return
 	}
 
-	err := itr.bi.prev()
-	if err != nil {
+	itr.bi.prev()
+	if !itr.bi.valid() {
 		itr.bpos--
 		itr.bi.entries.reset()
-		return itr.prev()
+		itr.prev()
+		return
 	}
-	return nil
 }
 
 // Key follows the y.Iterator interface
@@ -516,9 +437,9 @@ func (itr *Iterator) FillValue(vs *y.ValueStruct) {
 // Next follows the y.Iterator interface
 func (itr *Iterator) Next() {
 	if !itr.reversed {
-		itr.err = itr.next()
+		itr.next()
 	} else {
-		itr.err = itr.prev()
+		itr.prev()
 	}
 }
 
@@ -541,17 +462,17 @@ func (itr *Iterator) NextVersion() bool {
 // Rewind follows the y.Iterator interface
 func (itr *Iterator) Rewind() {
 	if !itr.reversed {
-		itr.err = itr.seekToFirst()
+		itr.seekToFirst()
 	} else {
-		itr.err = itr.seekToLast()
+		itr.seekToLast()
 	}
 }
 
 // Seek follows the y.Iterator interface
 func (itr *Iterator) Seek(key []byte) {
-	if !itr.reversed && itr.surf != nil {
-		itr.err = itr.seekSurf(key)
+	if !itr.reversed {
+		itr.seek(key)
 	} else {
-		itr.err = itr.seek(key)
+		itr.seekForPrev(key)
 	}
 }
