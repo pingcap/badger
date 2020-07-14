@@ -325,6 +325,7 @@ func (itr *Iterator) seekFrom(key []byte) {
 			// There's nothing we can do. Valid() should return false as we seek to end of table.
 			return
 		}
+		itr.err = nil
 		// Since block[idx].smallest is > key. This is essentially a block[idx].SeekToFirst.
 		itr.seekFromOffset(idx, 0, key)
 	}

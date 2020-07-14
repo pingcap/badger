@@ -18,6 +18,7 @@ package sstable
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
@@ -87,7 +88,7 @@ func buildTestTable(t *testing.T, prefix string, n int) *os.File {
 // keyValues is n by 2 where n is number of pairs.
 func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	// TODO: Add test for file garbage collection here. No files should be left after the tests here.
-	b, f := newTableBuilderForTest()
+	b, f := newTableBuilderForTest(false)
 	sort.Slice(keyValues, func(i, j int) bool {
 		return keyValues[i][0] < keyValues[j][0]
 	})
@@ -106,12 +107,12 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	return f
 }
 
-func newTableBuilderForTest() (*Builder, *os.File) {
+func newTableBuilderForTest(surf bool) (*Builder, *os.File) {
 	filename := fmt.Sprintf("%s%s%x.sst", os.TempDir(), string(os.PathSeparator), z.FastRand())
 	f, err := y.OpenSyncedFile(filename, true)
 	y.Check(err)
 	opt := defaultBuilderOpt
-	if z.FastRand()%2 == 0 {
+	if !surf {
 		opt.SuRFStartLevel = 8
 	}
 	y.Assert(filename == f.Name())
@@ -119,7 +120,7 @@ func newTableBuilderForTest() (*Builder, *os.File) {
 }
 
 func buildMultiVersionTable(keyValues [][]string) *os.File {
-	b, f := newTableBuilderForTest()
+	b, f := newTableBuilderForTest(false)
 	sort.Slice(keyValues, func(i, j int) bool {
 		return keyValues[i][0] < keyValues[j][0]
 	})
@@ -862,6 +863,44 @@ func TestMergingIteratorTakeTwo(t *testing.T) {
 	it.Next()
 
 	require.False(t, it.Valid())
+}
+
+func TestSeekInvalidIssue(t *testing.T) {
+	keys := make([][]byte, 1024)
+	for i := 0; i < len(keys); i++ {
+		key := make([]byte, 8)
+		binary.BigEndian.PutUint64(key, uint64(i))
+		keys[i] = key
+	}
+	// TODO:
+	// FIXME: if set surf to true it always fail.
+	b, f := newTableBuilderForTest(false)
+	for _, key := range keys {
+		err := b.Add(y.KeyWithTs(key, 0), y.ValueStruct{Value: key, Meta: 'A', UserMeta: []byte{0}})
+		if t != nil {
+			require.NoError(t, err)
+		} else {
+			y.Check(err)
+		}
+	}
+	y.Check(b.Finish())
+	y.Check(f.Close())
+	f, _ = y.OpenSyncedFile(f.Name(), true)
+	t1, err := OpenTable(f.Name(), nil, nil)
+
+	require.NoError(t, err)
+	defer t1.Delete()
+	it := t1.NewIterator(false).(*Iterator)
+	for i := 1; i < it.tIdx.baseKeys.length(); i++ {
+		baseKey := it.tIdx.baseKeys.getEntry(i)
+		idx := sort.Search(len(keys), func(i int) bool {
+			return bytes.Compare(keys[i], baseKey) >= 0
+		})
+		seekKey := y.SafeCopy(nil, keys[idx-1])
+		seekKey = append(seekKey, 0)
+		it.Seek(seekKey)
+		require.True(t, it.Valid(), "candidate key %v, baseKey %v %d", seekKey, baseKey, i)
+	}
 }
 
 func BenchmarkRead(b *testing.B) {
