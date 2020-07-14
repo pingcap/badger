@@ -154,10 +154,7 @@ func (itr *blockIterator) setIdx(i int) {
 		itr.key.Version = bytesToU64(entryData)
 	}
 	itr.val = entryData
-	itr.ski.idx = 0
-	if hasOld {
-		itr.ski.set(oldOffset, itr.val)
-	}
+	itr.ski.set(oldOffset, itr.val)
 }
 
 func (itr *blockIterator) hasOldVersion() bool {

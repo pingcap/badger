@@ -119,28 +119,30 @@ func newTableBuilderForTest(surf bool) (*Builder, *os.File) {
 	return NewTableBuilder(f, rate.NewLimiter(rate.Inf, math.MaxInt32), 0, opt), f
 }
 
-func buildMultiVersionTable(keyValues [][]string) *os.File {
+func buildMultiVersionTable(keyValues [][]string) (*os.File, int) {
 	b, f := newTableBuilderForTest(false)
 	sort.Slice(keyValues, func(i, j int) bool {
 		return keyValues[i][0] < keyValues[j][0]
 	})
+	allCnt := len(keyValues)
 	for _, kv := range keyValues {
 		y.Assert(len(kv) == 2)
 		val := fmt.Sprintf("%s_%d", kv[1], 9)
 		err := b.Add(y.KeyWithTs([]byte(kv[0]), 9), y.ValueStruct{Value: []byte(val), Meta: 'A', UserMeta: []byte{0}})
 		y.Check(err)
 		for i := uint64(8); i > 0; i-- {
-			if z.FastRand()%4 != 0 {
+			if z.FastRand()%4 == 0 {
 				val = fmt.Sprintf("%s_%d", kv[1], i)
 				err = b.Add(y.KeyWithTs([]byte(kv[0]), i), y.ValueStruct{Value: []byte(val), Meta: 'A', UserMeta: []byte{0}})
 				y.Check(err)
+				allCnt++
 			}
 		}
 	}
 	y.Check(b.Finish())
 	y.Check(f.Close())
 	f, _ = y.OpenSyncedFile(f.Name(), true)
-	return f
+	return f, allCnt
 }
 
 func TestTableIterator(t *testing.T) {
@@ -509,18 +511,24 @@ func TestIterateBackAndForth(t *testing.T) {
 }
 
 func TestIterateMultiVersion(t *testing.T) {
-	f := buildMultiVersionTable(generateKeyValues("key", 4000))
+	f, allCnt := buildMultiVersionTable(generateKeyValues("key", 4000))
 	table, err := OpenTable(f.Name(), testCache(), testCache())
 	require.NoError(t, err)
 	defer table.Delete()
 	it := table.newIterator(false)
+	itCnt := 0
 	var lastKey y.Key
 	for it.Rewind(); it.Valid(); it.Next() {
 		if !lastKey.IsEmpty() {
 			require.True(t, lastKey.Compare(it.Key()) < 0)
 		}
 		lastKey.Copy(it.Key())
+		itCnt++
+		for it.NextVersion() {
+			itCnt++
+		}
 	}
+	require.Equal(t, itCnt, allCnt)
 	for i := 0; i < 1000; i++ {
 		k := y.KeyWithTs([]byte(key("key", int(z.FastRand()%4000))), uint64(5+z.FastRand()%5))
 		kHash := farm.Fingerprint64(k.UserKey)
