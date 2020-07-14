@@ -929,6 +929,14 @@ func (t *fastL0Table) Delete() error {
 	return t.sst.Delete()
 }
 
+func (t *fastL0Table) Smallest() y.Key {
+	return t.sst.Smallest()
+}
+
+func (t *fastL0Table) Biggest() y.Key {
+	return t.sst.Biggest()
+}
+
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
 // Otherwise, we would have no goroutine which can flush memtables.
 func (db *DB) runFlushMemTable(c *y.Closer) error {
