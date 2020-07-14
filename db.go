@@ -908,35 +908,6 @@ func newFlushTask(mt *memtable.Table, off logOffset) *flushTask {
 	return ft
 }
 
-type fastL0Table struct {
-	*memtable.Table
-	sst *sstable.Table
-}
-
-func newFastL0Table(mt *memtable.Table, sst *sstable.Table) *fastL0Table {
-	return &fastL0Table{
-		Table: mt,
-		sst:   sst,
-	}
-}
-
-func (t *fastL0Table) Close() error {
-	return t.sst.Close()
-}
-
-func (t *fastL0Table) Delete() error {
-	_ = t.Table.Delete()
-	return t.sst.Delete()
-}
-
-func (t *fastL0Table) Smallest() y.Key {
-	return t.sst.Smallest()
-}
-
-func (t *fastL0Table) Biggest() y.Key {
-	return t.sst.Biggest()
-}
-
 // TODO: Ensure that this function doesn't return, or is handled by another wrapper function.
 // Otherwise, we would have no goroutine which can flush memtables.
 func (db *DB) runFlushMemTable(c *y.Closer) error {
@@ -946,6 +917,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		if ft.mt == nil {
 			return nil
 		}
+		guard := db.resourceMgr.Acquire()
 		var headInfo *protos.HeadInfo
 		if !ft.mt.Empty() {
 			headInfo = &protos.HeadInfo{
@@ -988,7 +960,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 			log.Info("error while opening table", zap.Error(err))
 			return err
 		}
-		err = db.lc.addLevel0Table(newFastL0Table(ft.mt, tbl), headInfo)
+		err = db.lc.addLevel0Table(tbl, headInfo)
 		if err != nil {
 			log.Error("error while syncing level directory", zap.Error(err))
 			return err
@@ -1001,6 +973,8 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 				break
 			}
 		}
+		guard.Delete([]epoch.Resource{ft.mt})
+		guard.Done()
 		ft.wg.Done()
 	}
 	return nil
