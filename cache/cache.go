@@ -62,7 +62,8 @@ type Config struct {
 	// Cost evaluates a value and outputs a corresponding cost. This function
 	// is ran after Set is called for a new item or an item update with a cost
 	// param of 0.
-	Cost func(value interface{}) int64
+	OnInsert func(key uint64, cost int64)
+	Cost     func(value interface{}) int64
 }
 
 const (
@@ -92,6 +93,9 @@ type Cache struct {
 	setBuf chan setEvent
 	// onEvict is called for item evictions
 	onEvict func(uint64, interface{})
+
+	// onInsert is called for item inserts
+	onInsert func(uint64, int64)
 	// stop is used to stop the processItems goroutine
 	stop chan struct{}
 	// cost calculates cost from a value
@@ -113,13 +117,14 @@ func NewCache(config *Config) (*Cache, error) {
 	}
 	policy := newPolicy(config.NumCounters, config.MaxCost)
 	cache := &Cache{
-		store:   newStore(),
-		policy:  policy,
-		getBuf:  newRingBuffer(policy, config.BufferItems),
-		setBuf:  make(chan setEvent, setBufSize),
-		onEvict: config.OnEvict,
-		stop:    make(chan struct{}),
-		cost:    config.Cost,
+		store:    newStore(),
+		policy:   policy,
+		getBuf:   newRingBuffer(policy, config.BufferItems),
+		setBuf:   make(chan setEvent, setBufSize),
+		onEvict:  config.OnEvict,
+		stop:     make(chan struct{}),
+		cost:     config.Cost,
+		onInsert: config.OnInsert,
 	}
 	if config.Metrics {
 		cache.collectMetrics()
@@ -313,7 +318,7 @@ func (c *Cache) handleNewItem(key uint64, cost int64) {
 	}
 
 	// TODO: do evict after all events in current batch handled.
-	victims, added := c.policy.Add(key, cost)
+	victims, added, truecost := c.policy.Add(key, cost)
 	if !added {
 		// Item dropped by admission policy, delete it from hash map.
 		// Otherwise this danling item will be kept in cache forever.
@@ -330,7 +335,9 @@ func (c *Cache) handleNewItem(key uint64, cost int64) {
 		}
 		return
 	}
-
+	if added && c.onInsert != nil {
+		c.onInsert(key, truecost)
+	}
 	for _, victim := range victims {
 		victim, ok = c.store.Get(victim.key)
 		if !ok {

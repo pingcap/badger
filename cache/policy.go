@@ -85,32 +85,47 @@ func (p *policy) Push(keys []uint64) bool {
 		return false
 	}
 }
-
-func (p *policy) Add(key uint64, cost int64) ([]*item, bool) {
+func (p *sampledLFU) checkUpdateIfHas(key uint64, cost int64) (truecost int64, has bool) {
+	if prev, found := p.keyCosts[key]; found {
+		// update the cost of an existing key, but don't worry about evicting,
+		// evictions will be handled the next time a new item is added
+		return cost - prev, true
+	}
+	return cost, false
+}
+func (p *policy) Add(key uint64, cost int64) ([]*item, bool, int64) {
 	p.Lock()
 	defer p.Unlock()
 	// can't add an item bigger than entire cache
 	if cost > p.evict.maxCost {
-		return nil, false
+		return nil, false, 0
 	}
 	// we don't need to go any further if the item is already in the cache
-	if has := p.evict.updateIfHas(key, cost); has {
-		return nil, true
-	}
+	cost, has := p.evict.checkUpdateIfHas(key, cost)
+	// return nil, true
+
 	// if we got this far, this key doesn't exist in the cache
 	//
 	// calculate the remaining room in the cache (usually bytes)
+	var keyTp metricType
+	if has {
+		keyTp = keyUpdate
+	} else {
+		keyTp = keyAdd
+	}
 	room := p.evict.roomLeft(cost)
 	if room >= 0 {
 		// there's enough room in the cache to store the new item without
 		// overflowing, so we can do that now and stop here
 		p.evict.add(key, cost)
-		p.metrics.add(costAdd, key, uint64(cost))
-		p.metrics.add(keyAdd, key, 1)
-		return nil, true
+		if cost >= 0 {
+			p.metrics.add(costAdd, key, uint64(cost))
+		} else {
+			p.metrics.add(costAdd, key, ^uint64(uint64(-cost)-1))
+		}
+		p.metrics.add(keyTp, key, 1)
+		return nil, true, cost
 	}
-	// incHits is the hit count for the incoming item
-	incHits := p.admit.Estimate(key)
 	// sample is the eviction candidate pool to be filled via random sampling
 	//
 	// TODO: perhaps we should use a min heap here. Right now our time
@@ -128,14 +143,9 @@ func (p *policy) Add(key uint64, cost int64) ([]*item, bool) {
 		minKey, minHits, minId := uint64(0), int64(math.MaxInt64), 0
 		for i, pair := range sample {
 			// look up hit count for sample key
-			if hits := p.admit.Estimate(pair.key); hits < minHits {
+			if hits := p.admit.Estimate(pair.key); hits < minHits && pair.key != key {
 				minKey, minHits, minId = pair.key, hits, i
 			}
-		}
-		// if the incoming item isn't worth keeping in the policy, reject.
-		if incHits < minHits {
-			p.metrics.add(rejectSets, key, 1)
-			return victims, false
 		}
 		// delete the victim from metadata
 		p.evict.del(minKey)
@@ -149,9 +159,13 @@ func (p *policy) Add(key uint64, cost int64) ([]*item, bool) {
 		})
 	}
 	p.evict.add(key, cost)
-	p.metrics.add(costAdd, key, uint64(cost))
-	p.metrics.add(keyAdd, key, 1)
-	return victims, true
+	if cost >= 0 {
+		p.metrics.add(costAdd, key, uint64(cost))
+	} else {
+		p.metrics.add(costAdd, key, ^uint64(uint64(-cost)-1))
+	}
+	p.metrics.add(keyTp, key, 1)
+	return victims, true, cost
 }
 
 func (p *policy) Has(key uint64) bool {
@@ -248,7 +262,7 @@ func (p *sampledLFU) del(key uint64) {
 }
 
 func (p *sampledLFU) add(key uint64, cost int64) {
-	p.keyCosts[key] = cost
+	p.keyCosts[key] += cost
 	p.used += cost
 }
 
