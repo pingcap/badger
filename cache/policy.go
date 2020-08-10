@@ -102,8 +102,6 @@ func (p *policy) Add(key uint64, cost int64) ([]*item, bool, int64) {
 	}
 	// we don't need to go any further if the item is already in the cache
 	cost, has := p.evict.checkUpdateIfHas(key, cost)
-	// return nil, true
-
 	// if we got this far, this key doesn't exist in the cache
 	//
 	// calculate the remaining room in the cache (usually bytes)
