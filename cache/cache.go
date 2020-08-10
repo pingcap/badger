@@ -56,14 +56,15 @@ type Config struct {
 	// only set this flag to true when testing or throughput performance isn't a
 	// major factor.
 	Metrics bool
+	// NotEvictNew determines if new k-v can be evict when Set
+	NotEvictNew bool
 	// OnEvict is called for every eviction and passes the hashed key and
 	// value to the function.
 	OnEvict func(key uint64, value interface{})
 	// Cost evaluates a value and outputs a corresponding cost. This function
 	// is ran after Set is called for a new item or an item update with a cost
 	// param of 0.
-	OnInsert func(key uint64, cost int64)
-	Cost     func(value interface{}) int64
+	Cost func(value interface{}) int64
 }
 
 const (
@@ -93,9 +94,6 @@ type Cache struct {
 	setBuf chan setEvent
 	// onEvict is called for item evictions
 	onEvict func(uint64, interface{})
-
-	// onInsert is called for item inserts
-	onInsert func(uint64, int64)
 	// stop is used to stop the processItems goroutine
 	stop chan struct{}
 	// cost calculates cost from a value
@@ -115,16 +113,15 @@ func NewCache(config *Config) (*Cache, error) {
 	case config.BufferItems == 0:
 		return nil, errors.New("BufferItems can't be zero.")
 	}
-	policy := newPolicy(config.NumCounters, config.MaxCost)
+	policy := newPolicy(config.NumCounters, config.MaxCost, config.NotEvictNew)
 	cache := &Cache{
-		store:    newStore(),
-		policy:   policy,
-		getBuf:   newRingBuffer(policy, config.BufferItems),
-		setBuf:   make(chan setEvent, setBufSize),
-		onEvict:  config.OnEvict,
-		stop:     make(chan struct{}),
-		cost:     config.Cost,
-		onInsert: config.OnInsert,
+		store:   newStore(),
+		policy:  policy,
+		getBuf:  newRingBuffer(policy, config.BufferItems),
+		setBuf:  make(chan setEvent, setBufSize),
+		onEvict: config.OnEvict,
+		stop:    make(chan struct{}),
+		cost:    config.Cost,
 	}
 	if config.Metrics {
 		cache.collectMetrics()
@@ -293,6 +290,11 @@ func (c *Cache) Clear() {
 	go c.processItems()
 }
 
+// GetMemoryUsed return the used memory.
+func (c *Cache) GetMemoryUsed() int64 {
+	return c.policy.GetMemoryUsed()
+}
+
 // processItems is ran by goroutines processing the Set buffer.
 func (c *Cache) processItems() {
 	for {
@@ -318,7 +320,7 @@ func (c *Cache) handleNewItem(key uint64, cost int64) {
 	}
 
 	// TODO: do evict after all events in current batch handled.
-	victims, added, truecost := c.policy.Add(key, cost)
+	victims, added := c.policy.Add(key, cost)
 	if !added {
 		// Item dropped by admission policy, delete it from hash map.
 		// Otherwise this danling item will be kept in cache forever.
@@ -334,9 +336,6 @@ func (c *Cache) handleNewItem(key uint64, cost int64) {
 			c.onEvict(i.key, i.value)
 		}
 		return
-	}
-	if added && c.onInsert != nil {
-		c.onInsert(key, truecost)
 	}
 	for _, victim := range victims {
 		victim, ok = c.store.Get(victim.key)

@@ -31,19 +31,21 @@ const (
 
 type policy struct {
 	sync.Mutex
-	admit   *tinyLFU
-	evict   *sampledLFU
-	itemsCh chan []uint64
-	stop    chan struct{}
-	metrics *Metrics
+	admit       *tinyLFU
+	evict       *sampledLFU
+	itemsCh     chan []uint64
+	stop        chan struct{}
+	metrics     *Metrics
+	notEvictNew bool
 }
 
-func newPolicy(numCounters, maxCost int64) *policy {
+func newPolicy(numCounters, maxCost int64, NotEvictNew bool) *policy {
 	p := &policy{
-		admit:   newTinyLFU(numCounters),
-		evict:   newSampledLFU(maxCost),
-		itemsCh: make(chan []uint64, 3),
-		stop:    make(chan struct{}),
+		admit:       newTinyLFU(numCounters),
+		evict:       newSampledLFU(maxCost),
+		itemsCh:     make(chan []uint64, 3),
+		stop:        make(chan struct{}),
+		notEvictNew: NotEvictNew,
 	}
 	go p.processItems()
 	return p
@@ -85,20 +87,27 @@ func (p *policy) Push(keys []uint64) bool {
 		return false
 	}
 }
+
+// GetMemoryUsed return the used memory.
+func (p *policy) GetMemoryUsed() int64 {
+	p.Lock()
+	defer p.Unlock()
+	return p.evict.used
+}
+
 func (p *sampledLFU) checkUpdateIfHas(key uint64, cost int64) (truecost int64, has bool) {
 	if prev, found := p.keyCosts[key]; found {
-		// update the cost of an existing key, but don't worry about evicting,
-		// evictions will be handled the next time a new item is added
 		return cost - prev, true
 	}
 	return cost, false
 }
-func (p *policy) Add(key uint64, cost int64) ([]*item, bool, int64) {
+
+func (p *policy) Add(key uint64, cost int64) ([]*item, bool) {
 	p.Lock()
 	defer p.Unlock()
 	// can't add an item bigger than entire cache
 	if cost > p.evict.maxCost {
-		return nil, false, 0
+		return nil, false
 	}
 	// we don't need to go any further if the item is already in the cache
 	cost, has := p.evict.checkUpdateIfHas(key, cost)
@@ -122,8 +131,10 @@ func (p *policy) Add(key uint64, cost int64) ([]*item, bool, int64) {
 			p.metrics.add(costAdd, key, ^uint64(uint64(-cost)-1))
 		}
 		p.metrics.add(keyTp, key, 1)
-		return nil, true, cost
+		return nil, true
 	}
+	// incHits is the hit count for the incoming item
+	incHits := p.admit.Estimate(key)
 	// sample is the eviction candidate pool to be filled via random sampling
 	//
 	// TODO: perhaps we should use a min heap here. Right now our time
@@ -141,10 +152,17 @@ func (p *policy) Add(key uint64, cost int64) ([]*item, bool, int64) {
 		minKey, minHits, minId := uint64(0), int64(math.MaxInt64), 0
 		for i, pair := range sample {
 			// look up hit count for sample key
+			// if key is for update pair.key should not equal to key
 			if hits := p.admit.Estimate(pair.key); hits < minHits && pair.key != key {
 				minKey, minHits, minId = pair.key, hits, i
 			}
 		}
+		// if the incoming item isn't worth keeping in the policy, reject.
+		if !p.notEvictNew && incHits < minHits {
+			p.metrics.add(rejectSets, key, 1)
+			return victims, false
+		}
+
 		// delete the victim from metadata
 		p.evict.del(minKey)
 
@@ -163,7 +181,7 @@ func (p *policy) Add(key uint64, cost int64) ([]*item, bool, int64) {
 		p.metrics.add(costAdd, key, ^uint64(uint64(-cost)-1))
 	}
 	p.metrics.add(keyTp, key, 1)
-	return victims, true, cost
+	return victims, true
 }
 
 func (p *policy) Has(key uint64) bool {

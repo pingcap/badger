@@ -11,11 +11,11 @@ func TestPolicy(t *testing.T) {
 			t.Fatal("newPolicy failed")
 		}
 	}()
-	newPolicy(100, 10)
+	newPolicy(100, 10, false)
 }
 
 func TestPolicyMetrics(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.CollectMetrics(newMetrics())
 	if p.metrics == nil || p.evict.metrics == nil {
 		t.Fatal("policy metrics initialization error")
@@ -23,7 +23,7 @@ func TestPolicyMetrics(t *testing.T) {
 }
 
 func TestPolicyProcessItems(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.itemsCh <- []uint64{1, 2, 2}
 	time.Sleep(wait)
 	p.Lock()
@@ -44,7 +44,7 @@ func TestPolicyProcessItems(t *testing.T) {
 }
 
 func TestPolicyPush(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	if !p.Push([]uint64{}) {
 		t.Fatal("push empty slice should be good")
 	}
@@ -60,7 +60,7 @@ func TestPolicyPush(t *testing.T) {
 }
 
 func TestPolicyAdd(t *testing.T) {
-	p := newPolicy(1000, 100)
+	p := newPolicy(1000, 100, false)
 	if victims, added := p.Add(1, 101); victims != nil || added {
 		t.Fatal("can't add an item bigger than entire cache")
 	}
@@ -85,7 +85,7 @@ func TestPolicyAdd(t *testing.T) {
 }
 
 func TestPolicyHas(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.Add(1, 1)
 	if !p.Has(1) {
 		t.Fatal("policy should have key")
@@ -96,7 +96,7 @@ func TestPolicyHas(t *testing.T) {
 }
 
 func TestPolicyDel(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.Add(1, 1)
 	p.Del(1)
 	p.Del(2)
@@ -109,7 +109,7 @@ func TestPolicyDel(t *testing.T) {
 }
 
 func TestPolicyCap(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.Add(1, 1)
 	if p.Cap() != 9 {
 		t.Fatal("cap returned wrong value")
@@ -117,7 +117,7 @@ func TestPolicyCap(t *testing.T) {
 }
 
 func TestPolicyUpdate(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.Add(1, 1)
 	p.Update(1, 2)
 	p.Lock()
@@ -129,7 +129,7 @@ func TestPolicyUpdate(t *testing.T) {
 }
 
 func TestPolicyCost(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.Add(1, 2)
 	if p.Cost(1) != 2 {
 		t.Fatal("cost for existing key returned wrong value")
@@ -140,7 +140,7 @@ func TestPolicyCost(t *testing.T) {
 }
 
 func TestPolicyClear(t *testing.T) {
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.Add(1, 1)
 	p.Add(2, 2)
 	p.Add(3, 3)
@@ -156,7 +156,7 @@ func TestPolicyClose(t *testing.T) {
 			t.Fatal("close didn't close channels")
 		}
 	}()
-	p := newPolicy(100, 10)
+	p := newPolicy(100, 10, false)
 	p.Add(1, 1)
 	p.Close()
 	p.itemsCh <- []uint64{1}
