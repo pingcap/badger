@@ -187,6 +187,11 @@ func (c *Cache) Set(key uint64, value interface{}, cost int64) {
 	}
 }
 
+// SetNewMaxCost set maxCost to newMaxCost
+func (c *Cache) SetNewMaxCost(newMaxCost int64) {
+	c.policy.setNewMaxCost(newMaxCost)
+}
+
 // GetOrCompute returns the value of key. If there is no such key, it will compute the
 // value using the factory function `f`. If there are concurrent call on same key,
 // the factory function will be called only once.

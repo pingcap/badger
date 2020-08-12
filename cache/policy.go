@@ -72,6 +72,12 @@ func (p *policy) processItems() {
 	}
 }
 
+func (p *policy) setNewMaxCost(newMaxCost int64) {
+	p.Lock()
+	p.evict.maxCost = newMaxCost
+	p.Unlock()
+}
+
 func (p *policy) Push(keys []uint64) bool {
 	if len(keys) == 0 {
 		return true
