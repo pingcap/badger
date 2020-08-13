@@ -291,7 +291,7 @@ func (c *Cache) Clear() {
 	// block until processItems goroutine is returned
 	c.stop <- struct{}{}
 	// Empty the setBuf
-	//there should not be any Set or Get when invoke Cache.Clear().
+	// there should not be any Set or Get when invoke Cache.Clear().
 	for !IsEmpty(c.setBuf) {
 	}
 	// clear value hashmap and policy data
