@@ -114,6 +114,8 @@ func (s *store) Del(key uint64) *item {
 
 func (s *store) Clear() {
 	for i := uint64(0); i < numShards; i++ {
+		s.shards[i].Lock()
 		s.shards[i].data = make(map[uint64]*item)
+		s.shards[i].Unlock()
 	}
 }

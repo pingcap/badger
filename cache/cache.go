@@ -274,14 +274,26 @@ func (c *Cache) Close() {
 	c.policy.Close()
 }
 
+// IsEmpty check setBuf is empty, if it is not empty, pop a buf.
+func IsEmpty(ch <-chan setEvent) bool {
+	select {
+	case <-ch:
+		return false
+	default:
+		return true
+	}
+}
+
 // Clear empties the hashmap and zeroes all policy counters. Note that this is
 // not an atomic operation (but that shouldn't be a problem as it's assumed that
 // Set/Get calls won't be occurring until after this).
 func (c *Cache) Clear() {
 	// block until processItems goroutine is returned
 	c.stop <- struct{}{}
-	// swap out the setBuf channel
-	c.setBuf = make(chan setEvent, setBufSize)
+	// Empty the setBuf
+	//there should not be any Set or Get when invoke Cache.Clear().
+	for !IsEmpty(c.setBuf) {
+	}
 	// clear value hashmap and policy data
 	c.policy.Clear()
 	c.store.Clear()
