@@ -602,7 +602,7 @@ func (db *DB) Close() (err error) {
 		}
 		guard := db.resourceMgr.Acquire()
 		defer guard.Done()
-		if db.lc.fillTablesL0(cd) {
+		if cd.fillTablesL0(&db.lc.cstatus) {
 			if err := db.lc.runCompactDef(0, cd, nil, guard); err != nil {
 				log.Info("LOG Compact FAILED", zap.Stringer("compact def", cd), zap.Error(err))
 			}

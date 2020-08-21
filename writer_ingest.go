@@ -146,7 +146,7 @@ func (w *writeWorker) runIngestCompact(level int, tbl *sstable.Table, overlappin
 		top:       []table.Table{tbl},
 		nextRange: getKeyRange(overlappingTables),
 	}
-	w.lc.fillBottomTables(cd, overlappingTables)
+	cd.fillBottomTables(overlappingTables)
 	newTables, err := w.lc.compactBuildTables(level-1, cd, w.limiter, splitHints)
 	if err != nil {
 		return err

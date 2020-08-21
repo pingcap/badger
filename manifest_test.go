@@ -205,7 +205,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	opts := DefaultOptions.TableBuilderOptions
 	lc, err := newLevelsController(kv, &manifest, rm, opts)
 	require.NoError(t, err)
-	done = lc.fillTablesL0(cd)
+	done = cd.fillTablesL0(&lc.cstatus)
 	require.Equal(t, true, done)
 	lc.runCompactDef(0, cd, nil, g)
 
@@ -220,7 +220,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 		thisLevel: lh0,
 		nextLevel: lh1,
 	}
-	lc.fillTablesL0(cd)
+	cd.fillTablesL0(&lc.cstatus)
 	lc.runCompactDef(0, cd, nil, g)
 }
 
