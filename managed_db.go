@@ -19,7 +19,7 @@ package badger
 // ManagedDB allows end users to manage the transactions themselves. Transaction
 // start and commit timestamps are set by end-user.
 //
-// This is only useful for databases built on top of Badger (like Dgraph), and
+// This is only useful for databases built on Top of Badger (like Dgraph), and
 // can be ignored by most users.
 //
 // WARNING: This is an experimental feature and may be changed significantly in
@@ -31,7 +31,7 @@ type ManagedDB struct {
 // OpenManaged returns a new ManagedDB, which allows more control over setting
 // transaction timestamps.
 //
-// This is only useful for databases built on top of Badger (like Dgraph), and
+// This is only useful for databases built on Top of Badger (like Dgraph), and
 // can be ignored by most users.
 func OpenManaged(opts Options) (*ManagedDB, error) {
 	opts.ManagedTxns = true
@@ -51,7 +51,7 @@ func (db *ManagedDB) NewTransaction(update bool) {
 // NewTransactionAt follows the same logic as DB.NewTransaction(), but uses the
 // provided read timestamp.
 //
-// This is only useful for databases built on top of Badger (like Dgraph), and
+// This is only useful for databases built on Top of Badger (like Dgraph), and
 // can be ignored by most users.
 func (db *ManagedDB) NewTransactionAt(readTs uint64, update bool) *Txn {
 	txn := db.DB.NewTransaction(update)
@@ -62,7 +62,7 @@ func (db *ManagedDB) NewTransactionAt(readTs uint64, update bool) *Txn {
 // CommitAt commits the transaction, following the same logic as Commit(), but
 // at the given commit timestamp. This will panic if not used with ManagedDB.
 //
-// This is only useful for databases built on top of Badger (like Dgraph), and
+// This is only useful for databases built on Top of Badger (like Dgraph), and
 // can be ignored by most users.
 func (txn *Txn) CommitAt(commitTs uint64) error {
 	if !txn.db.IsManaged() {

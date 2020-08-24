@@ -596,14 +596,11 @@ func (db *DB) Close() (err error) {
 	if db.opt.CompactL0WhenClose && !db.volatileMode {
 		// Force Compact L0
 		// We don't need to care about cstatus since no parallel compaction is running.
-		cd := &compactDef{
-			thisLevel: db.lc.levels[0],
-			nextLevel: db.lc.levels[1],
-		}
+		cd := &CompactDef{}
 		guard := db.resourceMgr.Acquire()
 		defer guard.Done()
-		if cd.fillTablesL0(&db.lc.cstatus) {
-			if err := db.lc.runCompactDef(0, cd, nil, guard); err != nil {
+		if cd.fillTablesL0(&db.lc.cstatus, db.lc.levels[0], db.lc.levels[1]) {
+			if err := db.lc.runCompactDef(cd, guard); err != nil {
 				log.Info("LOG Compact FAILED", zap.Stringer("compact def", cd), zap.Error(err))
 			}
 		} else {

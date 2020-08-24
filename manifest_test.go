@@ -191,9 +191,8 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	done := lh0.tryAddLevel0Table(t1)
 	require.Equal(t, true, done)
 
-	cd := &compactDef{
-		thisLevel: lh0,
-		nextLevel: lh1,
+	cd := &CompactDef{
+		Level: 0,
 	}
 
 	closer := y.NewCloser(0)
@@ -205,9 +204,9 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	opts := DefaultOptions.TableBuilderOptions
 	lc, err := newLevelsController(kv, &manifest, rm, opts)
 	require.NoError(t, err)
-	done = cd.fillTablesL0(&lc.cstatus)
+	done = cd.fillTablesL0(&lc.cstatus, lh0, lh1)
 	require.Equal(t, true, done)
-	lc.runCompactDef(0, cd, nil, g)
+	lc.runCompactDef(cd, g)
 
 	f = buildTestTable(t, "l", 2)
 	t2, err := sstable.OpenTable(f.Name(), blkCache, idxCache)
@@ -216,12 +215,11 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	done = lh0.tryAddLevel0Table(t2)
 	require.Equal(t, true, done)
 
-	cd = &compactDef{
-		thisLevel: lh0,
-		nextLevel: lh1,
+	cd = &CompactDef{
+		Level: 0,
 	}
-	cd.fillTablesL0(&lc.cstatus)
-	lc.runCompactDef(0, cd, nil, g)
+	cd.fillTablesL0(&lc.cstatus, lh0, lh1)
+	lc.runCompactDef(cd, g)
 }
 
 func TestManifestRewrite(t *testing.T) {

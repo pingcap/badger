@@ -141,13 +141,14 @@ func (w *writeWorker) ingestTable(tbl *sstable.Table, splitHints []y.Key) error 
 }
 
 func (w *writeWorker) runIngestCompact(level int, tbl *sstable.Table, overlappingTables []table.Table, splitHints []y.Key, guard *epoch.Guard) error {
-	cd := &compactDef{
-		nextLevel: w.lc.levels[level],
-		top:       []table.Table{tbl},
-		nextRange: getKeyRange(overlappingTables),
+	cd := &CompactDef{
+		Level:      level - 1,
+		Top:        []table.Table{tbl},
+		nextRange:  getKeyRange(overlappingTables),
+		splitHints: splitHints,
 	}
 	cd.fillBottomTables(overlappingTables)
-	newTables, err := w.lc.compactBuildTables(level-1, cd, w.limiter, splitHints)
+	newTables, err := w.lc.compactBuildTables(cd)
 	if err != nil {
 		return err
 	}
@@ -156,14 +157,14 @@ func (w *writeWorker) runIngestCompact(level int, tbl *sstable.Table, overlappin
 	for _, t := range newTables {
 		changes = append(changes, newCreateChange(t.ID(), level))
 	}
-	for _, t := range cd.bot {
+	for _, t := range cd.Bot {
 		changes = append(changes, newDeleteChange(t.ID()))
 	}
 
 	if err := w.manifest.addChanges(changes, nil); err != nil {
 		return err
 	}
-	cd.nextLevel.replaceTables(newTables, cd, guard)
+	w.lc.levels[cd.Level+1].replaceTables(newTables, cd, guard)
 	return nil
 }
 

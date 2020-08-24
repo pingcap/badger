@@ -33,7 +33,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 )
 
 type levelsController struct {
@@ -273,18 +272,22 @@ func (lc *levelsController) pickCompactLevels() (prios []compactionPriority) {
 	return prios
 }
 
-func (lc *levelsController) hasOverlapTable(cd *compactDef) bool {
-	kr := getKeyRange(cd.top)
-	for i := cd.nextLevel.level + 1; i < len(lc.levels); i++ {
+func (lc *levelsController) setHasOverlapTable(cd *CompactDef) {
+	if cd.moveDown() {
+		return
+	}
+	kr := getKeyRange(cd.Top)
+	for i := cd.Level + 2; i < len(lc.levels); i++ {
 		lh := lc.levels[i]
 		lh.RLock()
 		left, right := lh.overlappingTables(levelHandlerRLocked{}, kr)
 		lh.RUnlock()
 		if right-left > 0 {
-			return true
+			cd.HasOverlap = true
+			return
 		}
 	}
-	return false
+	return
 }
 
 type DiscardStats struct {
@@ -357,70 +360,77 @@ func overSkipTables(key y.Key, skippedTables []table.Table) (newSkippedTables []
 	return skippedTables[i:], i > 0
 }
 
-// compactBuildTables merge topTables and botTables to form a list of new tables.
-func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
-	limiter *rate.Limiter, splitHints []y.Key) (newTables []table.Table, err error) {
-	topTables := cd.top
-	botTables := cd.bot
-
-	hasOverlap := lc.hasOverlapTable(cd)
-	log.Info("check range with lower level", zap.Bool("overlapped", hasOverlap))
-
-	// Try to collect stats so that we can inform value log about GC. That would help us find which
-	// value log file should be GCed.
-	discardStats := &DiscardStats{}
-
-	// Create iterators across all the tables involved first.
-	var iters []y.Iterator
-	if level == 0 {
-		iters = appendIteratorsReversed(iters, topTables, false)
-	} else {
-		iters = []y.Iterator{table.NewConcatIterator(topTables, false)}
-	}
-
-	// Next level has level>=1 and we can use ConcatIterator as key ranges do not overlap.
-	iters = append(iters, table.NewConcatIterator(botTables, false))
-	it := table.NewMergeIterator(iters, false)
-
-	it.Rewind()
-
+func (lc *levelsController) prepareCompactionDef(cd *CompactDef) {
 	// Pick up the currently pending transactions' min readTs, so we can discard versions below this
 	// readTs. We should never discard any versions starting from above this timestamp, because that
 	// would affect the snapshot view guarantee provided by transactions.
-	safeTs := lc.kv.getCompactSafeTs()
-
-	var filter CompactionFilter
-	var guards []Guard
+	cd.SafeTS = lc.kv.getCompactSafeTs()
+	cd.MaxTblSize = lc.kv.opt.MaxTableSize
 	if lc.kv.opt.CompactionFilterFactory != nil {
-		filter = lc.kv.opt.CompactionFilterFactory(level+1, cd.smallest().UserKey, cd.biggest().UserKey)
-		guards = filter.Guards()
+		cd.Filter = lc.kv.opt.CompactionFilterFactory(cd.Level+1, cd.smallest().UserKey, cd.biggest().UserKey)
+		cd.Guards = cd.Filter.Guards()
 	}
-	skippedTbls := cd.skippedTbls
+	cd.Opt = lc.opt
+	cd.Dir = lc.kv.opt.Dir
+	cd.AllocIDFunc = lc.reserveFileID
+	cd.Limiter = lc.kv.limiter
+}
+
+func (lc *levelsController) getCompactor(cd *CompactDef) compactor {
+	return &localCompactor{}
+}
+
+// compactBuildTables merge topTables and botTables to form a list of new tables.
+func (lc *levelsController) compactBuildTables(cd *CompactDef) (newTables []table.Table, err error) {
+
+	// Try to collect stats so that we can inform value log about GC. That would help us find which
+	// value log file should be GCed.
+	lc.prepareCompactionDef(cd)
+	stats := &y.CompactionStats{}
+	discardStats := &DiscardStats{}
+	newTblFileNames, err := lc.getCompactor(cd).compact(cd, stats, discardStats)
+	if err != nil {
+		return nil, err
+	}
+	newTables, err = lc.openTables(newTblFileNames)
+	if err != nil {
+		return nil, err
+	}
+	lc.handleStats(cd.Level+1, stats, discardStats)
+	return
+}
+
+// CompactTables compacts tables in CompactDef and returns the file names.
+func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]string, error) {
+	var newTblFileNames []string
+	it := cd.buildIterator()
+
+	skippedTbls := cd.SkippedTbls
+	splitHints := cd.splitHints
 
 	var lastKey, skipKey y.Key
 	var builder *sstable.Builder
-	var bytesRead, bytesWrite, numRead, numWrite int
 	for it.Valid() {
-		fileID := lc.reserveFileID()
-		filename := sstable.NewFilename(fileID, lc.kv.opt.Dir)
+		fileID := cd.AllocIDFunc()
+		filename := sstable.NewFilename(fileID, cd.Dir)
 		var fd *os.File
-		fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+		fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 		if err != nil {
-			return
+			return nil, err
 		}
 		if builder == nil {
-			builder = sstable.NewTableBuilder(fd, limiter, cd.nextLevel.level, lc.opt)
+			builder = sstable.NewTableBuilder(fd, cd.Limiter, cd.Level+1, cd.Opt)
 		} else {
 			builder.Reset(fd)
 		}
 		lastKey.Reset()
-		guard := searchGuard(it.Key().UserKey, guards)
+		guard := searchGuard(it.Key().UserKey, cd.Guards)
 		for ; it.Valid(); y.NextAllVersion(it) {
-			numRead++
+			stats.KeysRead++
 			vs := it.Value()
 			key := it.Key()
 			kvSize := int(vs.EncodedSize()) + key.Len()
-			bytesRead += kvSize
+			stats.BytesRead += kvSize
 			// See if we need to skip this key.
 			if !skipKey.IsEmpty() {
 				if key.SameUserKey(skipKey) {
@@ -441,7 +451,7 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 						break
 					}
 				}
-				if shouldFinishFile(key, lastKey, guard, int64(builder.EstimateSize()), lc.kv.opt.MaxTableSize) {
+				if shouldFinishFile(key, lastKey, guard, int64(builder.EstimateSize()), cd.MaxTblSize) {
 					break
 				}
 				if len(splitHints) != 0 && key.Compare(splitHints[0]) >= 0 {
@@ -456,7 +466,7 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 
 			// Only consider the versions which are below the minReadTs, otherwise, we might end up discarding the
 			// only valid version for a running transaction.
-			if key.Version <= safeTs {
+			if key.Version <= cd.SafeTS {
 				// key is the latest readable version of this key, so we simply discard all the rest of the versions.
 				skipKey.Copy(key)
 
@@ -464,14 +474,14 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 					// If this key range has overlap with lower levels, then keep the deletion
 					// marker with the latest version, discarding the rest. We have set skipKey,
 					// so the following key versions would be skipped. Otherwise discard the deletion marker.
-					if !hasOverlap {
+					if !cd.HasOverlap {
 						continue
 					}
-				} else if filter != nil {
-					switch filter.Filter(key.UserKey, vs.Value, vs.UserMeta) {
+				} else if cd.Filter != nil {
+					switch cd.Filter.Filter(key.UserKey, vs.Value, vs.UserMeta) {
 					case DecisionMarkTombstone:
 						discardStats.collect(vs)
-						if hasOverlap {
+						if cd.HasOverlap {
 							// There may have ole versions for this key, so convert to delete tombstone.
 							builder.Add(key, y.ValueStruct{Meta: bitDelete})
 						}
@@ -484,37 +494,30 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 				}
 			}
 			builder.Add(key, vs)
-			numWrite++
-			bytesWrite += kvSize
+			stats.KeysWrite++
+			stats.BytesWrite += kvSize
 		}
 		if builder.Empty() {
 			continue
 		}
 		if err = builder.Finish(); err != nil {
-			return
+			return nil, err
 		}
 		fd.Close()
+		newTblFileNames = append(newTblFileNames, filename)
+	}
+	return newTblFileNames, nil
+}
+
+func (lc *levelsController) openTables(newTblFileNames []string) (newTables []table.Table, err error) {
+	for _, filename := range newTblFileNames {
 		var tbl table.Table
 		tbl, err = sstable.OpenTable(filename, lc.kv.blockCache, lc.kv.indexCache)
 		if err != nil {
 			return
 		}
-		if tbl.Smallest().IsEmpty() {
-			tbl.Delete()
-		} else {
-			newTables = append(newTables, tbl)
-		}
+		newTables = append(newTables, tbl)
 	}
-
-	stats := &y.CompactionStats{
-		KeysRead:     numRead,
-		BytesRead:    bytesRead,
-		KeysWrite:    numWrite,
-		BytesWrite:   bytesWrite,
-		KeysDiscard:  int(discardStats.numSkips),
-		BytesDiscard: int(discardStats.skippedBytes),
-	}
-	cd.nextLevel.metrics.UpdateCompactionStats(stats)
 	// Ensure created files' directory entries are visible.  We don't mind the extra latency
 	// from not doing this ASAP after all file creation has finished because this is a
 	// background operation.
@@ -524,23 +527,29 @@ func (lc *levelsController) compactBuildTables(level int, cd *compactDef,
 		return
 	}
 	sortTables(newTables)
+	return
+}
+
+func (lc *levelsController) handleStats(nexLevel int, stats *y.CompactionStats, discardStats *DiscardStats) {
+	stats.KeysDiscard = int(discardStats.numSkips)
+	stats.BytesDiscard = int(discardStats.skippedBytes)
+	lc.levels[nexLevel].metrics.UpdateCompactionStats(stats)
 	log.Info("compact send discard stats", zap.Stringer("stats", discardStats))
 	if len(discardStats.ptrs) > 0 {
 		lc.kv.blobManger.discardCh <- discardStats
 	}
-	return
 }
 
-func buildChangeSet(cd *compactDef, newTables []table.Table) protos.ManifestChangeSet {
+func buildChangeSet(cd *CompactDef, newTables []table.Table) protos.ManifestChangeSet {
 	changes := []*protos.ManifestChange{}
 	for _, table := range newTables {
 		changes = append(changes,
-			newCreateChange(table.ID(), cd.nextLevel.level))
+			newCreateChange(table.ID(), cd.Level+1))
 	}
-	for _, table := range cd.top {
+	for _, table := range cd.Top {
 		changes = append(changes, newDeleteChange(table.ID()))
 	}
-	for _, table := range cd.bot {
+	for _, table := range cd.Bot {
 		changes = append(changes, newDeleteChange(table.ID()))
 	}
 	return protos.ManifestChangeSet{Changes: changes}
@@ -561,35 +570,33 @@ func calcRatio(topSize, botSize int64) float64 {
 	return float64(topSize) / float64(botSize)
 }
 
-func (lc *levelsController) runCompactDef(l int, cd *compactDef, limiter *rate.Limiter, guard *epoch.Guard) error {
+func (lc *levelsController) runCompactDef(cd *CompactDef, guard *epoch.Guard) error {
 	timeStart := time.Now()
 
-	thisLevel := cd.thisLevel
-	nextLevel := cd.nextLevel
+	thisLevel := lc.levels[cd.Level]
+	nextLevel := lc.levels[cd.Level+1]
 
 	var newTables []table.Table
 	var changeSet protos.ManifestChangeSet
-	var topMove bool
 	defer func() {
 		for _, tbl := range newTables {
 			tbl.MarkCompacting(false)
 		}
-		for _, tbl := range cd.skippedTbls {
+		for _, tbl := range cd.SkippedTbls {
 			tbl.MarkCompacting(false)
 		}
 	}()
 
-	if l > 0 && len(cd.bot) == 0 && len(cd.skippedTbls) == 0 {
+	if cd.moveDown() {
 		// skip level 0, since it may has many table overlap with each other
-		newTables = cd.top
+		newTables = cd.Top
 		changeSet = protos.ManifestChangeSet{}
 		for _, t := range newTables {
-			changeSet.Changes = append(changeSet.Changes, newMoveDownChange(t.ID(), cd.nextLevel.level))
+			changeSet.Changes = append(changeSet.Changes, newMoveDownChange(t.ID(), cd.Level+1))
 		}
-		topMove = true
 	} else {
 		var err error
-		newTables, err = lc.compactBuildTables(l, cd, limiter, nil)
+		newTables, err = lc.compactBuildTables(cd)
 		if err != nil {
 			return err
 		}
@@ -604,13 +611,13 @@ func (lc *levelsController) runCompactDef(l int, cd *compactDef, limiter *rate.L
 	// See comment earlier in this function about the ordering of these ops, and the order in which
 	// we access levels when reading.
 	nextLevel.replaceTables(newTables, cd, guard)
-	thisLevel.deleteTables(cd.top, guard, topMove)
+	thisLevel.deleteTables(cd.Top, guard, cd.moveDown())
 
 	// Note: For level 0, while doCompact is running, it is possible that new tables are added.
 	// However, the tables are added only to the end, so it is ok to just delete the first table.
 
 	log.Info("compaction done",
-		zap.Stringer("def", cd), zap.Int("deleted", len(cd.top)+len(cd.bot)), zap.Int("added", len(newTables)),
+		zap.Stringer("def", cd), zap.Int("deleted", len(cd.Top)+len(cd.Bot)), zap.Int("added", len(newTables)),
 		zap.Duration("duration", time.Since(timeStart)))
 	return nil
 }
@@ -620,36 +627,38 @@ func (lc *levelsController) doCompact(p compactionPriority, guard *epoch.Guard) 
 	l := p.level
 	y.Assert(l+1 < lc.kv.opt.TableBuilderOptions.MaxLevels) // Sanity check.
 
-	cd := &compactDef{
-		thisLevel: lc.levels[l],
-		nextLevel: lc.levels[l+1],
+	cd := &CompactDef{
+		Level: l,
 	}
+	thisLevel := lc.levels[cd.Level]
+	nextLevel := lc.levels[cd.Level+1]
 
 	log.Info("start compaction", zap.Int("level", p.level), zap.Float64("score", p.score))
 
 	// While picking tables to be compacted, both levels' tables are expected to
 	// remain unchanged.
 	if l == 0 {
-		if !cd.fillTablesL0(&lc.cstatus) {
+		if !cd.fillTablesL0(&lc.cstatus, thisLevel, nextLevel) {
 			log.Info("build compaction fill tables failed", zap.Int("level", l))
 			return false, nil
 		}
 	} else {
-		if !cd.fillTables(&lc.cstatus) {
+		if !cd.fillTables(&lc.cstatus, thisLevel, nextLevel) {
 			log.Info("build compaction fill tables failed", zap.Int("level", l))
 			return false, nil
 		}
 	}
+	lc.setHasOverlapTable(cd)
 	defer lc.cstatus.delete(cd) // Remove the ranges from compaction status.
 
 	log.Info("running compaction", zap.Stringer("def", cd))
-	if err := lc.runCompactDef(l, cd, lc.kv.limiter, guard); err != nil {
+	if err := lc.runCompactDef(cd, guard); err != nil {
 		// This compaction couldn't be done successfully.
 		log.Info("compact failed", zap.Stringer("def", cd), zap.Error(err))
 		return false, err
 	}
 
-	log.Info("compaction done", zap.Int("level", cd.thisLevel.level))
+	log.Info("compaction done", zap.Int("level", cd.Level))
 	return true, nil
 }
 

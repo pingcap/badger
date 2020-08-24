@@ -110,7 +110,7 @@ func (s *levelHandler) deleteTables(toDel []table.Table, guard *epoch.Guard, isM
 	}
 }
 
-func assertTablesOrder(level int, tables []table.Table, cd *compactDef) {
+func assertTablesOrder(level int, tables []table.Table, cd *CompactDef) {
 	if level == 0 {
 		return
 	}
@@ -145,7 +145,7 @@ func sortTables(tables []table.Table) {
 
 // replaceTables will replace tables[left:right] with newTables. Note this EXCLUDES tables[right].
 // You must call decr() to delete the old tables _after_ writing the update to the manifest.
-func (s *levelHandler) replaceTables(newTables []table.Table, cd *compactDef, guard *epoch.Guard) {
+func (s *levelHandler) replaceTables(newTables []table.Table, cd *CompactDef, guard *epoch.Guard) {
 	// Do not return even if len(newTables) is 0 because we need to delete bottom tables.
 	assertTablesOrder(s.level, newTables, cd)
 
@@ -160,15 +160,15 @@ func (s *levelHandler) replaceTables(newTables []table.Table, cd *compactDef, gu
 	// Update totalSize and reference counts.
 	for i := left; i < right; i++ {
 		tbl := s.tables[i]
-		if containsTable(cd.bot, tbl) {
+		if containsTable(cd.Bot, tbl) {
 			s.totalSize -= tbl.Size()
 			toDelete = append(toDelete, tbl)
 		}
 	}
-	tables := make([]table.Table, 0, left+len(newTables)+len(cd.skippedTbls)+(len(s.tables)-right))
+	tables := make([]table.Table, 0, left+len(newTables)+len(cd.SkippedTbls)+(len(s.tables)-right))
 	tables = append(tables, s.tables[:left]...)
 	tables = append(tables, newTables...)
-	tables = append(tables, cd.skippedTbls...)
+	tables = append(tables, cd.SkippedTbls...)
 	tables = append(tables, s.tables[right:]...)
 	sortTables(tables)
 	assertTablesOrder(s.level, tables, cd)
