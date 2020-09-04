@@ -18,13 +18,20 @@ package badger
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
-	"log"
+	"io"
+	"net"
+	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/table"
+	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
+	"github.com/pingcap/log"
 	"golang.org/x/time/rate"
 )
 
@@ -491,4 +498,318 @@ type localCompactor struct {
 
 func (c *localCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]string, error) {
 	return CompactTables(cd, stats, discardStats)
+}
+
+type remoteCompactor struct {
+	remoteAddr string
+	allFiles   []*os.File
+	req        *CompactionReq
+}
+
+type CompactionReq struct {
+	Level        int     `json:"level"`
+	Overlap      bool    `json:"overlap"`
+	NumTop       int     `json:"num_top"`
+	FileSizes    []int64 `json:"file_sizes"`
+	SafeTS       uint64  `json:"safe_ts"`
+	MaxTableSize int64   `json:"max_table_size"`
+}
+
+type CompactionResp struct {
+	Error     string             `json:"error"`
+	FileSizes []int64            `json:"file_sizes"`
+	Stats     *y.CompactionStats `json:"stats"`
+	NumSkip   int64              `json:"num_skip"`
+	SkipBytes int64              `json:"skip_bytes"`
+}
+
+func (rc *remoteCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]string, error) {
+	defer rc.cleanup()
+	rc.req = &CompactionReq{
+		Level:        cd.Level,
+		Overlap:      cd.HasOverlap,
+		NumTop:       len(cd.Top),
+		SafeTS:       cd.SafeTS,
+		MaxTableSize: cd.MaxTblSize,
+	}
+	err := rc.appendFiles(cd.Top)
+	if err != nil {
+		return nil, err
+	}
+	err = rc.appendFiles(cd.Bot)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.Dial("tcp", rc.remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	err = writeJSON(conn, rc.req)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range rc.allFiles {
+		_, err = io.Copy(conn, file)
+		if err != nil {
+			return nil, err
+		}
+	}
+	resp := new(CompactionResp)
+	err = readJSON(conn, resp)
+	if err != nil {
+		return nil, err
+	}
+	*stats = *resp.Stats
+	discardStats.numSkips = resp.NumSkip
+	discardStats.skippedBytes = resp.SkipBytes
+	var newFileNames []string
+	for i := 0; i < len(resp.FileSizes); i += 2 {
+		fileID := cd.AllocIDFunc()
+		filename := sstable.NewFilename(fileID, cd.Dir)
+		err = readFile(conn, filename, resp.FileSizes[i])
+		if err != nil {
+			return nil, err
+		}
+		err = readFile(conn, sstable.IndexFilename(filename), resp.FileSizes[i+1])
+		if err != nil {
+			return nil, err
+		}
+		newFileNames = append(newFileNames, filename)
+	}
+	return newFileNames, nil
+}
+
+func (rc *remoteCompactor) appendFiles(tbls []table.Table) error {
+	for _, tbl := range tbls {
+		sst := tbl.(*sstable.Table)
+		fn := sst.Filename()
+		err := rc.appendFile(fn)
+		if err != nil {
+			return err
+		}
+		err = rc.appendFile(sstable.IndexFilename(fn))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (rc *remoteCompactor) appendFile(filename string) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	rc.allFiles = append(rc.allFiles, file)
+	stat, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	rc.req.FileSizes = append(rc.req.FileSizes, stat.Size())
+	return nil
+}
+
+func (rc *remoteCompactor) cleanup() {
+	for _, file := range rc.allFiles {
+		file.Close()
+	}
+}
+
+type CompactionServer struct {
+	dataPath string
+	fid      uint64
+	l        net.Listener
+}
+
+func NewCompactionServer(addr, dataPath string) (*CompactionServer, error) {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return &CompactionServer{
+		dataPath: dataPath,
+		l:        l,
+	}, nil
+}
+
+func (s *CompactionServer) Close() {
+	s.l.Close()
+}
+
+func (s *CompactionServer) Run() {
+	for {
+		conn, err := s.l.Accept()
+		if err != nil {
+			log.S().Error(err)
+			return
+		}
+		go func() {
+			err := s.handleConn(conn)
+			if err != nil {
+				s.sendError(conn, err)
+			}
+			conn.Close()
+		}()
+	}
+}
+
+func (c *CompactionServer) handleConn(conn net.Conn) error {
+	req := new(CompactionReq)
+	err := readJSON(conn, req)
+	if err != nil {
+		return err
+	}
+	var recvFiles []string
+	for i := 0; i < len(req.FileSizes); i += 2 {
+		dataSize := req.FileSizes[i]
+		fid := c.allocFileID()
+		fileName := sstable.NewFilename(fid, c.dataPath)
+		err = readFile(conn, fileName, dataSize)
+		if err != nil {
+			return err
+		}
+		recvFiles = append(recvFiles, fileName)
+		idxSize := req.FileSizes[i+1]
+		idxFileName := sstable.IndexFilename(fileName)
+		err = readFile(conn, idxFileName, idxSize)
+		if err != nil {
+			return err
+		}
+	}
+	defer c.removeFiles(recvFiles)
+	cd := new(CompactDef)
+	cd.HasOverlap = req.Overlap
+	for i, fileName := range recvFiles {
+		t, err := sstable.OpenTable(fileName, nil, nil)
+		if err != nil {
+			return err
+		}
+		if i < req.NumTop {
+			cd.Top = append(cd.Top, t)
+		} else {
+			cd.Bot = append(cd.Bot, t)
+		}
+	}
+	cd.Level = req.Level
+	cd.MaxTblSize = 16 * 1024 * 1024
+	cd.AllocIDFunc = c.allocFileID
+	cd.Dir = c.dataPath
+	cd.SafeTS = req.SafeTS
+	cd.Opt = DefaultOptions.TableBuilderOptions
+	cd.Opt.CompressionPerLevel = make([]options.CompressionType, 7)
+	stats := new(y.CompactionStats)
+	discardStats := new(DiscardStats)
+	newFilenames, err := CompactTables(cd, stats, discardStats)
+	if err != nil {
+		return err
+	}
+	for _, t := range cd.Top {
+		t.Close()
+	}
+	for _, t := range cd.Bot {
+		t.Close()
+	}
+	defer c.removeFiles(newFilenames)
+
+	var newFiles []*os.File
+	for _, newFileName := range newFilenames {
+		file, err := os.Open(newFileName)
+		if err != nil {
+			return err
+		}
+		newFiles = append(newFiles, file)
+		idxFile, err := os.Open(sstable.IndexFilename(newFileName))
+		if err != nil {
+			return err
+		}
+		newFiles = append(newFiles, idxFile)
+	}
+	resp := new(CompactionResp)
+	resp.Stats = stats
+	resp.NumSkip = discardStats.numSkips
+	resp.SkipBytes = discardStats.skippedBytes
+	c.sendResponse(conn, newFiles, resp)
+	return nil
+}
+
+func (c *CompactionServer) allocFileID() uint64 {
+	return atomic.AddUint64(&c.fid, 1)
+}
+
+func (c *CompactionServer) removeFiles(filenames []string) {
+	for _, filename := range filenames {
+		os.Remove(filename)
+		os.Remove(sstable.IndexFilename(filename))
+	}
+}
+
+func (c *CompactionServer) sendResponse(conn net.Conn, newFiles []*os.File, resp *CompactionResp) {
+	for _, file := range newFiles {
+		fi, err := file.Stat()
+		if err != nil {
+			log.S().Error(err)
+			c.sendError(conn, err)
+		}
+		resp.FileSizes = append(resp.FileSizes, fi.Size())
+	}
+	err := writeJSON(conn, resp)
+	if err != nil {
+		log.S().Error(err)
+	}
+	for _, file := range newFiles {
+		_, err = io.Copy(conn, file)
+		if err != nil {
+			log.S().Error(err)
+		}
+	}
+}
+
+func (c *CompactionServer) sendError(conn net.Conn, err error) error {
+	resp := &CompactionResp{Error: err.Error()}
+	return writeJSON(conn, resp)
+}
+
+func readJSON(conn net.Conn, v interface{}) error {
+	metaSizeBuf := make([]byte, 4)
+	_, err := io.ReadFull(conn, metaSizeBuf)
+	if err != nil {
+		return err
+	}
+	metabuf := make([]byte, binary.BigEndian.Uint32(metaSizeBuf))
+	_, err = io.ReadFull(conn, metabuf)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(metabuf, v)
+}
+
+func writeJSON(conn net.Conn, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	sizeBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(sizeBuf, uint32(len(data)))
+	_, err = conn.Write(sizeBuf)
+	if err != nil {
+		return err
+	}
+	_, err = conn.Write(data)
+	return err
+}
+
+func readFile(conn net.Conn, fileName string, fileSize int64) error {
+	reader := io.LimitReader(conn, fileSize)
+	file, err := os.Create(fileName)
+	if err != nil {
+		log.S().Error(err)
+		return err
+	}
+	defer file.Close()
+	_, err = io.Copy(file, reader)
+	if err != nil {
+		log.S().Error(err)
+	}
+	return err
 }

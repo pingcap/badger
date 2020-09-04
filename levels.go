@@ -377,7 +377,10 @@ func (lc *levelsController) prepareCompactionDef(cd *CompactDef) {
 }
 
 func (lc *levelsController) getCompactor(cd *CompactDef) compactor {
-	return &localCompactor{}
+	if len(cd.SkippedTbls) > 0 || lc.kv.opt.RemoteCompactionAddr == "" || lc.kv.opt.ValueThreshold > 0 {
+		return &localCompactor{}
+	}
+	return &remoteCompactor{remoteAddr: lc.kv.opt.RemoteCompactionAddr}
 }
 
 // compactBuildTables merge topTables and botTables to form a list of new tables.

@@ -1810,3 +1810,61 @@ func ExampleTxn_NewIterator() {
 	// Output:
 	// Counted 1000 elements
 }
+
+func TestRemoteCompaction(t *testing.T) {
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+
+	remoteDir, err := ioutil.TempDir("", "badger_remote")
+	require.NoError(t, err)
+	defer os.RemoveAll(remoteDir)
+	remoteAddr := "127.0.0.1:4080"
+	compactionServer, err := NewCompactionServer(remoteAddr, remoteDir)
+	require.NoError(t, err)
+	go compactionServer.Run()
+	defer compactionServer.Close()
+	opts := getTestOptions(dir)
+	opts.ValueThreshold = 0
+	opts.RemoteCompactionAddr = remoteAddr
+	opts.MaxTableSize = 32 * 1024
+	opts.MaxMemTableSize = 32 * 1024
+	opts.NumMemtables = 2
+	opts.NumLevelZeroTables = 1
+	opts.NumLevelZeroTablesStall = 2
+	// This case depend on level's size, so disable compression for now.
+	opts.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.None)
+	db, err := Open(opts)
+	require.NoError(t, err)
+	defer db.Close()
+	for i := 0; i < 128; i++ {
+		err = db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%03d", i))
+			val := make([]byte, 1024)
+			copy(val, key)
+			return txn.Set(key, val)
+		})
+		require.NoError(t, err)
+	}
+
+	for i := 0; i < 512; i++ {
+		err = db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%03d", rand.Intn(128)))
+			val := make([]byte, 1024*4)
+			copy(val, key)
+			return txn.Set(key, val)
+		})
+		require.NoError(t, err)
+	}
+	err = db.View(func(txn *Txn) error {
+		it := txn.NewIterator(DefaultIteratorOptions)
+		defer it.Close()
+		var i int
+		for it.Rewind(); it.Valid(); it.Next() {
+			require.EqualValues(t, string(it.Item().Key()), fmt.Sprintf("key%03d", i))
+			require.True(t, bytes.HasPrefix(it.Item().vptr, it.Item().Key()))
+			i++
+		}
+		return nil
+	})
+}

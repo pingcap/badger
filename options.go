@@ -108,6 +108,8 @@ type Options struct {
 	CompactionFilterFactory func(targetLevel int, smallest, biggest []byte) CompactionFilter
 
 	CompactL0WhenClose bool
+
+	RemoteCompactionAddr string
 }
 
 // CompactionFilter is an interface that user can implement to remove certain keys.
