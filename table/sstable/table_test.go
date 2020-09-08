@@ -56,6 +56,7 @@ var defaultBuilderOpt = options.TableBuilderOptions{
 	MaxLevels:           1,
 	LevelSizeMultiplier: 10,
 	LogicalBloomFPR:     0.01,
+	MaxTableSize:        32 * 1024,
 }
 
 func testCache() *cache.Cache {

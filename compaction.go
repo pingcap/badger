@@ -25,7 +25,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"sync/atomic"
 
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/table"
@@ -523,14 +522,14 @@ type CompactionResp struct {
 	SkipBytes int64              `json:"skip_bytes"`
 }
 
-func (rc *remoteCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]string, error) {
+func (rc *remoteCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
 	defer rc.cleanup()
 	rc.req = &CompactionReq{
 		Level:        cd.Level,
 		Overlap:      cd.HasOverlap,
 		NumTop:       len(cd.Top),
 		SafeTS:       cd.SafeTS,
-		MaxTableSize: cd.MaxTblSize,
+		MaxTableSize: cd.Opt.MaxTableSize,
 	}
 	err := rc.appendFiles(cd.Top)
 	if err != nil {
@@ -563,7 +562,7 @@ func (rc *remoteCompactor) compact(cd *CompactDef, stats *y.CompactionStats, dis
 	*stats = *resp.Stats
 	discardStats.numSkips = resp.NumSkip
 	discardStats.skippedBytes = resp.SkipBytes
-	var newFileNames []string
+	var newFileNames []*sstable.BuildResult
 	for i := 0; i < len(resp.FileSizes); i += 2 {
 		fileID := cd.AllocIDFunc()
 		filename := sstable.NewFilename(fileID, cd.Dir)
@@ -575,7 +574,7 @@ func (rc *remoteCompactor) compact(cd *CompactDef, stats *y.CompactionStats, dis
 		if err != nil {
 			return nil, err
 		}
-		newFileNames = append(newFileNames, filename)
+		newFileNames = append(newFileNames, &sstable.BuildResult{FileName: filename})
 	}
 	return newFileNames, nil
 }
@@ -617,19 +616,16 @@ func (rc *remoteCompactor) cleanup() {
 }
 
 type CompactionServer struct {
-	dataPath string
-	fid      uint64
-	l        net.Listener
+	l net.Listener
 }
 
-func NewCompactionServer(addr, dataPath string) (*CompactionServer, error) {
+func NewCompactionServer(addr string) (*CompactionServer, error) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	return &CompactionServer{
-		dataPath: dataPath,
-		l:        l,
+		l: l,
 	}, nil
 }
 
@@ -660,28 +656,25 @@ func (c *CompactionServer) handleConn(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	var recvFiles []string
+	var recvFiles []*sstable.BuildResult
 	for i := 0; i < len(req.FileSizes); i += 2 {
-		dataSize := req.FileSizes[i]
-		fid := c.allocFileID()
-		fileName := sstable.NewFilename(fid, c.dataPath)
-		err = readFile(conn, fileName, dataSize)
+		result := new(sstable.BuildResult)
+		result.FileData = make([]byte, req.FileSizes[i])
+		result.IndexData = make([]byte, req.FileSizes[i+1])
+		_, err = io.ReadFull(conn, result.FileData)
 		if err != nil {
 			return err
 		}
-		recvFiles = append(recvFiles, fileName)
-		idxSize := req.FileSizes[i+1]
-		idxFileName := sstable.IndexFilename(fileName)
-		err = readFile(conn, idxFileName, idxSize)
+		_, err = io.ReadFull(conn, result.IndexData)
 		if err != nil {
 			return err
 		}
+		recvFiles = append(recvFiles, result)
 	}
-	defer c.removeFiles(recvFiles)
 	cd := new(CompactDef)
 	cd.HasOverlap = req.Overlap
-	for i, fileName := range recvFiles {
-		t, err := sstable.OpenTable(fileName, nil, nil)
+	for i, result := range recvFiles {
+		t, err := sstable.OpenInMemoryTable(result.FileData, result.IndexData)
 		if err != nil {
 			return err
 		}
@@ -692,12 +685,11 @@ func (c *CompactionServer) handleConn(conn net.Conn) error {
 		}
 	}
 	cd.Level = req.Level
-	cd.MaxTblSize = 16 * 1024 * 1024
-	cd.AllocIDFunc = c.allocFileID
-	cd.Dir = c.dataPath
+	cd.Opt.MaxTableSize = req.MaxTableSize
 	cd.SafeTS = req.SafeTS
 	cd.Opt = DefaultOptions.TableBuilderOptions
 	cd.Opt.CompressionPerLevel = make([]options.CompressionType, 7)
+	cd.InMemory = true
 	stats := new(y.CompactionStats)
 	discardStats := new(DiscardStats)
 	newFilenames, err := CompactTables(cd, stats, discardStats)
@@ -710,55 +702,29 @@ func (c *CompactionServer) handleConn(conn net.Conn) error {
 	for _, t := range cd.Bot {
 		t.Close()
 	}
-	defer c.removeFiles(newFilenames)
-
-	var newFiles []*os.File
-	for _, newFileName := range newFilenames {
-		file, err := os.Open(newFileName)
-		if err != nil {
-			return err
-		}
-		newFiles = append(newFiles, file)
-		idxFile, err := os.Open(sstable.IndexFilename(newFileName))
-		if err != nil {
-			return err
-		}
-		newFiles = append(newFiles, idxFile)
-	}
 	resp := new(CompactionResp)
 	resp.Stats = stats
 	resp.NumSkip = discardStats.numSkips
 	resp.SkipBytes = discardStats.skippedBytes
-	c.sendResponse(conn, newFiles, resp)
+	c.sendResponse(conn, newFilenames, resp)
 	return nil
 }
 
-func (c *CompactionServer) allocFileID() uint64 {
-	return atomic.AddUint64(&c.fid, 1)
-}
-
-func (c *CompactionServer) removeFiles(filenames []string) {
-	for _, filename := range filenames {
-		os.Remove(filename)
-		os.Remove(sstable.IndexFilename(filename))
-	}
-}
-
-func (c *CompactionServer) sendResponse(conn net.Conn, newFiles []*os.File, resp *CompactionResp) {
+func (c *CompactionServer) sendResponse(conn net.Conn, newFiles []*sstable.BuildResult, resp *CompactionResp) {
 	for _, file := range newFiles {
-		fi, err := file.Stat()
-		if err != nil {
-			log.S().Error(err)
-			c.sendError(conn, err)
-		}
-		resp.FileSizes = append(resp.FileSizes, fi.Size())
+		resp.FileSizes = append(resp.FileSizes, int64(len(file.FileData)), int64(len(file.IndexData)))
 	}
 	err := writeJSON(conn, resp)
 	if err != nil {
 		log.S().Error(err)
 	}
 	for _, file := range newFiles {
-		_, err = io.Copy(conn, file)
+		_, err = conn.Write(file.FileData)
+		if err != nil {
+			log.S().Error(err)
+			break
+		}
+		_, err = conn.Write(file.IndexData)
 		if err != nil {
 			log.S().Error(err)
 		}

@@ -159,7 +159,7 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 	if f != nil {
 		b.w = fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter)
 	} else {
-		b.w = &inMemWriter{Buffer: bytes.NewBuffer(make([]byte, opt.MaxTableSize))}
+		b.w = &inMemWriter{Buffer: bytes.NewBuffer(make([]byte, 0, opt.MaxTableSize))}
 	}
 	return b
 }

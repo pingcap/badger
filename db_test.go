@@ -1816,19 +1816,15 @@ func TestRemoteCompaction(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
-
-	remoteDir, err := ioutil.TempDir("", "badger_remote")
-	require.NoError(t, err)
-	defer os.RemoveAll(remoteDir)
 	remoteAddr := "127.0.0.1:4080"
-	compactionServer, err := NewCompactionServer(remoteAddr, remoteDir)
+	compactionServer, err := NewCompactionServer(remoteAddr)
 	require.NoError(t, err)
 	go compactionServer.Run()
 	defer compactionServer.Close()
 	opts := getTestOptions(dir)
 	opts.ValueThreshold = 0
 	opts.RemoteCompactionAddr = remoteAddr
-	opts.MaxTableSize = 32 * 1024
+	opts.TableBuilderOptions.MaxTableSize = 32 * 1024
 	opts.MaxMemTableSize = 32 * 1024
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
