@@ -289,7 +289,7 @@ func Open(opt Options) (db *DB, err error) {
 			return nil, errors.Wrap(err, "failed to create block cache")
 		}
 
-		indexSizeHint := float64(opt.MaxTableSize) / 6.0
+		indexSizeHint := float64(opt.TableBuilderOptions.MaxTableSize) / 6.0
 		idxCache, err = cache.NewCache(&cache.Config{
 			NumCounters: int64(float64(opt.MaxIndexCacheSize) / indexSizeHint * 10),
 			MaxCost:     opt.MaxIndexCacheSize,
@@ -860,7 +860,7 @@ func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
 			value.Meta |= bitValuePointer
 			value.Value = bp
 		}
-		if err := b.Add(key, value); err != nil {
+		if err = b.Add(key, value); err != nil {
 			return err
 		}
 		numWrite++
@@ -872,7 +872,7 @@ func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
 	}
 	db.lc.levels[0].metrics.UpdateCompactionStats(stats)
 
-	if err := b.Finish(); err != nil {
+	if _, err = b.Finish(); err != nil {
 		return y.Wrap(err)
 	}
 	if bb != nil {

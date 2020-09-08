@@ -50,9 +50,9 @@ func getTestCompression(tp options.CompressionType) []options.CompressionType {
 
 func getTestOptions(dir string) Options {
 	opt := DefaultOptions
-	opt.MaxTableSize = 4 << 15    // Force more compaction.
-	opt.MaxMemTableSize = 4 << 15 // Force more compaction.
-	opt.LevelOneSize = 4 << 15    // Force more compaction.
+	opt.TableBuilderOptions.MaxTableSize = 4 << 15 // Force more compaction.
+	opt.MaxMemTableSize = 4 << 15                  // Force more compaction.
+	opt.LevelOneSize = 4 << 15                     // Force more compaction.
 	opt.Dir = dir
 	opt.ValueDir = dir
 	opt.SyncWrites = false
@@ -1161,7 +1161,7 @@ func TestCompactionFilter(t *testing.T) {
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
 	opts.ValueThreshold = 8 * 1024
-	opts.MaxTableSize = 32 * 1024
+	opts.TableBuilderOptions.MaxTableSize = 32 * 1024
 	opts.MaxMemTableSize = 32 * 1024
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
@@ -1298,7 +1298,7 @@ func TestIterateVLog(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
-	opts.MaxTableSize = 1 << 20
+	opts.TableBuilderOptions.MaxTableSize = 1 << 20
 	opts.MaxMemTableSize = 1 << 20
 	opts.ValueLogFileSize = 1 << 20
 	opts.ValueThreshold = 1000
@@ -1405,7 +1405,8 @@ func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
 		err := builder.Add(y.KeyWithTs(k, 0), y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})
 		require.NoError(t, err)
 	}
-	require.NoError(t, builder.Finish())
+	_, err = builder.Finish()
+	require.NoError(t, err)
 	return f
 }
 

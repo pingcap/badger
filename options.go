@@ -47,7 +47,6 @@ type Options struct {
 	// ----------------------------------------
 	// The following affect all levels of LSM tree.
 	MaxMemTableSize int64 // Each mem table is at most this size.
-	MaxTableSize    int64 // Each table file is at most this size.
 	// If value size >= this threshold, only store value offsets in tree.
 	// If set to 0, all values are stored in SST.
 	ValueThreshold int
@@ -148,7 +147,6 @@ var DefaultOptions = Options{
 	DoNotCompact:            false,
 	LevelOneSize:            256 << 20,
 	MaxMemTableSize:         64 << 20,
-	MaxTableSize:            8 << 20,
 	NumCompactors:           3,
 	NumLevelZeroTables:      5,
 	NumLevelZeroTablesStall: 10,
@@ -162,6 +160,7 @@ var DefaultOptions = Options{
 	MaxBlockCacheSize:       1 << 30,
 	MaxIndexCacheSize:       1 << 30,
 	TableBuilderOptions: options.TableBuilderOptions{
+		MaxTableSize:        8 << 20,
 		SuRFStartLevel:      8,
 		HashUtilRatio:       0.75,
 		WriteBufferSize:     2 * 1024 * 1024,

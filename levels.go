@@ -365,7 +365,6 @@ func (lc *levelsController) prepareCompactionDef(cd *CompactDef) {
 	// readTs. We should never discard any versions starting from above this timestamp, because that
 	// would affect the snapshot view guarantee provided by transactions.
 	cd.SafeTS = lc.kv.getCompactSafeTs()
-	cd.MaxTblSize = lc.kv.opt.MaxTableSize
 	if lc.kv.opt.CompactionFilterFactory != nil {
 		cd.Filter = lc.kv.opt.CompactionFilterFactory(cd.Level+1, cd.smallest().UserKey, cd.biggest().UserKey)
 		cd.Guards = cd.Filter.Guards()
@@ -388,11 +387,11 @@ func (lc *levelsController) compactBuildTables(cd *CompactDef) (newTables []tabl
 	lc.prepareCompactionDef(cd)
 	stats := &y.CompactionStats{}
 	discardStats := &DiscardStats{}
-	newTblFileNames, err := lc.getCompactor(cd).compact(cd, stats, discardStats)
+	buildResults, err := lc.getCompactor(cd).compact(cd, stats, discardStats)
 	if err != nil {
 		return nil, err
 	}
-	newTables, err = lc.openTables(newTblFileNames)
+	newTables, err = lc.openTables(buildResults)
 	if err != nil {
 		return nil, err
 	}
@@ -401,8 +400,8 @@ func (lc *levelsController) compactBuildTables(cd *CompactDef) (newTables []tabl
 }
 
 // CompactTables compacts tables in CompactDef and returns the file names.
-func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]string, error) {
-	var newTblFileNames []string
+func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
+	var buildResults []*sstable.BuildResult
 	it := cd.buildIterator()
 
 	skippedTbls := cd.SkippedTbls
@@ -411,12 +410,15 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 	var lastKey, skipKey y.Key
 	var builder *sstable.Builder
 	for it.Valid() {
-		fileID := cd.AllocIDFunc()
-		filename := sstable.NewFilename(fileID, cd.Dir)
 		var fd *os.File
-		fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
-		if err != nil {
-			return nil, err
+		if !cd.InMemory {
+			fileID := cd.AllocIDFunc()
+			filename := sstable.NewFilename(fileID, cd.Dir)
+			var err error
+			fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if builder == nil {
 			builder = sstable.NewTableBuilder(fd, cd.Limiter, cd.Level+1, cd.Opt)
@@ -451,7 +453,7 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 						break
 					}
 				}
-				if shouldFinishFile(key, lastKey, guard, int64(builder.EstimateSize()), cd.MaxTblSize) {
+				if shouldFinishFile(key, lastKey, guard, int64(builder.EstimateSize()+kvSize), cd.Opt.MaxTableSize) {
 					break
 				}
 				if len(splitHints) != 0 && key.Compare(splitHints[0]) >= 0 {
@@ -500,19 +502,20 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 		if builder.Empty() {
 			continue
 		}
-		if err = builder.Finish(); err != nil {
+		result, err := builder.Finish()
+		if err != nil {
 			return nil, err
 		}
 		fd.Close()
-		newTblFileNames = append(newTblFileNames, filename)
+		buildResults = append(buildResults, result)
 	}
-	return newTblFileNames, nil
+	return buildResults, nil
 }
 
-func (lc *levelsController) openTables(newTblFileNames []string) (newTables []table.Table, err error) {
-	for _, filename := range newTblFileNames {
+func (lc *levelsController) openTables(buildResults []*sstable.BuildResult) (newTables []table.Table, err error) {
+	for _, result := range buildResults {
 		var tbl table.Table
-		tbl, err = sstable.OpenTable(filename, lc.kv.blockCache, lc.kv.indexCache)
+		tbl, err = sstable.OpenTable(result.FileName, lc.kv.blockCache, lc.kv.indexCache)
 		if err != nil {
 			return
 		}
