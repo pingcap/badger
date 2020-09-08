@@ -227,12 +227,12 @@ type CompactDef struct {
 	SafeTS      uint64
 	Guards      []Guard
 	Filter      CompactionFilter
-	MaxTblSize  int64
 	HasOverlap  bool
 	Opt         options.TableBuilderOptions
 	Dir         string
 	AllocIDFunc func() uint64
 	Limiter     *rate.Limiter
+	InMemory    bool
 
 	splitHints []y.Key
 
@@ -490,13 +490,13 @@ func (cd *CompactDef) buildIterator() y.Iterator {
 }
 
 type compactor interface {
-	compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]string, error)
+	compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error)
 }
 
 type localCompactor struct {
 }
 
-func (c *localCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]string, error) {
+func (c *localCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
 	return CompactTables(cd, stats, discardStats)
 }
 

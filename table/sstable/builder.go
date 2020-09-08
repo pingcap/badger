@@ -80,8 +80,8 @@ const headerSize = 4
 type Builder struct {
 	counter int // Number of keys written for the current block.
 
-	idxFileName   string
-	w             *fileutil.DirectWriter
+	file          *os.File
+	w             tableWriter
 	buf           []byte
 	writtenLen    int
 	rawWrittenLen int
@@ -115,16 +115,38 @@ type Builder struct {
 	oldBlock         []byte
 }
 
+type tableWriter interface {
+	Reset(f *os.File)
+	Write(b []byte) (int, error)
+	Offset() int64
+	Finish() error
+}
+
+type inMemWriter struct {
+	*bytes.Buffer
+}
+
+func (w *inMemWriter) Reset(_ *os.File) {
+	w.Buffer.Reset()
+}
+
+func (w *inMemWriter) Offset() int64 {
+	return int64(w.Len())
+}
+
+func (w *inMemWriter) Finish() error {
+	return nil
+}
+
 // NewTableBuilder makes a new TableBuilder.
+// If the f is nil, the builder builds in-memory result.
 // If the limiter is nil, the write speed during table build will not be limited.
 func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.TableBuilderOptions) *Builder {
 	t := float64(opt.LevelSizeMultiplier)
 	fprBase := math.Pow(t, 1/(t-1)) * opt.LogicalBloomFPR * (t - 1)
 	levelFactor := math.Pow(t, float64(opt.MaxLevels-level))
-
-	return &Builder{
-		idxFileName: f.Name() + idxFileSuffix,
-		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
+	b := &Builder{
+		file:        f,
 		buf:         make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    fprBase / levelFactor,
@@ -134,11 +156,17 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		// add one byte so the offset would never be 0, so oldOffset is 0 means no old version.
 		oldBlock: []byte{0},
 	}
+	if f != nil {
+		b.w = fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter)
+	} else {
+		b.w = &inMemWriter{Buffer: bytes.NewBuffer(make([]byte, opt.MaxTableSize))}
+	}
+	return b
 }
 
 func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions, compression options.CompressionType) *Builder {
 	return &Builder{
-		idxFileName: f.Name() + idxFileSuffix,
+		file:        f,
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
@@ -151,9 +179,9 @@ func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.Tabl
 
 // Reset this builder with new file.
 func (b *Builder) Reset(f *os.File) {
+	b.file = f
 	b.resetBuffers()
 	b.w.Reset(f)
-	b.idxFileName = f.Name() + idxFileSuffix
 }
 
 // SetIsManaged should be called when ingesting a table into a managed DB.
@@ -367,26 +395,41 @@ const (
 	idOldBlockLen
 )
 
+// BuildResult contains the build result info, if it's file based compaction, fileName should be used to open Table.
+// If it's in memory compaction, FileData and IndexData contains the data.
+type BuildResult struct {
+	FileName  string
+	FileData  []byte
+	IndexData []byte
+}
+
 // Finish finishes the table by appending the index.
-func (b *Builder) Finish() error {
+func (b *Builder) Finish() (*BuildResult, error) {
 	err := b.finishBlock() // This will never start a new block.
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(b.oldBlock) > 1 {
-		err = b.w.Append(b.oldBlock)
+		_, err = b.w.Write(b.oldBlock)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err = b.w.Finish(); err != nil {
-		return err
+		return nil, err
 	}
-	idxFile, err := y.OpenTruncFile(b.idxFileName, false)
-	if err != nil {
-		return err
+	result := new(BuildResult)
+	if b.file != nil {
+		idxFile, err := y.OpenTruncFile(IndexFilename(b.file.Name()), false)
+		if err != nil {
+			return nil, err
+		}
+		result.FileName = b.file.Name()
+		b.w.Reset(idxFile)
+	} else {
+		result.FileData = y.Copy(b.w.(*inMemWriter).Bytes())
+		b.w.Reset(nil)
 	}
-	b.w.Reset(idxFile)
 
 	// Don't compress the global ts, because it may be updated during ingest.
 	ts := uint64(0)
@@ -431,11 +474,17 @@ func (b *Builder) Finish() error {
 	}
 	encoder.append(surfIndex, idSuRFIndex)
 
-	if err := encoder.finish(b.w); err != nil {
-		return err
+	if err = encoder.finish(b.w); err != nil {
+		return nil, err
 	}
 
-	return b.w.Finish()
+	if err = b.w.Finish(); err != nil {
+		return nil, err
+	}
+	if b.file == nil {
+		result.IndexData = y.Copy(b.w.(*inMemWriter).Bytes())
+	}
+	return result, nil
 }
 
 func appendU16(buf []byte, v uint16) []byte {
@@ -506,12 +555,13 @@ func (e *metaEncoder) append(d []byte, id byte) {
 	e.buf = append(e.buf, d...)
 }
 
-func (e *metaEncoder) finish(w *fileutil.DirectWriter) error {
+func (e *metaEncoder) finish(w tableWriter) error {
 	if e.compression == options.None {
-		return w.Append(e.buf)
+		_, err := w.Write(e.buf)
+		return err
 	}
 
-	if err := w.Append(e.buf[:9]); err != nil {
+	if _, err := w.Write(e.buf[:9]); err != nil {
 		return err
 	}
 	return e.compression.Compress(w, e.buf[9:])

@@ -98,6 +98,7 @@ type TableBuilderOptions struct {
 	CompressionPerLevel []CompressionType
 	SuRFStartLevel      int
 	SuRFOptions         SuRFOptions
+	MaxTableSize        int64
 }
 
 type SuRFOptions struct {

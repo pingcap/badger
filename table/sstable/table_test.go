@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
@@ -101,7 +102,8 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 			y.Check(err)
 		}
 	}
-	y.Check(b.Finish())
+	_, err := b.Finish()
+	y.Check(err)
 	y.Check(f.Close())
 	f, _ = y.OpenSyncedFile(f.Name(), true)
 	return f
@@ -139,7 +141,8 @@ func buildMultiVersionTable(keyValues [][]string) (*os.File, int) {
 			}
 		}
 	}
-	y.Check(b.Finish())
+	_, err := b.Finish()
+	y.Check(err)
 	y.Check(f.Close())
 	f, _ = y.OpenSyncedFile(f.Name(), true)
 	return f, allCnt
@@ -185,7 +188,8 @@ func TestHashIndexTS(t *testing.T) {
 	for _, k := range keys {
 		b.Add(k, y.ValueStruct{Value: k.UserKey, Meta: 'A', UserMeta: []byte{0}})
 	}
-	y.Check(b.Finish())
+	_, err = b.Finish()
+	y.Check(err)
 	f.Close()
 	table, err := OpenTable(filename, testCache(), testCache())
 	keyHash := farm.Fingerprint64([]byte("key"))
@@ -262,7 +266,8 @@ func TestExternalTable(t *testing.T) {
 			y.Check(err)
 		}
 	}
-	y.Check(b.Finish())
+	_, err = b.Finish()
+	y.Check(err)
 	f.Close()
 	table, err := OpenTable(filename, testCache(), testCache())
 	require.NoError(t, err)
@@ -891,7 +896,8 @@ func TestSeekInvalidIssue(t *testing.T) {
 			y.Check(err)
 		}
 	}
-	y.Check(b.Finish())
+	_, err := b.Finish()
+	y.Check(err)
 	y.Check(f.Close())
 	f, _ = y.OpenSyncedFile(f.Name(), true)
 	t1, err := OpenTable(f.Name(), nil, nil)
@@ -911,6 +917,60 @@ func TestSeekInvalidIssue(t *testing.T) {
 	}
 }
 
+func TestOpenImMemoryTable(t *testing.T) {
+	file := buildTestTable(t, "in-mem", 1000)
+	blockData, err := ioutil.ReadFile(file.Name())
+	require.Nil(t, err)
+	idxData, err := ioutil.ReadFile(IndexFilename(file.Name()))
+	require.Nil(t, err)
+	inMemTbl, err := OpenInMemoryTable(blockData, idxData)
+	require.Nil(t, err)
+	fileTable, err := OpenTable(file.Name(), nil, nil)
+	require.Nil(t, err)
+	inMemIt := inMemTbl.NewIterator(false)
+	inMemIt.Rewind()
+	fileIt := fileTable.NewIterator(false)
+	fileIt.Rewind()
+	for ; fileIt.Valid(); fileIt.Next() {
+		if fileIt.Valid() {
+			require.True(t, inMemIt.Valid())
+			require.EqualValues(t, fileIt.Key(), inMemIt.Key())
+			require.EqualValues(t, fileIt.Value(), inMemIt.Value())
+		}
+		inMemIt.Next()
+	}
+}
+
+func TestBuildImMemoryTable(t *testing.T) {
+	b := NewTableBuilder(nil, nil, 0, defaultBuilderOpt)
+	keyValues := generateKeyValues("in-mem", 1000)
+	sort.Slice(keyValues, func(i, j int) bool {
+		return keyValues[i][0] < keyValues[j][0]
+	})
+	for _, kv := range keyValues {
+		y.Assert(len(kv) == 2)
+		err := b.Add(y.KeyWithTs([]byte(kv[0]), 0), y.ValueStruct{Value: []byte(kv[1]), Meta: 'A', UserMeta: []byte{0}})
+		if t != nil {
+			require.NoError(t, err)
+		} else {
+			y.Check(err)
+		}
+	}
+	result, err := b.Finish()
+	y.Check(err)
+	require.NotNil(t, result.FileData)
+	require.NotNil(t, result.IndexData)
+	tbl, err := OpenInMemoryTable(result.FileData, result.IndexData)
+	y.Check(err)
+	for _, kv := range keyValues {
+		key := y.KeyWithTs([]byte(kv[0]), 0)
+		keyHash := farm.Fingerprint64(key.UserKey)
+		v, err := tbl.Get(key, keyHash)
+		require.Nil(t, err)
+		require.EqualValues(t, v.Value, []byte(kv[1]))
+	}
+}
+
 func BenchmarkRead(b *testing.B) {
 	n := 5 << 20
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
@@ -922,8 +982,8 @@ func BenchmarkRead(b *testing.B) {
 		v := fmt.Sprintf("%d", i)
 		y.Check(builder.Add(y.KeyWithTs([]byte(k), 0), y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 	}
-
-	y.Check(builder.Finish())
+	_, err = builder.Finish()
+	y.Check(err)
 	tbl, err := OpenTable(f.Name(), testCache(), testCache())
 	y.Check(err)
 	defer tbl.Delete()
@@ -963,7 +1023,8 @@ func BenchmarkBuildTable(b *testing.B) {
 				for i := 0; i < n; i++ {
 					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
-				y.Check(builder.Finish())
+				_, err = builder.Finish()
+				y.Check(err)
 				_, err := f.Seek(0, io.SeekStart)
 				y.Check(err)
 			}
@@ -978,7 +1039,8 @@ func BenchmarkBuildTable(b *testing.B) {
 				for i := 0; i < n; i++ {
 					y.Check(builder.Add(kvs[i].k, y.ValueStruct{Value: kvs[i].v, Meta: 123, UserMeta: []byte{0}}))
 				}
-				y.Check(builder.Finish())
+				_, err = builder.Finish()
+				y.Check(err)
 				_, err := f.Seek(0, io.SeekStart)
 				y.Check(err)
 			}
@@ -1007,8 +1069,8 @@ func BenchmarkPointGet(b *testing.B) {
 			keys[i] = k
 			y.Check(builder.Add(k, y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
-
-		y.Check(builder.Finish())
+		_, err = builder.Finish()
+		y.Check(err)
 		tbl, err := OpenTable(filename, testCache(), testCache())
 		y.Check(err)
 		b.ResetTimer()
@@ -1078,8 +1140,8 @@ func BenchmarkReadAndBuild(b *testing.B) {
 		v := fmt.Sprintf("%d", i)
 		y.Check(builder.Add(k, y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 	}
-
-	y.Check(builder.Finish())
+	_, err = builder.Finish()
+	y.Check(err)
 	tbl, err := OpenTable(f.Name(), testCache(), testCache())
 	y.Check(err)
 	defer tbl.Delete()
@@ -1098,7 +1160,8 @@ func BenchmarkReadAndBuild(b *testing.B) {
 				vs := it.Value()
 				newBuilder.Add(it.Key(), vs)
 			}
-			y.Check(newBuilder.Finish())
+			_, err = newBuilder.Finish()
+			y.Check(err)
 			_, err := f.Seek(0, io.SeekStart)
 			y.Check(err)
 		}()
@@ -1124,7 +1187,8 @@ func BenchmarkReadMerged(b *testing.B) {
 			v := fmt.Sprintf("%d", id)
 			y.Check(builder.Add(k, y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))
 		}
-		y.Check(builder.Finish())
+		_, err = builder.Finish()
+		y.Check(err)
 		tbl, err := OpenTable(f.Name(), testCache(), testCache())
 		y.Check(err)
 		tables = append(tables, tbl)
@@ -1183,7 +1247,7 @@ func getTableForBenchmarks(b *testing.B, count int, blkCache, idxCache *cache.Ca
 		builder.Add(k, y.ValueStruct{Value: []byte(v)})
 	}
 
-	err = builder.Finish()
+	_, err = builder.Finish()
 	require.NoError(b, err, "unable to write to file")
 	tbl, err := OpenTable(f.Name(), blkCache, idxCache)
 	require.NoError(b, err, "unable to open table")

@@ -69,12 +69,12 @@ type Table struct {
 	id                uint64
 
 	blockCache *cache.Cache
-	blocksMmap []byte
+	blocksData []byte
 
 	indexCache *cache.Cache
 	index      *tableIndex
 	indexOnce  sync.Once
-	indexMmap  []byte
+	indexData  []byte
 
 	compacting int32
 
@@ -91,6 +91,11 @@ func (t *Table) CompressionType() options.CompressionType {
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
+	if t.fd == nil {
+		t.blocksData = nil
+		t.indexData = nil
+		return nil
+	}
 	if t.blockCache != nil {
 		for blk := 0; blk < t.numBlocks; blk++ {
 			t.blockCache.Del(t.blockCacheKey(blk))
@@ -99,12 +104,12 @@ func (t *Table) Delete() error {
 	if t.indexCache != nil {
 		t.indexCache.Del(t.id)
 	}
-	if len(t.blocksMmap) != 0 {
-		y.Munmap(t.blocksMmap)
+	if len(t.blocksData) != 0 {
+		y.Munmap(t.blocksData)
 	}
 	t.index = nil
-	if len(t.indexMmap) != 0 {
-		y.Munmap(t.indexMmap)
+	if len(t.indexData) != 0 {
+		y.Munmap(t.indexData)
 	}
 	if err := t.fd.Truncate(0); err != nil {
 		// This is very important to let the FS know that the file is deleted.
@@ -154,13 +159,30 @@ func OpenTable(filename string, blockCache *cache.Cache, indexCache *cache.Cache
 		return nil, err
 	}
 	if blockCache == nil || t.oldBlockLen > 0 {
-		t.blocksMmap, err = y.Mmap(fd, false, t.Size())
+		t.blocksData, err = y.Mmap(fd, false, t.Size())
 		if err != nil {
 			t.Close()
 			return nil, y.Wrapf(err, "Unable to map file")
 		}
-		t.oldBlock = t.blocksMmap[t.tableSize-t.oldBlockLen : t.tableSize]
+		t.setOldBlock()
 	}
+	return t, nil
+}
+
+func (t *Table) setOldBlock() {
+	t.oldBlock = t.blocksData[t.tableSize-t.oldBlockLen : t.tableSize]
+}
+
+// OpenInMemoryTable opens a table that has data in memory.
+func OpenInMemoryTable(blockData, indexData []byte) (*Table, error) {
+	t := &Table{
+		blocksData: blockData,
+		indexData:  indexData,
+	}
+	if err := t.initTableInfo(); err != nil {
+		return nil, err
+	}
+	t.setOldBlock()
 	return t, nil
 }
 
@@ -170,8 +192,8 @@ func (t *Table) Close() error {
 		t.fd.Close()
 	}
 	if t.indexFd != nil {
-		if len(t.indexMmap) != 0 {
-			y.Munmap(t.indexMmap)
+		if len(t.indexData) != 0 {
+			y.Munmap(t.indexData)
 		}
 		t.indexFd.Close()
 	}
@@ -251,11 +273,11 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 }
 
 func (t *Table) read(off int, sz int) ([]byte, error) {
-	if len(t.blocksMmap) > 0 {
-		if len(t.blocksMmap[off:]) < sz {
+	if len(t.blocksData) > 0 {
+		if len(t.blocksData[off:]) < sz {
 			return nil, y.ErrEOF
 		}
-		return t.blocksMmap[off : off+sz], nil
+		return t.blocksData[off : off+sz], nil
 	}
 	res := make([]byte, sz)
 	_, err := t.fd.ReadAt(res, int64(off))
@@ -351,6 +373,9 @@ func (t *Table) getIndex() (*tableIndex, error) {
 }
 
 func (t *Table) loadIndexData(useMmap bool) (*metaDecoder, error) {
+	if t.indexFd == nil {
+		return newMetaDecoder(t.indexData)
+	}
 	fstat, err := t.indexFd.Stat()
 	if err != nil {
 		return nil, err
@@ -362,7 +387,7 @@ func (t *Table) loadIndexData(useMmap bool) (*metaDecoder, error) {
 		if err != nil {
 			return nil, err
 		}
-		t.indexMmap = idxData
+		t.indexData = idxData
 	} else {
 		idxData = make([]byte, fstat.Size())
 		if _, err = t.indexFd.ReadAt(idxData, 0); err != nil {
@@ -376,7 +401,7 @@ func (t *Table) loadIndexData(useMmap bool) (*metaDecoder, error) {
 	}
 	if decoder.compression != options.None && useMmap {
 		y.Munmap(idxData)
-		t.indexMmap = nil
+		t.indexData = nil
 	}
 	return decoder, nil
 }
