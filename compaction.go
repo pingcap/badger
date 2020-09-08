@@ -559,6 +559,9 @@ func (rc *remoteCompactor) compact(cd *CompactDef, stats *y.CompactionStats, dis
 	if err != nil {
 		return nil, err
 	}
+	if len(resp.Error) > 0 {
+		return nil, fmt.Errorf("remote compaction error:%s", resp.Error)
+	}
 	*stats = *resp.Stats
 	discardStats.numSkips = resp.NumSkip
 	discardStats.skippedBytes = resp.SkipBytes
