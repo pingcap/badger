@@ -373,6 +373,16 @@ func (lc *levelsController) prepareCompactionDef(cd *CompactDef) {
 	cd.Dir = lc.kv.opt.Dir
 	cd.AllocIDFunc = lc.reserveFileID
 	cd.Limiter = lc.kv.limiter
+	for _, t := range cd.Top {
+		if sst, ok := t.(*sstable.Table); ok {
+			sst.PrepareForCompaction()
+		}
+	}
+	for _, t := range cd.Bot {
+		if sst, ok := t.(*sstable.Table); ok {
+			sst.PrepareForCompaction()
+		}
+	}
 }
 
 func (lc *levelsController) getCompactor(cd *CompactDef) compactor {

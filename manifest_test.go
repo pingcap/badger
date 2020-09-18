@@ -27,7 +27,6 @@ import (
 
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
-	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -148,7 +147,6 @@ func buildTable(t *testing.T, keyValues [][]string) *os.File {
 	})
 
 	opts := DefaultOptions.TableBuilderOptions
-	opts.CompressionPerLevel = getTestCompression(options.ZSTD)
 	b := sstable.NewTableBuilder(f, nil, 0, opts)
 	defer b.Close()
 	for _, kv := range keyValues {

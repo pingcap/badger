@@ -19,6 +19,7 @@ package sstable
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -32,10 +33,10 @@ import (
 	"github.com/coocood/bbloom"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/fileutil"
-	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/surf"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
 )
 
 const (
@@ -64,6 +65,7 @@ type Table struct {
 
 	globalTs          uint64
 	tableSize         int64
+	indexSize         int64
 	numBlocks         int
 	smallest, biggest y.Key
 	id                uint64
@@ -78,15 +80,9 @@ type Table struct {
 
 	compacting int32
 
-	compression options.CompressionType
-
 	oldBlockLen int64
 	oldBlock    []byte
-}
-
-// CompressionType returns the compression algorithm used for block compression.
-func (t *Table) CompressionType() options.CompressionType {
-	return t.compression
+	mmap        bool
 }
 
 // Delete delete table's file from disk.
@@ -104,11 +100,8 @@ func (t *Table) Delete() error {
 	if t.indexCache != nil {
 		t.indexCache.Del(t.id)
 	}
-	if len(t.blocksData) != 0 {
+	if t.mmap {
 		y.Munmap(t.blocksData)
-	}
-	t.index = nil
-	if len(t.indexData) != 0 {
 		y.Munmap(t.indexData)
 	}
 	if err := t.fd.Truncate(0); err != nil {
@@ -145,6 +138,10 @@ func OpenTable(filename string, blockCache *cache.Cache, indexCache *cache.Cache
 	if err != nil {
 		return nil, err
 	}
+	idxStat, err := indexFd.Stat()
+	if err != nil {
+		return nil, err
+	}
 
 	t := &Table{
 		fd:         fd,
@@ -152,25 +149,29 @@ func OpenTable(filename string, blockCache *cache.Cache, indexCache *cache.Cache
 		id:         id,
 		blockCache: blockCache,
 		indexCache: indexCache,
+		indexSize:  idxStat.Size(),
 	}
-
-	if err := t.initTableInfo(); err != nil {
+	if err := t.initTableInfo(nil); err != nil {
 		t.Close()
 		return nil, err
 	}
-	if blockCache == nil || t.oldBlockLen > 0 {
+	t.mmap = blockCache == nil || t.oldBlockLen > 0
+	if t.mmap {
 		t.blocksData, err = y.Mmap(fd, false, t.Size())
 		if err != nil {
 			t.Close()
 			return nil, y.Wrapf(err, "Unable to map file")
 		}
-		t.setOldBlock()
+		t.setOldBlock(t.blocksData)
+		t.indexData, err = y.Mmap(t.indexFd, false, t.indexSize)
+		t.index = newMetaDecoder(t.indexData).readTableIndex()
 	}
+
 	return t, nil
 }
 
-func (t *Table) setOldBlock() {
-	t.oldBlock = t.blocksData[t.tableSize-t.oldBlockLen : t.tableSize]
+func (t *Table) setOldBlock(blocksData []byte) {
+	t.oldBlock = blocksData[t.tableSize-t.oldBlockLen : t.tableSize]
 }
 
 // OpenInMemoryTable opens a table that has data in memory.
@@ -178,23 +179,25 @@ func OpenInMemoryTable(blockData, indexData []byte) (*Table, error) {
 	t := &Table{
 		blocksData: blockData,
 		indexData:  indexData,
+		index:      newMetaDecoder(indexData).readTableIndex(),
 	}
-	if err := t.initTableInfo(); err != nil {
+	if err := t.initTableInfo(indexData); err != nil {
 		return nil, err
 	}
-	t.setOldBlock()
+	t.setOldBlock(blockData)
 	return t, nil
 }
 
 // Close closes the open table.  (Releases resources back to the OS.)
 func (t *Table) Close() error {
+	if t.mmap {
+		y.Munmap(t.blocksData)
+		y.Munmap(t.indexData)
+	}
 	if t.fd != nil {
 		t.fd.Close()
 	}
 	if t.indexFd != nil {
-		if len(t.indexData) != 0 {
-			y.Munmap(t.indexData)
-		}
 		t.indexFd.Close()
 	}
 	return nil
@@ -284,13 +287,16 @@ func (t *Table) read(off int, sz int) ([]byte, error) {
 	return res, err
 }
 
-func (t *Table) initTableInfo() error {
-	d, err := t.loadIndexData(false)
-	if err != nil {
-		return err
+func (t *Table) initTableInfo(idxData []byte) error {
+	if idxData == nil {
+		var err error
+		idxData, err = t.loadIndexData()
+		if err != nil {
+			return err
+		}
 	}
 
-	t.compression = d.compression
+	d := newMetaDecoder(idxData)
 	t.globalTs = d.globalTS
 
 	for ; d.valid(); d.next() {
@@ -315,7 +321,7 @@ func (t *Table) initTableInfo() error {
 	return nil
 }
 
-func (t *Table) readTableIndex(d *metaDecoder) *tableIndex {
+func (d *metaDecoder) readTableIndex() *tableIndex {
 	idx := new(tableIndex)
 	for ; d.valid(); d.next() {
 		switch d.currentId() {
@@ -346,25 +352,16 @@ func (t *Table) readTableIndex(d *metaDecoder) *tableIndex {
 }
 
 func (t *Table) getIndex() (*tableIndex, error) {
-	if t.indexCache == nil {
-		var err error
-		t.indexOnce.Do(func() {
-			var d *metaDecoder
-			d, err = t.loadIndexData(true)
-			if err != nil {
-				return
-			}
-			t.index = t.readTableIndex(d)
-		})
+	if t.index != nil {
 		return t.index, nil
 	}
 
 	index, err := t.indexCache.GetOrCompute(t.id, func() (interface{}, int64, error) {
-		d, err := t.loadIndexData(false)
+		idxData, err := t.loadIndexData()
 		if err != nil {
 			return nil, 0, err
 		}
-		return t.readTableIndex(d), int64(len(d.buf)), nil
+		return newMetaDecoder(idxData).readTableIndex(), int64(len(idxData)), nil
 	})
 	if err != nil {
 		return nil, err
@@ -372,38 +369,32 @@ func (t *Table) getIndex() (*tableIndex, error) {
 	return index.(*tableIndex), nil
 }
 
-func (t *Table) loadIndexData(useMmap bool) (*metaDecoder, error) {
-	if t.indexFd == nil {
-		return newMetaDecoder(t.indexData)
-	}
-	fstat, err := t.indexFd.Stat()
-	if err != nil {
-		return nil, err
-	}
-	var idxData []byte
-
-	if useMmap {
-		idxData, err = y.Mmap(t.indexFd, false, fstat.Size())
+func (t *Table) PrepareForCompaction() {
+	if !t.mmap && t.indexFd != nil {
+		idxData, err := t.loadIndexData()
 		if err != nil {
-			return nil, err
+			log.S().Error(err)
+			return
+		}
+		var blocksData []byte
+		blocksData, err = ioutil.ReadFile(t.fd.Name())
+		if err != nil {
+			log.S().Error(err)
+			return
 		}
 		t.indexData = idxData
-	} else {
-		idxData = make([]byte, fstat.Size())
-		if _, err = t.indexFd.ReadAt(idxData, 0); err != nil {
-			return nil, err
-		}
+		t.index = newMetaDecoder(idxData).readTableIndex()
+		t.setOldBlock(blocksData)
+		t.blocksData = blocksData
 	}
+}
 
-	decoder, err := newMetaDecoder(idxData)
-	if err != nil {
+func (t *Table) loadIndexData() ([]byte, error) {
+	idxData := make([]byte, t.indexSize)
+	if _, err := t.indexFd.ReadAt(idxData, 0); err != nil {
 		return nil, err
 	}
-	if decoder.compression != options.None && useMmap {
-		y.Munmap(idxData)
-		t.indexData = nil
-	}
-	return decoder, nil
+	return idxData, nil
 }
 
 type block struct {
@@ -423,7 +414,7 @@ func (t *Table) block(idx int, index *tableIndex) (block, error) {
 		return block{}, io.EOF
 	}
 
-	if t.blockCache == nil {
+	if t.blockCache == nil || t.blocksData != nil {
 		return t.loadBlock(idx, index)
 	}
 
@@ -455,13 +446,6 @@ func (t *Table) loadBlock(idx int, index *tableIndex) (block, error) {
 	if blk.data, err = t.read(blk.offset, dataLen); err != nil {
 		return block{}, errors.Wrapf(err,
 			"failed to read from file: %s at offset: %d, len: %d", t.fd.Name(), blk.offset, dataLen)
-	}
-
-	blk.data, err = t.compression.Decompress(blk.data)
-	if err != nil {
-		return block{}, errors.Wrapf(err,
-			"failed to decode compressed data in file: %s at offset: %d, len: %d",
-			t.fd.Name(), blk.offset, dataLen)
 	}
 	blk.baseKey = index.baseKeys.getEntry(idx)
 	return blk, nil

@@ -256,7 +256,7 @@ func TestExternalTable(t *testing.T) {
 	}
 
 	n := 200
-	b := NewExternalTableBuilder(f, rate.NewLimiter(rate.Inf, math.MaxInt32), defaultBuilderOpt, compressionType)
+	b := NewExternalTableBuilder(f, rate.NewLimiter(rate.Inf, math.MaxInt32), defaultBuilderOpt)
 	kvs := generateKeyValues("key", n)
 	for _, kv := range kvs {
 		y.Assert(len(kv) == 2)

@@ -32,7 +32,6 @@ import (
 	"github.com/ncw/directio"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
-	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/memtable"
@@ -468,8 +467,8 @@ func isRangeCoversTable(start, end y.Key, t table.Table) bool {
 }
 
 // NewExternalTableBuilder returns a new sst builder.
-func (db *DB) NewExternalTableBuilder(f *os.File, compression options.CompressionType, limiter *rate.Limiter) *sstable.Builder {
-	return sstable.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions, compression)
+func (db *DB) NewExternalTableBuilder(f *os.File, limiter *rate.Limiter) *sstable.Builder {
+	return sstable.NewExternalTableBuilder(f, limiter, db.opt.TableBuilderOptions)
 }
 
 // ErrExternalTableOverlap returned by IngestExternalFiles when files overlaps.

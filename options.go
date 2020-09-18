@@ -170,8 +170,6 @@ var DefaultOptions = Options{
 		MaxLevels:           7,
 		LevelSizeMultiplier: 10,
 		BlockSize:           64 * 1024,
-		// TODO: use lz4 instead of snappy for better (de)compress performance.
-		CompressionPerLevel: []options.CompressionType{options.None, options.None, options.Snappy, options.Snappy, options.Snappy, options.ZSTD, options.ZSTD},
 		LogicalBloomFPR:     0.01,
 		SuRFOptions: options.SuRFOptions{
 			HashSuffixLen:  8,

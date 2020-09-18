@@ -32,21 +32,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/stretchr/testify/require"
 )
 
 var mmap = flag.Bool("vlog_mmap", true, "Specify if value log must be memory-mapped")
-
-func getTestCompression(tp options.CompressionType) []options.CompressionType {
-	tps := make([]options.CompressionType, DefaultOptions.TableBuilderOptions.MaxLevels)
-	for i := range tps {
-		tps[i] = tp
-	}
-	return tps
-}
 
 func getTestOptions(dir string) Options {
 	opt := DefaultOptions
@@ -56,7 +47,6 @@ func getTestOptions(dir string) Options {
 	opt.Dir = dir
 	opt.ValueDir = dir
 	opt.SyncWrites = false
-	opt.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.ZSTD)
 	return opt
 }
 
@@ -616,11 +606,6 @@ func TestLoad(t *testing.T) {
 
 	t.Run("Without compression", func(t *testing.T) {
 		opt := getTestOptions("")
-		opt.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.None)
-		testLoad(t, opt)
-	})
-	t.Run("With compression", func(t *testing.T) {
-		opt := getTestOptions("")
 		testLoad(t, opt)
 	})
 }
@@ -1169,8 +1154,6 @@ func TestCompactionFilter(t *testing.T) {
 	opts.CompactionFilterFactory = func(targetLevel int, smallest, biggest []byte) CompactionFilter {
 		return &testFilter{}
 	}
-	// This case depend on level's size, so disable compression for now.
-	opts.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.None)
 	db, err := Open(opts)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1399,7 +1382,7 @@ func buildSst(t *testing.T, keys [][]byte, vals [][]byte) *os.File {
 	filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Int63())
 	f, err := y.OpenSyncedFile(filename, true)
 	require.NoError(t, err)
-	builder := sstable.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions, options.ZSTD)
+	builder := sstable.NewExternalTableBuilder(f, nil, DefaultOptions.TableBuilderOptions)
 
 	for i, k := range keys {
 		err := builder.Add(y.KeyWithTs(k, 0), y.ValueStruct{Value: vals[i], Meta: 0, UserMeta: []byte{0}})
@@ -1829,8 +1812,6 @@ func TestRemoteCompaction(t *testing.T) {
 	opts.NumMemtables = 2
 	opts.NumLevelZeroTables = 1
 	opts.NumLevelZeroTablesStall = 2
-	// This case depend on level's size, so disable compression for now.
-	opts.TableBuilderOptions.CompressionPerLevel = getTestCompression(options.None)
 	db, err := Open(opts)
 	require.NoError(t, err)
 	defer db.Close()

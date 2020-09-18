@@ -85,7 +85,6 @@ type Builder struct {
 	buf           []byte
 	writtenLen    int
 	rawWrittenLen int
-	compression   options.CompressionType
 
 	baseKeys entrySlice
 
@@ -150,7 +149,6 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		buf:         make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    fprBase / levelFactor,
-		compression: opt.CompressionPerLevel[level],
 		opt:         opt,
 		useSuRF:     level >= opt.SuRFStartLevel,
 		// add one byte so the offset would never be 0, so oldOffset is 0 means no old version.
@@ -164,7 +162,7 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 	return b
 }
 
-func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions, compression options.CompressionType) *Builder {
+func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
 	return &Builder{
 		file:        f,
 		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
@@ -172,7 +170,6 @@ func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.Tabl
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    opt.LogicalBloomFPR,
 		useGlobalTS: true,
-		compression: compression,
 		opt:         opt,
 	}
 }
@@ -308,7 +305,7 @@ func (b *Builder) finishBlock() error {
 	b.baseKeys.append(firstKey)
 
 	before := b.w.Offset()
-	if err := b.compression.Compress(b.w, b.buf); err != nil {
+	if _, err := b.w.Write(b.buf); err != nil {
 		return err
 	}
 	size := b.w.Offset() - before
@@ -438,7 +435,7 @@ func (b *Builder) Finish() (*BuildResult, error) {
 		ts = 1
 	}
 
-	encoder := newMetaEncoder(b.buf, b.compression, ts)
+	encoder := newMetaEncoder(b.buf, ts)
 	encoder.append(b.smallest.UserKey, idSmallest)
 	encoder.append(b.biggest.UserKey, idBiggest)
 	encoder.append(u32SliceToBytes(b.baseKeys.endOffs), idBaseKeysEndOffs)
@@ -536,16 +533,13 @@ func bytesToU64(b []byte) uint64 {
 }
 
 type metaEncoder struct {
-	buf         []byte
-	compression options.CompressionType
+	buf []byte
 }
 
-func newMetaEncoder(buf []byte, compression options.CompressionType, globalTS uint64) *metaEncoder {
+func newMetaEncoder(buf []byte, globalTS uint64) *metaEncoder {
 	buf = append(buf, u64ToBytes(globalTS)...)
-	buf = append(buf, byte(compression))
 	return &metaEncoder{
-		buf:         buf,
-		compression: compression,
+		buf: buf,
 	}
 }
 
@@ -556,41 +550,24 @@ func (e *metaEncoder) append(d []byte, id byte) {
 }
 
 func (e *metaEncoder) finish(w tableWriter) error {
-	if e.compression == options.None {
-		_, err := w.Write(e.buf)
-		return err
-	}
-
-	if _, err := w.Write(e.buf[:9]); err != nil {
-		return err
-	}
-	return e.compression.Compress(w, e.buf[9:])
+	_, err := w.Write(e.buf)
+	return err
 }
 
 type metaDecoder struct {
-	buf         []byte
-	globalTS    uint64
-	compression options.CompressionType
+	buf      []byte
+	globalTS uint64
 
 	cursor int
 }
 
-func newMetaDecoder(buf []byte) (*metaDecoder, error) {
+func newMetaDecoder(buf []byte) *metaDecoder {
 	globalTS := bytesToU64(buf[:8])
-	compression := options.CompressionType(buf[8])
-	buf = buf[9:]
-	if compression != options.None {
-		buf1, err := compression.Decompress(buf)
-		if err != nil {
-			return nil, err
-		}
-		buf = buf1
-	}
+	buf = buf[8:]
 	return &metaDecoder{
-		buf:         buf,
-		globalTS:    globalTS,
-		compression: compression,
-	}, nil
+		buf:      buf,
+		globalTS: globalTS,
+	}
 }
 
 func (e *metaDecoder) valid() bool {

@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
@@ -70,8 +69,7 @@ type levelManifest struct {
 // tableManifest contains information about a specific level
 // in the LSM tree.
 type tableManifest struct {
-	Level       uint8
-	Compression options.CompressionType
+	Level uint8
 }
 
 // manifestFile holds the file pointer (and other info) about the manifest file, which is a log

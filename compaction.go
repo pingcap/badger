@@ -691,7 +691,6 @@ func (c *CompactionServer) handleConn(conn net.Conn) error {
 	cd.Opt.MaxTableSize = req.MaxTableSize
 	cd.SafeTS = req.SafeTS
 	cd.Opt = DefaultOptions.TableBuilderOptions
-	cd.Opt.CompressionPerLevel = make([]options.CompressionType, 7)
 	cd.InMemory = true
 	stats := new(y.CompactionStats)
 	discardStats := new(DiscardStats)
