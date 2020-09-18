@@ -38,3 +38,10 @@ type SuRFOptions struct {
 type ValueLogWriterOptions struct {
 	WriteBufferSize int
 }
+
+type S3Options struct {
+	EndPoint  string
+	KeyID     string
+	SecretKey string
+	Bucket    string
+}

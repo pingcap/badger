@@ -33,6 +33,7 @@ import (
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/s3util"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
@@ -94,6 +95,8 @@ type DB struct {
 	blobManger blobManager
 
 	resourceMgr *epoch.ResourceManager
+
+	s3client    *s3util.S3Client
 }
 
 type memTables struct {

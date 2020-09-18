@@ -3,6 +3,8 @@ module github.com/pingcap/badger
 go 1.13
 
 require (
+	github.com/BurntSushi/toml v0.3.1
+	github.com/aws/aws-sdk-go v1.34.22
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash v1.1.0
 	github.com/coocood/bbloom v0.0.0-20190830030839-58deb6228d64
@@ -25,7 +27,7 @@ require (
 	github.com/prometheus/common v0.0.0-20181020173914-7e9e6cabbd39 // indirect
 	github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d // indirect
 	github.com/spf13/cobra v0.0.5
-	github.com/stretchr/testify v1.3.0
+	github.com/stretchr/testify v1.5.1
 	go.uber.org/zap v1.9.1
 	golang.org/x/sys v0.0.0-20190626221950-04f50cda93cb
 	golang.org/x/time v0.0.0-20181108054448-85acf8d2951c

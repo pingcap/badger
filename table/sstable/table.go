@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/coocood/bbloom"
@@ -424,6 +425,7 @@ func (t *Table) block(idx int, index *tableIndex) (block, error) {
 		if e != nil {
 			return nil, 0, e
 		}
+		time.Sleep(time.Millisecond * 10)
 		return b, int64(len(b.data)), nil
 	})
 	if err != nil {

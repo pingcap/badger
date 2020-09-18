@@ -109,6 +109,8 @@ type Options struct {
 	CompactL0WhenClose bool
 
 	RemoteCompactionAddr string
+
+	S3Options options.S3Options
 }
 
 // CompactionFilter is an interface that user can implement to remove certain keys.
@@ -153,14 +155,14 @@ var DefaultOptions = Options{
 	NumLevelZeroTables:      5,
 	NumLevelZeroTablesStall: 10,
 	NumMemtables:            5,
-	SyncWrites:              true,
+	SyncWrites:              false,
 	ValueLogFileSize:        256 << 20,
 	ValueLogMaxEntries:      1000000,
 	ValueLogMaxNumFiles:     1,
-	ValueThreshold:          32,
+	ValueThreshold:          0,
 	Truncate:                false,
-	MaxBlockCacheSize:       1 << 30,
-	MaxIndexCacheSize:       1 << 30,
+	MaxBlockCacheSize:       0,
+	MaxIndexCacheSize:       0,
 	TableBuilderOptions: options.TableBuilderOptions{
 		MaxTableSize:        8 << 20,
 		SuRFStartLevel:      8,
