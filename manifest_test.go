@@ -183,7 +183,8 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lh0 := newLevelHandler(kv, 0)
 	lh1 := newLevelHandler(kv, 1)
 	f := buildTestTable(t, "k", 2)
-	t1, err := sstable.OpenTable(f.Name(), blkCache, idxCache)
+	reader, _ := newDataReader(f.Name(), blkCache, idxCache)
+	t1, err := sstable.OpenTable(f.Name(), reader)
 	require.NoError(t, err)
 	defer t1.Delete()
 
@@ -208,7 +209,8 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	lc.runCompactDef(cd, g)
 
 	f = buildTestTable(t, "l", 2)
-	t2, err := sstable.OpenTable(f.Name(), blkCache, idxCache)
+	reader, _ = newDataReader(f.Name(), blkCache, idxCache)
+	t2, err := sstable.OpenTable(f.Name(), reader)
 	require.NoError(t, err)
 	defer t2.Delete()
 	done = lh0.tryAddLevel0Table(t2)

@@ -96,7 +96,7 @@ type DB struct {
 
 	resourceMgr *epoch.ResourceManager
 
-	s3client    *s3util.S3Client
+	s3client *s3util.S3Client
 }
 
 type memTables struct {
@@ -515,8 +515,8 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]table.Table, er
 		if err != nil {
 			return nil, err
 		}
-
-		tbl, err := sstable.OpenTable(filename, db.blockCache, db.indexCache)
+		dataReader, err := sstable.NewMMapReader(filename)
+		tbl, err := sstable.OpenTable(filename, dataReader)
 		if err != nil {
 			return nil, err
 		}
@@ -954,7 +954,12 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		tbl, err := sstable.OpenTable(filename, db.blockCache, db.indexCache)
+		reader, err := sstable.NewInMemReaderFromFile(filename)
+		if err != nil {
+			log.Info("error while mmap table", zap.Error(err))
+			return err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			log.Info("error while opening table", zap.Error(err))
 			return err

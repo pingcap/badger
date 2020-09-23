@@ -54,14 +54,21 @@ func (c *S3Client) Get(key string, offset, length int64) ([]byte, error) {
 	input := &s3.GetObjectInput{}
 	input.Bucket = &c.bucket
 	input.Key = &key
-	rangeStr := fmt.Sprintf("bytes:%d-%d", offset, offset+length)
-	input.Range =&rangeStr
+	if length > 0 {
+		rangeStr := fmt.Sprintf("bytes:%d-%d", offset, offset+length)
+		input.Range = &rangeStr
+	}
 	out, err := c.cli.GetObject(input)
 	if err != nil {
 		return nil, err
 	}
 	defer out.Body.Close()
-	result := make([]byte, length)
+	var result []byte
+	if length > 0 {
+		result = make([]byte, length)
+	} else {
+		result = make([]byte, *out.ContentLength)
+	}
 	_, err = io.ReadFull(out.Body, result)
 	if err != nil {
 		return nil, err
@@ -79,3 +86,10 @@ func (c *S3Client) Put(key string, data []byte) error {
 	return err
 }
 
+func BlockKey(instanceID, fid uint32) string {
+	return fmt.Sprintf("bg%08x%08x.sst", instanceID, fid)
+}
+
+func IndexKey(instanceID, fid uint32) string {
+	return fmt.Sprintf("bg%08x%08x.idx", instanceID, fid)
+}

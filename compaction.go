@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/pingcap/badger/options"
+	"github.com/pingcap/badger/s3util"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -232,6 +233,8 @@ type CompactDef struct {
 	AllocIDFunc func() uint64
 	Limiter     *rate.Limiter
 	InMemory    bool
+	S3          options.S3Options
+	InstanceID  uint32
 
 	splitHints []y.Key
 
@@ -496,7 +499,15 @@ type localCompactor struct {
 }
 
 func (c *localCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
-	return CompactTables(cd, stats, discardStats)
+	return CompactTables(cd, stats, discardStats, nil)
+}
+
+type localS3Compactor struct {
+	s3c *s3util.S3Client
+}
+
+func (s *localS3Compactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
+	return CompactTables(cd, stats, discardStats, s.s3c)
 }
 
 type remoteCompactor struct {
@@ -694,7 +705,7 @@ func (c *CompactionServer) handleConn(conn net.Conn) error {
 	cd.InMemory = true
 	stats := new(y.CompactionStats)
 	discardStats := new(DiscardStats)
-	newFilenames, err := CompactTables(cd, stats, discardStats)
+	newFilenames, err := CompactTables(cd, stats, discardStats, nil)
 	if err != nil {
 		return err
 	}

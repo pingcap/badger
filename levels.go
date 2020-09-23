@@ -24,9 +24,11 @@ import (
 	"time"
 
 	"github.com/ncw/directio"
+	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/s3util"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -115,8 +117,11 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 		if kv.opt.ReadOnly {
 			flags |= y.ReadOnly
 		}
-
-		t, err := sstable.OpenTable(fname, kv.blockCache, kv.indexCache)
+		reader, err := newDataReader(fname, kv.blockCache, kv.indexCache)
+		if err != nil {
+			return nil, err
+		}
+		t, err := sstable.OpenTable(fname, reader)
 		if err != nil {
 			closeAllTables(tables)
 			return nil, errors.Wrapf(err, "Opening table: %q", fname)
@@ -148,6 +153,20 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 	}
 
 	return s, nil
+}
+
+func newDataReader(filename string, blockCache, indexCache *cache.Cache) (sstable.DataReader, error) {
+	var reader sstable.DataReader
+	var err error
+	if blockCache != nil {
+		reader, err = sstable.NewLocalFileBlockReader(filename, blockCache, indexCache)
+	} else {
+		reader, err = sstable.NewMMapReader(filename)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return reader, nil
 }
 
 // Closes the tables, for cleanup in newLevelsController.  (We Close() instead of using DecrRef()
@@ -415,7 +434,7 @@ func (lc *levelsController) compactBuildTables(cd *CompactDef) (newTables []tabl
 }
 
 // CompactTables compacts tables in CompactDef and returns the file names.
-func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
+func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats, s3c *s3util.S3Client) ([]*sstable.BuildResult, error) {
 	var buildResults []*sstable.BuildResult
 	it := cd.buildIterator()
 
@@ -426,8 +445,11 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 	var builder *sstable.Builder
 	for it.Valid() {
 		var fd *os.File
+		var fileID uint64
+		if cd.AllocIDFunc != nil {
+			fileID = cd.AllocIDFunc()
+		}
 		if !cd.InMemory {
-			fileID := cd.AllocIDFunc()
 			filename := sstable.NewFilename(fileID, cd.Dir)
 			var err error
 			fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
@@ -521,6 +543,12 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 		if err != nil {
 			return nil, err
 		}
+		if s3c != nil {
+			err = s3c.Put(s3util.BlockKey(cd.InstanceID, uint32(fileID)), result.FileData)
+			if err != nil {
+				return nil, err
+			}
+		}
 		fd.Close()
 		buildResults = append(buildResults, result)
 	}
@@ -529,9 +557,13 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 
 func (lc *levelsController) openTables(buildResults []*sstable.BuildResult) (newTables []table.Table, err error) {
 	for _, result := range buildResults {
+		reader, err1 := newDataReader(result.FileName, lc.kv.blockCache, lc.kv.indexCache)
+		if err1 != nil {
+			return nil, err1
+		}
 		var tbl table.Table
-		tbl, err = sstable.OpenTable(result.FileName, lc.kv.blockCache, lc.kv.indexCache)
-		if err != nil {
+		tbl, err1 = sstable.OpenTable(result.FileName, reader)
+		if err1 != nil {
 			return
 		}
 		newTables = append(newTables, tbl)

@@ -33,7 +33,6 @@ type singleKeyIterator struct {
 	latestVal []byte
 	oldVals   entrySlice
 	idx       int
-	oldBlock  []byte
 }
 
 func (ski *singleKeyIterator) set(oldOffset uint32, latestVal []byte) {
@@ -51,13 +50,13 @@ func (ski *singleKeyIterator) getVal() (val []byte) {
 	return oldEntry
 }
 
-func (ski *singleKeyIterator) loadOld() {
-	numEntries := bytesToU32(ski.oldBlock[ski.oldOffset:])
+func (ski *singleKeyIterator) loadOld(oldBlock []byte) {
+	numEntries := bytesToU32(oldBlock[ski.oldOffset:])
 	endOffsStartIdx := ski.oldOffset + 4
 	endOffsEndIdx := endOffsStartIdx + 4*numEntries
-	ski.oldVals.endOffs = bytesToU32Slice(ski.oldBlock[endOffsStartIdx:endOffsEndIdx])
+	ski.oldVals.endOffs = bytesToU32Slice(oldBlock[endOffsStartIdx:endOffsEndIdx])
 	valueEndOff := endOffsEndIdx + ski.oldVals.endOffs[numEntries-1]
-	ski.oldVals.data = ski.oldBlock[endOffsEndIdx:valueEndOff]
+	ski.oldVals.data = oldBlock[endOffsEndIdx:valueEndOff]
 	ski.loaded = true
 }
 
@@ -172,7 +171,7 @@ func (itr *blockIterator) prev() {
 // Iterator is an iterator for a Table.
 type Iterator struct {
 	t    *Table
-	tIdx *tableIndex
+	tIdx *TableIndex
 	surf *surf.Iterator
 	bpos int
 	bi   blockIterator
@@ -185,20 +184,16 @@ type Iterator struct {
 
 // NewIterator returns a new iterator of the Table
 func (t *Table) newIterator(reversed bool) *Iterator {
-	idx, err := t.getIndex()
+	idx, err := t.reader.ReadIndex()
 	if err != nil {
 		return &Iterator{err: err}
 	}
 	return t.newIteratorWithIdx(reversed, idx)
 }
 
-func (t *Table) newIteratorWithIdx(reversed bool, index *tableIndex) *Iterator {
+func (t *Table) newIteratorWithIdx(reversed bool, index *TableIndex) *Iterator {
 	it := &Iterator{t: t, reversed: reversed, tIdx: index}
 	it.bi.globalTs = t.globalTs
-	if t.oldBlockLen > 0 {
-		y.Assert(len(t.oldBlock) > 0)
-	}
-	it.bi.ski.oldBlock = t.oldBlock
 	binary.BigEndian.PutUint64(it.bi.globalTsBytes[:], math.MaxUint64-t.globalTs)
 	if index.surf != nil {
 		it.surf = index.surf.NewIterator()
@@ -446,7 +441,13 @@ func (itr *Iterator) NextVersion() bool {
 		return false
 	}
 	if !itr.bi.ski.loaded {
-		itr.bi.ski.loadOld()
+		oldOffset := itr.t.tableSize - itr.t.oldBlockLen
+		oldBlock, err := itr.t.reader.ReadBlock(oldOffset, itr.t.oldBlockLen)
+		if err != nil {
+			itr.err = err
+			return false
+		}
+		itr.bi.ski.loadOld(oldBlock)
 	}
 	if itr.bi.ski.idx+1 < itr.bi.ski.length() {
 		itr.bi.ski.idx++

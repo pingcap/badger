@@ -19,7 +19,6 @@ package sstable
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -28,16 +27,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/coocood/bbloom"
-	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/surf"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/log"
 )
 
 const (
@@ -49,7 +45,12 @@ const (
 
 func IndexFilename(tableFilename string) string { return tableFilename + idxFileSuffix }
 
-type tableIndex struct {
+type TableIndex struct {
+	IndexData       []byte
+	globalTS        uint64
+	smallest        []byte
+	biggest         []byte
+	oldOffset       uint32
 	blockEndOffsets []uint32
 	baseKeys        entrySlice
 	bf              *bbloom.Bloom
@@ -57,150 +58,81 @@ type tableIndex struct {
 	surf            *surf.SuRF
 }
 
+func NewTableIndex(indexData []byte) *TableIndex {
+	idx := newMetaDecoder(indexData).decodeTableIndex()
+	idx.IndexData = indexData
+	return idx
+}
+
 // Table represents a loaded table file with the info we have about it
 type Table struct {
 	sync.Mutex
-
-	fd      *os.File // Own fd.
-	indexFd *os.File
+	filename string
 
 	globalTs          uint64
 	tableSize         int64
-	indexSize         int64
-	numBlocks         int
 	smallest, biggest y.Key
 	id                uint64
 
-	blockCache *cache.Cache
-	blocksData []byte
-
-	indexCache *cache.Cache
-	index      *tableIndex
-	indexOnce  sync.Once
-	indexData  []byte
+	reader    DataReader
+	indexOnce sync.Once
 
 	compacting int32
 
 	oldBlockLen int64
-	oldBlock    []byte
-	mmap        bool
+	//oldBlock    []byte
 }
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
-	if t.fd == nil {
-		t.blocksData = nil
-		t.indexData = nil
-		return nil
-	}
-	if t.blockCache != nil {
-		for blk := 0; blk < t.numBlocks; blk++ {
-			t.blockCache.Del(t.blockCacheKey(blk))
-		}
-	}
-	if t.indexCache != nil {
-		t.indexCache.Del(t.id)
-	}
-	if t.mmap {
-		y.Munmap(t.blocksData)
-		y.Munmap(t.indexData)
-	}
-	if err := t.fd.Truncate(0); err != nil {
-		// This is very important to let the FS know that the file is deleted.
+	t.reader.Close()
+	if err := os.Remove(t.filename); err != nil {
 		return err
 	}
-	filename := t.fd.Name()
-	if err := t.fd.Close(); err != nil {
-		return err
-	}
-	if err := os.Remove(filename); err != nil {
-		return err
-	}
-	return os.Remove(filename + idxFileSuffix)
+	return os.Remove(t.filename + idxFileSuffix)
 }
 
 // OpenTable assumes file has only one table and opens it.  Takes ownership of fd upon function
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(filename string, blockCache *cache.Cache, indexCache *cache.Cache) (*Table, error) {
+func OpenTable(filename string, reader DataReader) (*Table, error) {
 	id, ok := ParseFileID(filename)
 	if !ok {
 		return nil, errors.Errorf("Invalid filename: %s", filename)
 	}
 
-	// TODO: after we support cache of L2 storage, we will open block data file in cache manager.
-	fd, err := y.OpenExistingFile(filename, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	indexFd, err := y.OpenExistingFile(filename+idxFileSuffix, 0)
-	if err != nil {
-		return nil, err
-	}
-	idxStat, err := indexFd.Stat()
-	if err != nil {
-		return nil, err
-	}
-
 	t := &Table{
-		fd:         fd,
-		indexFd:    indexFd,
-		id:         id,
-		blockCache: blockCache,
-		indexCache: indexCache,
-		indexSize:  idxStat.Size(),
+		filename: filename,
+		id:       id,
+		reader:   reader,
 	}
-	if err := t.initTableInfo(nil); err != nil {
+	if err := t.initTableInfo(); err != nil {
 		t.Close()
 		return nil, err
 	}
-	t.mmap = blockCache == nil || t.oldBlockLen > 0
-	if t.mmap {
-		t.blocksData, err = y.Mmap(fd, false, t.Size())
-		if err != nil {
-			t.Close()
-			return nil, y.Wrapf(err, "Unable to map file")
-		}
-		t.setOldBlock(t.blocksData)
-		t.indexData, err = y.Mmap(t.indexFd, false, t.indexSize)
-		t.index = newMetaDecoder(t.indexData).readTableIndex()
-	}
-
 	return t, nil
 }
 
-func (t *Table) setOldBlock(blocksData []byte) {
-	t.oldBlock = blocksData[t.tableSize-t.oldBlockLen : t.tableSize]
-}
+//func (t *Table) setOldBlock(blocksData []byte) {
+//	t.oldBlock = blocksData[t.tableSize-t.oldBlockLen : t.tableSize]
+//}
 
 // OpenInMemoryTable opens a table that has data in memory.
 func OpenInMemoryTable(blockData, indexData []byte) (*Table, error) {
 	t := &Table{
-		blocksData: blockData,
-		indexData:  indexData,
-		index:      newMetaDecoder(indexData).readTableIndex(),
+		reader: NewInMemReader(blockData, indexData),
 	}
-	if err := t.initTableInfo(indexData); err != nil {
+	if err := t.initTableInfo(); err != nil {
 		return nil, err
 	}
-	t.setOldBlock(blockData)
+	//t.setOldBlock(blockData)
 	return t, nil
 }
 
 // Close closes the open table.  (Releases resources back to the OS.)
 func (t *Table) Close() error {
-	if t.mmap {
-		y.Munmap(t.blocksData)
-		y.Munmap(t.indexData)
-	}
-	if t.fd != nil {
-		t.fd.Close()
-	}
-	if t.indexFd != nil {
-		t.indexFd.Close()
-	}
+	t.reader.Close()
 	return nil
 }
 
@@ -236,7 +168,7 @@ func (t *Table) Get(key y.Key, keyHash uint64) (y.ValueStruct, error) {
 // which means caller should fallback to seek search. Otherwise it value will be true.
 // If the hash index does not contain such an element the returned key will be nil.
 func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool, error) {
-	idx, err := t.getIndex()
+	idx, err := t.reader.ReadIndex()
 	if err != nil {
 		return y.Key{}, y.ValueStruct{}, false, err
 	}
@@ -276,28 +208,13 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 	return it.Key(), it.Value(), true, nil
 }
 
-func (t *Table) read(off int, sz int) ([]byte, error) {
-	if len(t.blocksData) > 0 {
-		if len(t.blocksData[off:]) < sz {
-			return nil, y.ErrEOF
-		}
-		return t.blocksData[off : off+sz], nil
-	}
-	res := make([]byte, sz)
-	_, err := t.fd.ReadAt(res, int64(off))
-	return res, err
-}
-
-func (t *Table) initTableInfo(idxData []byte) error {
-	if idxData == nil {
-		var err error
-		idxData, err = t.loadIndexData()
-		if err != nil {
-			return err
-		}
+func (t *Table) initTableInfo() error {
+	index, err := t.reader.ReadIndex()
+	if err != nil {
+		return err
 	}
 
-	d := newMetaDecoder(idxData)
+	d := newMetaDecoder(index.IndexData)
 	t.globalTs = d.globalTS
 
 	for ; d.valid(); d.next() {
@@ -313,7 +230,6 @@ func (t *Table) initTableInfo(idxData []byte) error {
 		case idBlockEndOffsets:
 			offsets := bytesToU32Slice(d.decode())
 			t.tableSize = int64(offsets[len(offsets)-1])
-			t.numBlocks = len(offsets)
 		case idOldBlockLen:
 			t.oldBlockLen = int64(bytesToU32(d.decode()))
 			t.tableSize += t.oldBlockLen
@@ -322,8 +238,8 @@ func (t *Table) initTableInfo(idxData []byte) error {
 	return nil
 }
 
-func (d *metaDecoder) readTableIndex() *tableIndex {
-	idx := new(tableIndex)
+func (d *metaDecoder) decodeTableIndex() *TableIndex {
+	idx := new(TableIndex)
 	for ; d.valid(); d.next() {
 		switch d.currentId() {
 		case idBaseKeysEndOffs:
@@ -352,50 +268,7 @@ func (d *metaDecoder) readTableIndex() *tableIndex {
 	return idx
 }
 
-func (t *Table) getIndex() (*tableIndex, error) {
-	if t.index != nil {
-		return t.index, nil
-	}
-
-	index, err := t.indexCache.GetOrCompute(t.id, func() (interface{}, int64, error) {
-		idxData, err := t.loadIndexData()
-		if err != nil {
-			return nil, 0, err
-		}
-		return newMetaDecoder(idxData).readTableIndex(), int64(len(idxData)), nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return index.(*tableIndex), nil
-}
-
 func (t *Table) PrepareForCompaction() {
-	if !t.mmap && t.indexFd != nil {
-		idxData, err := t.loadIndexData()
-		if err != nil {
-			log.S().Error(err)
-			return
-		}
-		var blocksData []byte
-		blocksData, err = ioutil.ReadFile(t.fd.Name())
-		if err != nil {
-			log.S().Error(err)
-			return
-		}
-		t.indexData = idxData
-		t.index = newMetaDecoder(idxData).readTableIndex()
-		t.setOldBlock(blocksData)
-		t.blocksData = blocksData
-	}
-}
-
-func (t *Table) loadIndexData() ([]byte, error) {
-	idxData := make([]byte, t.indexSize)
-	if _, err := t.indexFd.ReadAt(idxData, 0); err != nil {
-		return nil, err
-	}
-	return idxData, nil
 }
 
 type block struct {
@@ -408,33 +281,16 @@ func (b *block) size() int64 {
 	return int64(intSize + len(b.data))
 }
 
-func (t *Table) block(idx int, index *tableIndex) (block, error) {
+func (t *Table) block(idx int, index *TableIndex) (block, error) {
 	y.Assert(idx >= 0)
 
 	if idx >= len(index.blockEndOffsets) {
 		return block{}, io.EOF
 	}
-
-	if t.blockCache == nil || t.blocksData != nil {
-		return t.loadBlock(idx, index)
-	}
-
-	key := t.blockCacheKey(idx)
-	blk, err := t.blockCache.GetOrCompute(key, func() (interface{}, int64, error) {
-		b, e := t.loadBlock(idx, index)
-		if e != nil {
-			return nil, 0, e
-		}
-		time.Sleep(time.Millisecond * 10)
-		return b, int64(len(b.data)), nil
-	})
-	if err != nil {
-		return block{}, err
-	}
-	return blk.(block), nil
+	return t.loadBlock(idx, index)
 }
 
-func (t *Table) loadBlock(idx int, index *tableIndex) (block, error) {
+func (t *Table) loadBlock(idx int, index *TableIndex) (block, error) {
 	var startOffset int
 	if idx > 0 {
 		startOffset = int(index.blockEndOffsets[idx-1])
@@ -445,9 +301,9 @@ func (t *Table) loadBlock(idx int, index *tableIndex) (block, error) {
 	endOffset := int(index.blockEndOffsets[idx])
 	dataLen := endOffset - startOffset
 	var err error
-	if blk.data, err = t.read(blk.offset, dataLen); err != nil {
+	if blk.data, err = t.reader.ReadBlock(int64(blk.offset), int64(dataLen)); err != nil {
 		return block{}, errors.Wrapf(err,
-			"failed to read from file: %s at offset: %d, len: %d", t.fd.Name(), blk.offset, dataLen)
+			"failed to read from file: %s at offset: %d, len: %d", t.filename, blk.offset, dataLen)
 	}
 	blk.baseKey = index.baseKeys.getEntry(idx)
 	return blk, nil
@@ -460,12 +316,17 @@ func (t *Table) HasGlobalTs() bool {
 
 // SetGlobalTs update the global ts of external ingested tables.
 func (t *Table) SetGlobalTs(ts uint64) error {
-	if _, err := t.indexFd.WriteAt(u64ToBytes(ts), 0); err != nil {
+	idxFd, err := os.OpenFile(IndexFilename(t.filename), os.O_RDWR, 0600)
+	if err != nil {
 		return err
 	}
-	if err := fileutil.Fsync(t.indexFd); err != nil {
+	if _, err := idxFd.WriteAt(u64ToBytes(ts), 0); err != nil {
 		return err
 	}
+	if err := fileutil.Fsync(idxFd); err != nil {
+		return err
+	}
+	idxFd.Close()
 	t.globalTs = ts
 	return nil
 }
@@ -497,7 +358,7 @@ func (t *Table) Smallest() y.Key { return t.smallest }
 func (t *Table) Biggest() y.Key { return t.biggest }
 
 // Filename is NOT the file name.  Just kidding, it is.
-func (t *Table) Filename() string { return t.fd.Name() }
+func (t *Table) Filename() string { return t.filename }
 
 // ID is the table's ID number (used to make the file name).
 func (t *Table) ID() uint64 { return t.id }
@@ -513,7 +374,7 @@ func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 		return includeEnd
 	}
 
-	idx, err := t.getIndex()
+	idx, err := t.reader.ReadIndex()
 	if err != nil {
 		return true
 	}
