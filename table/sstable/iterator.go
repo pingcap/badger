@@ -184,7 +184,7 @@ type Iterator struct {
 
 // NewIterator returns a new iterator of the Table
 func (t *Table) newIterator(reversed bool) *Iterator {
-	idx, err := t.reader.ReadIndex()
+	idx, err := t.file.ReadIndex()
 	if err != nil {
 		return &Iterator{err: err}
 	}
@@ -442,7 +442,7 @@ func (itr *Iterator) NextVersion() bool {
 	}
 	if !itr.bi.ski.loaded {
 		oldOffset := itr.t.tableSize - itr.t.oldBlockLen
-		oldBlock, err := itr.t.reader.ReadBlock(oldOffset, itr.t.oldBlockLen)
+		oldBlock, err := itr.t.file.ReadBlock(oldOffset, itr.t.oldBlockLen)
 		if err != nil {
 			itr.err = err
 			return false

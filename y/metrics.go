@@ -76,6 +76,21 @@ var (
 		Name:      "num_memtable_gets",
 	}, []string{labelPath})
 
+	NumBytesReadS3 = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_bytes_read_s3",
+	})
+
+	NumBytesWrittenS3 = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_bytes_written_s3",
+	})
+
+	NumGetsS3 = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "num_gets_s3",
+	})
+
 	// Level statistics
 
 	// NumCompactionBytesWrite has cumulative size of keys read during compaction.
@@ -252,4 +267,7 @@ func init() {
 	prometheus.MustRegister(NumCompactionKeysRead)
 	prometheus.MustRegister(NumCompactionKeysWrite)
 	prometheus.MustRegister(NumCompactionKeysDiscard)
+	prometheus.MustRegister(NumBytesReadS3)
+	prometheus.MustRegister(NumBytesWrittenS3)
+	prometheus.MustRegister(NumGetsS3)
 }

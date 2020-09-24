@@ -26,12 +26,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/log"
 )
 
 // Manifest represents the contents of the MANIFEST file in a Badger store.
@@ -52,7 +50,6 @@ type Manifest struct {
 	Deletions int
 
 	Head       *protos.HeadInfo
-	InstanceID uint32
 }
 
 func createManifest() Manifest {
@@ -136,9 +133,6 @@ func helpOpenOrCreateManifestFile(dir string, readOnly bool, deletionsThreshold 
 			return nil, Manifest{}, fmt.Errorf("no manifest found, required for read-only db")
 		}
 		m := createManifest()
-		// TODO: just a temp solution to assign instance ID.
-		m.InstanceID = uint32(time.Now().UnixNano())
-		log.S().Infof("create instance id %08x", m.InstanceID)
 		fp, netCreations, err := helpRewrite(dir, &m)
 		if err != nil {
 			return nil, Manifest{}, err
@@ -237,10 +231,9 @@ func helpRewrite(dir string, m *Manifest) (*os.File, int, error) {
 		return nil, 0, err
 	}
 
-	buf := make([]byte, 12)
+	buf := make([]byte, 8)
 	copy(buf[0:4], magicText[:])
 	binary.BigEndian.PutUint32(buf[4:8], magicVersion)
-	binary.BigEndian.PutUint32(buf[8:], m.InstanceID)
 
 	netCreations := len(m.Tables)
 	changes := m.asChanges()
@@ -337,7 +330,7 @@ var (
 func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error) {
 	r := countingReader{wrapped: bufio.NewReader(fp)}
 
-	var magicBuf [12]byte
+	var magicBuf [8]byte
 	if _, err := io.ReadFull(&r, magicBuf[:]); err != nil {
 		return Manifest{}, 0, errBadMagic
 	}
@@ -351,8 +344,6 @@ func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error
 	}
 
 	build := createManifest()
-	build.InstanceID = binary.BigEndian.Uint32(magicBuf[8:])
-	log.S().Infof("load instance id %08x", build.InstanceID)
 	var offset int64
 	for {
 		offset = r.count

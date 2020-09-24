@@ -74,29 +74,24 @@ type Table struct {
 	smallest, biggest y.Key
 	id                uint64
 
-	reader    DataReader
-	indexOnce sync.Once
+	file TableFile
 
 	compacting int32
 
 	oldBlockLen int64
-	//oldBlock    []byte
 }
 
 // Delete delete table's file from disk.
 func (t *Table) Delete() error {
-	t.reader.Close()
-	if err := os.Remove(t.filename); err != nil {
-		return err
-	}
-	return os.Remove(t.filename + idxFileSuffix)
+	t.file.Delete()
+	return nil
 }
 
 // OpenTable assumes file has only one table and opens it.  Takes ownership of fd upon function
 // entry.  Returns a table with one reference count on it (decrementing which may delete the file!
 // -- consider t.Close() instead).  The fd has to writeable because we call Truncate on it before
 // deleting.
-func OpenTable(filename string, reader DataReader) (*Table, error) {
+func OpenTable(filename string, reader TableFile) (*Table, error) {
 	id, ok := ParseFileID(filename)
 	if !ok {
 		return nil, errors.Errorf("Invalid filename: %s", filename)
@@ -105,7 +100,7 @@ func OpenTable(filename string, reader DataReader) (*Table, error) {
 	t := &Table{
 		filename: filename,
 		id:       id,
-		reader:   reader,
+		file:     reader,
 	}
 	if err := t.initTableInfo(); err != nil {
 		t.Close()
@@ -114,25 +109,20 @@ func OpenTable(filename string, reader DataReader) (*Table, error) {
 	return t, nil
 }
 
-//func (t *Table) setOldBlock(blocksData []byte) {
-//	t.oldBlock = blocksData[t.tableSize-t.oldBlockLen : t.tableSize]
-//}
-
 // OpenInMemoryTable opens a table that has data in memory.
-func OpenInMemoryTable(blockData, indexData []byte) (*Table, error) {
+func OpenInMemoryTable(reader *InMemFile) (*Table, error) {
 	t := &Table{
-		reader: NewInMemReader(blockData, indexData),
+		file: reader,
 	}
 	if err := t.initTableInfo(); err != nil {
 		return nil, err
 	}
-	//t.setOldBlock(blockData)
 	return t, nil
 }
 
 // Close closes the open table.  (Releases resources back to the OS.)
 func (t *Table) Close() error {
-	t.reader.Close()
+	t.file.Close()
 	return nil
 }
 
@@ -168,7 +158,7 @@ func (t *Table) Get(key y.Key, keyHash uint64) (y.ValueStruct, error) {
 // which means caller should fallback to seek search. Otherwise it value will be true.
 // If the hash index does not contain such an element the returned key will be nil.
 func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool, error) {
-	idx, err := t.reader.ReadIndex()
+	idx, err := t.file.ReadIndex()
 	if err != nil {
 		return y.Key{}, y.ValueStruct{}, false, err
 	}
@@ -209,7 +199,7 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 }
 
 func (t *Table) initTableInfo() error {
-	index, err := t.reader.ReadIndex()
+	index, err := t.file.ReadIndex()
 	if err != nil {
 		return err
 	}
@@ -268,7 +258,8 @@ func (d *metaDecoder) decodeTableIndex() *TableIndex {
 	return idx
 }
 
-func (t *Table) PrepareForCompaction() {
+func (t *Table) PrepareForCompaction() error {
+	return t.file.LoadToMem()
 }
 
 type block struct {
@@ -301,7 +292,7 @@ func (t *Table) loadBlock(idx int, index *TableIndex) (block, error) {
 	endOffset := int(index.blockEndOffsets[idx])
 	dataLen := endOffset - startOffset
 	var err error
-	if blk.data, err = t.reader.ReadBlock(int64(blk.offset), int64(dataLen)); err != nil {
+	if blk.data, err = t.file.ReadBlock(int64(blk.offset), int64(dataLen)); err != nil {
 		return block{}, errors.Wrapf(err,
 			"failed to read from file: %s at offset: %d, len: %d", t.filename, blk.offset, dataLen)
 	}
@@ -374,7 +365,7 @@ func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 		return includeEnd
 	}
 
-	idx, err := t.reader.ReadIndex()
+	idx, err := t.file.ReadIndex()
 	if err != nil {
 		return true
 	}

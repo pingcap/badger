@@ -18,6 +18,7 @@ package badger
 
 import (
 	"github.com/pingcap/badger/options"
+	"github.com/pingcap/badger/s3util"
 )
 
 // NOTE: Keep the comments in the following to 75 chars width, so they
@@ -110,7 +111,7 @@ type Options struct {
 
 	RemoteCompactionAddr string
 
-	S3Options options.S3Options
+	S3Options s3util.Options
 }
 
 // CompactionFilter is an interface that user can implement to remove certain keys.

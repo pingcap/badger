@@ -330,6 +330,9 @@ func Open(opt Options) (db *DB, err error) {
 
 	db.closers.resourceManager = y.NewCloser(0)
 	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
+	if opt.S3Options.EndPoint != "" {
+		db.s3client = s3util.NewS3Client(opt.S3Options)
+	}
 
 	// newLevelsController potentially loads files in directory.
 	if db.lc, err = newLevelsController(db, &manifest, db.resourceMgr, opt.TableBuilderOptions); err != nil {
@@ -515,7 +518,7 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]table.Table, er
 		if err != nil {
 			return nil, err
 		}
-		dataReader, err := sstable.NewMMapReader(filename)
+		dataReader, err := sstable.NewMMapFile(filename)
 		tbl, err := sstable.OpenTable(filename, dataReader)
 		if err != nil {
 			return nil, err
@@ -835,7 +838,7 @@ func arenaSize(opt Options) int64 {
 }
 
 // WriteLevel0Table flushes memtable. It drops deleteValues.
-func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
+func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) (*sstable.BuildResult, error) {
 	iter := s.NewIterator(false)
 	var (
 		bb                   *blobFileBuilder
@@ -851,19 +854,19 @@ func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
 		if db.opt.ValueThreshold > 0 && len(value.Value) > db.opt.ValueThreshold {
 			if bb == nil {
 				if bb, err = db.newBlobFileBuilder(); err != nil {
-					return y.Wrap(err)
+					return nil, y.Wrap(err)
 				}
 			}
 
 			bp, err := bb.append(value.Value)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			value.Meta |= bitValuePointer
 			value.Value = bp
 		}
 		if err = b.Add(key, value); err != nil {
-			return err
+			return nil, err
 		}
 		numWrite++
 		bytesWrite += key.Len() + int(value.EncodedSize())
@@ -873,22 +876,22 @@ func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
 		BytesWrite: bytesWrite,
 	}
 	db.lc.levels[0].metrics.UpdateCompactionStats(stats)
-
-	if _, err = b.Finish(); err != nil {
-		return y.Wrap(err)
+	var result *sstable.BuildResult
+	if result, err = b.Finish(); err != nil {
+		return nil, y.Wrap(err)
 	}
 	if bb != nil {
 		bf, err1 := bb.finish()
 		if err1 != nil {
-			return err1
+			return nil, err1
 		}
 		log.Info("build L0 blob", zap.Uint32("id", bf.fid), zap.Uint32("size", bf.fileSize))
 		err1 = db.blobManger.addFile(bf)
 		if err1 != nil {
-			return err1
+			return nil, err1
 		}
 	}
-	return nil
+	return result, nil
 }
 
 func (db *DB) newBlobFileBuilder() (*blobFileBuilder, error) {
@@ -932,17 +935,21 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 
 		fileID := ft.mt.ID()
 		filename := sstable.NewFilename(fileID, db.opt.Dir)
-		fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
-		if err != nil {
-			log.Error("error while writing to level 0", zap.Error(err))
-			return y.Wrap(err)
+		var fd *os.File
+		var err error
+		if db.s3client == nil {
+			fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+			if err != nil {
+				log.Error("error while writing to level 0", zap.Error(err))
+				return y.Wrap(err)
+			}
 		}
 
 		// Don't block just to sync the directory entry.
 		dirSyncCh := make(chan error)
 		go func() { dirSyncCh <- syncDir(db.opt.Dir) }()
 
-		err = db.writeLevel0Table(ft.mt, fd)
+		result, err := db.writeLevel0Table(ft.mt, fd)
 		dirSyncErr := <-dirSyncCh
 		if err != nil {
 			log.Error("error while writing to level 0", zap.Error(err))
@@ -954,12 +961,31 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		reader, err := sstable.NewInMemReaderFromFile(filename)
-		if err != nil {
-			log.Info("error while mmap table", zap.Error(err))
-			return err
+		var tf sstable.TableFile
+		if db.s3client != nil {
+			err = db.s3client.Put(db.s3client.BlockKey(uint32(fileID)), result.FileData)
+			if err != nil {
+				return err
+			}
+			err = db.s3client.Put(db.s3client.IndexKey(uint32(fileID)), result.IndexData)
+			if err != nil {
+				return err
+			}
+			tf, _ = sstable.NewS3File(filename, db.blockCache, db.indexCache, db.s3client)
+		} else if db.blockCache != nil {
+			tf, err = sstable.NewLocalFile(filename, db.blockCache, db.indexCache)
+			if err != nil {
+				log.Info("error while mmap table", zap.Error(err))
+				return err
+			}
+		} else {
+			tf, err = sstable.NewMMapFile(filename)
+			if err != nil {
+				log.Info("error while mmap table", zap.Error(err))
+				return err
+			}
 		}
-		tbl, err := sstable.OpenTable(filename, reader)
+		tbl, err := sstable.OpenTable(filename, tf)
 		if err != nil {
 			log.Info("error while opening table", zap.Error(err))
 			return err

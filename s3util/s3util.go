@@ -13,22 +13,25 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/pingcap/badger/y"
 )
 
+type Options struct {
+	InstanceID uint32
+	EndPoint   string
+	KeyID      string
+	SecretKey  string
+	Bucket     string
+}
+
 type S3Client struct {
-	endPoint  string
-	bucket    string
-	keyID     string
-	secretKey string
+	Options
 	cli       *s3.S3
 }
 
-func NewS3Client(endPoint, bucket, keyID, secretKey string) *S3Client {
+func NewS3Client(opts Options) *S3Client {
 	s3c := &S3Client{
-		endPoint:  endPoint,
-		bucket:    bucket,
-		keyID:     keyID,
-		secretKey: secretKey,
+		Options: opts,
 	}
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -38,25 +41,25 @@ func NewS3Client(endPoint, bucket, keyID, secretKey string) *S3Client {
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		MaxIdleConns:          100,
+		MaxIdleConns:          256,
+		MaxIdleConnsPerHost:   256,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	client := &http.Client{Transport: tr}
-	cred := credentials.NewStaticCredentials(keyID, secretKey, "")
-	sess := session.Must(session.NewSession(aws.NewConfig().WithEndpoint(endPoint).WithS3ForcePathStyle(true).WithCredentials(cred).WithHTTPClient(client)))
+	cred := credentials.NewStaticCredentials(opts.KeyID, opts.SecretKey, "")
+	sess := session.Must(session.NewSession(aws.NewConfig().WithEndpoint(opts.EndPoint).WithDisableSSL(true).WithS3ForcePathStyle(true).WithCredentials(cred).WithHTTPClient(client)))
 	s3c.cli = s3.New(sess)
 	return s3c
 }
 
 func (c *S3Client) Get(key string, offset, length int64) ([]byte, error) {
 	input := &s3.GetObjectInput{}
-	input.Bucket = &c.bucket
+	input.Bucket = &c.Bucket
 	input.Key = &key
 	if length > 0 {
-		rangeStr := fmt.Sprintf("bytes:%d-%d", offset, offset+length)
-		input.Range = &rangeStr
+		input.Range = aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 	}
 	out, err := c.cli.GetObject(input)
 	if err != nil {
@@ -73,23 +76,61 @@ func (c *S3Client) Get(key string, offset, length int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	y.NumBytesReadS3.Add(float64(len(result)))
+	y.NumGetsS3.Inc()
 	return result, nil
 }
 
 func (c *S3Client) Put(key string, data []byte) error {
 	input := &s3.PutObjectInput{}
 	input.SetContentLength(int64(len(data)))
-	input.Bucket = &c.bucket
+	input.Bucket = &c.Bucket
 	input.Key = &key
 	input.Body = bytes.NewReader(data)
 	_, err := c.cli.PutObject(input)
 	return err
 }
 
-func BlockKey(instanceID, fid uint32) string {
-	return fmt.Sprintf("bg%08x%08x.sst", instanceID, fid)
+func (c *S3Client) Delete(key string) error {
+	input := &s3.DeleteObjectInput{}
+	input.Bucket = &c.Bucket
+	input.Key = &key
+	_, err := c.cli.DeleteObject(input)
+	return err
 }
 
-func IndexKey(instanceID, fid uint32) string {
-	return fmt.Sprintf("bg%08x%08x.idx", instanceID, fid)
+func (c *S3Client) ListFiles() (map[uint64]struct{}, error) {
+	var marker *string
+	fileIDs := map[uint64]struct{}{}
+	for {
+		input := &s3.ListObjectsInput{}
+		input.Bucket = &c.Bucket
+		input.Prefix = aws.String(fmt.Sprintf("bg%08x", c.InstanceID))
+		input.Marker = marker
+		output, err := c.cli.ListObjects(input)
+		if err != nil {
+			return nil, err
+		}
+		for _, objInfo := range output.Contents {
+			var fid uint64
+			_, err = fmt.Sscanf((*objInfo.Key)[10:18], "%08x", &fid)
+			if err != nil {
+				return nil, err
+			}
+			fileIDs[fid] = struct{}{}
+		}
+		if !*output.IsTruncated {
+			break
+		}
+		marker = output.NextMarker
+	}
+	return fileIDs, nil
+}
+
+func (c *S3Client) BlockKey(fid uint32) string {
+	return fmt.Sprintf("bg%08x%08x.sst", c.InstanceID, fid)
+}
+
+func (c *S3Client) IndexKey(fid uint32) string {
+	return fmt.Sprintf("bg%08x%08x.idx", c.InstanceID, fid)
 }

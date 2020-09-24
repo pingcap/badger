@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/ncw/directio"
-	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
@@ -71,8 +70,10 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 		if _, ok := mf.Tables[id]; !ok {
 			log.Info("table file not referenced in MANIFEST", zap.Uint64("id", id))
 			filename := sstable.NewFilename(id, kv.opt.Dir)
-			if err := os.Remove(filename); err != nil {
-				return y.Wrapf(err, "While removing table %d", id)
+			os.Remove(filename)
+			if kv.s3client != nil {
+				kv.s3client.Delete(kv.s3client.BlockKey(uint32(id)))
+				kv.s3client.Delete(kv.s3client.IndexKey(uint32(id)))
 			}
 		}
 	}
@@ -104,9 +105,20 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 	}
 
 	// Compare manifest against directory, check for existent/non-existent files, and remove.
-	if err := revertToManifest(kv, mf, getIDMap(kv.opt.Dir)); err != nil {
+	var idMap map[uint64]struct{}
+	if kv.s3client != nil {
+		var err error
+		idMap, err = kv.s3client.ListFiles()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		idMap = getIDMap(kv.opt.Dir)
+	}
+	if err := revertToManifest(kv, mf, idMap); err != nil {
 		return nil, err
 	}
+	log.S().Info("new levels controller", len(mf.Tables))
 
 	// Some files may be deleted. Let's reload.
 	tables := make([][]table.Table, kv.opt.TableBuilderOptions.MaxLevels)
@@ -117,7 +129,7 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 		if kv.opt.ReadOnly {
 			flags |= y.ReadOnly
 		}
-		reader, err := newDataReader(fname, kv.blockCache, kv.indexCache)
+		reader, err := newTableFile(fname, kv)
 		if err != nil {
 			return nil, err
 		}
@@ -155,13 +167,15 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 	return s, nil
 }
 
-func newDataReader(filename string, blockCache, indexCache *cache.Cache) (sstable.DataReader, error) {
-	var reader sstable.DataReader
+func newTableFile(filename string, kv *DB) (sstable.TableFile, error) {
+	var reader sstable.TableFile
 	var err error
-	if blockCache != nil {
-		reader, err = sstable.NewLocalFileBlockReader(filename, blockCache, indexCache)
+	if kv.s3client != nil {
+		reader, err = sstable.NewS3File(filename, kv.blockCache, kv.indexCache, kv.s3client)
+	} else if kv.blockCache != nil {
+		reader, err = sstable.NewLocalFile(filename, kv.blockCache, kv.indexCache)
 	} else {
-		reader, err = sstable.NewMMapReader(filename)
+		reader, err = sstable.NewMMapFile(filename)
 	}
 	if err != nil {
 		return nil, err
@@ -379,7 +393,7 @@ func overSkipTables(key y.Key, skippedTables []table.Table) (newSkippedTables []
 	return skippedTables[i:], i > 0
 }
 
-func (lc *levelsController) prepareCompactionDef(cd *CompactDef) {
+func (lc *levelsController) prepareCompactionDef(cd *CompactDef) error {
 	// Pick up the currently pending transactions' min readTs, so we can discard versions below this
 	// readTs. We should never discard any versions starting from above this timestamp, because that
 	// would affect the snapshot view guarantee provided by transactions.
@@ -392,21 +406,29 @@ func (lc *levelsController) prepareCompactionDef(cd *CompactDef) {
 	cd.Dir = lc.kv.opt.Dir
 	cd.AllocIDFunc = lc.reserveFileID
 	cd.Limiter = lc.kv.limiter
+	cd.S3 = lc.kv.opt.S3Options
 	for _, t := range cd.Top {
 		if sst, ok := t.(*sstable.Table); ok {
-			sst.PrepareForCompaction()
+			err := sst.PrepareForCompaction()
+			if err != nil {
+				return err
+			}
 		}
 	}
 	for _, t := range cd.Bot {
 		if sst, ok := t.(*sstable.Table); ok {
-			sst.PrepareForCompaction()
+			err := sst.PrepareForCompaction()
+			if err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func (lc *levelsController) getCompactor(cd *CompactDef) compactor {
 	if len(cd.SkippedTbls) > 0 || lc.kv.opt.RemoteCompactionAddr == "" || lc.kv.opt.ValueThreshold > 0 {
-		return &localCompactor{}
+		return &localCompactor{s3c: lc.kv.s3client}
 	}
 	return &remoteCompactor{
 		remoteAddr: lc.kv.opt.RemoteCompactionAddr,
@@ -418,7 +440,10 @@ func (lc *levelsController) compactBuildTables(cd *CompactDef) (newTables []tabl
 
 	// Try to collect stats so that we can inform value log about GC. That would help us find which
 	// value log file should be GCed.
-	lc.prepareCompactionDef(cd)
+	err = lc.prepareCompactionDef(cd)
+	if err != nil {
+		return nil, err
+	}
 	stats := &y.CompactionStats{}
 	discardStats := &DiscardStats{}
 	buildResults, err := lc.getCompactor(cd).compact(cd, stats, discardStats)
@@ -427,7 +452,7 @@ func (lc *levelsController) compactBuildTables(cd *CompactDef) (newTables []tabl
 	}
 	newTables, err = lc.openTables(buildResults)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	lc.handleStats(cd.Level+1, stats, discardStats)
 	return
@@ -446,11 +471,12 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 	for it.Valid() {
 		var fd *os.File
 		var fileID uint64
+		var filename string
 		if cd.AllocIDFunc != nil {
 			fileID = cd.AllocIDFunc()
+			filename = sstable.NewFilename(fileID, cd.Dir)
 		}
 		if !cd.InMemory {
-			filename := sstable.NewFilename(fileID, cd.Dir)
 			var err error
 			fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 			if err != nil {
@@ -543,8 +569,13 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 		if err != nil {
 			return nil, err
 		}
+		result.FileName = filename
 		if s3c != nil {
-			err = s3c.Put(s3util.BlockKey(cd.InstanceID, uint32(fileID)), result.FileData)
+			err = s3c.Put(s3c.BlockKey(uint32(fileID)), result.FileData)
+			if err != nil {
+				return nil, err
+			}
+			err = s3c.Put(s3c.IndexKey(uint32(fileID)), result.IndexData)
 			if err != nil {
 				return nil, err
 			}
@@ -557,14 +588,14 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 
 func (lc *levelsController) openTables(buildResults []*sstable.BuildResult) (newTables []table.Table, err error) {
 	for _, result := range buildResults {
-		reader, err1 := newDataReader(result.FileName, lc.kv.blockCache, lc.kv.indexCache)
+		reader, err1 := newTableFile(result.FileName, lc.kv)
 		if err1 != nil {
 			return nil, err1
 		}
 		var tbl table.Table
 		tbl, err1 = sstable.OpenTable(result.FileName, reader)
 		if err1 != nil {
-			return
+			return nil, err1
 		}
 		newTables = append(newTables, tbl)
 	}
@@ -648,7 +679,7 @@ func (lc *levelsController) runCompactDef(cd *CompactDef, guard *epoch.Guard) er
 		var err error
 		newTables, err = lc.compactBuildTables(cd)
 		if err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 		changeSet = buildChangeSet(cd, newTables)
 	}
@@ -704,7 +735,7 @@ func (lc *levelsController) doCompact(p compactionPriority, guard *epoch.Guard) 
 	log.Info("running compaction", zap.Stringer("def", cd))
 	if err := lc.runCompactDef(cd, guard); err != nil {
 		// This compaction couldn't be done successfully.
-		log.Info("compact failed", zap.Stringer("def", cd), zap.Error(err))
+		log.Error("compact failed", zap.Stringer("def", cd), zap.Error(err))
 		return false, err
 	}
 

@@ -233,8 +233,7 @@ type CompactDef struct {
 	AllocIDFunc func() uint64
 	Limiter     *rate.Limiter
 	InMemory    bool
-	S3          options.S3Options
-	InstanceID  uint32
+	S3          s3util.Options
 
 	splitHints []y.Key
 
@@ -496,18 +495,14 @@ type compactor interface {
 }
 
 type localCompactor struct {
-}
-
-func (c *localCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
-	return CompactTables(cd, stats, discardStats, nil)
-}
-
-type localS3Compactor struct {
 	s3c *s3util.S3Client
 }
 
-func (s *localS3Compactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
-	return CompactTables(cd, stats, discardStats, s.s3c)
+func (c *localCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
+	if c.s3c != nil {
+		cd.InMemory = true
+	}
+	return CompactTables(cd, stats, discardStats, c.s3c)
 }
 
 type remoteCompactor struct {
@@ -688,7 +683,8 @@ func (c *CompactionServer) handleConn(conn net.Conn) error {
 	cd := new(CompactDef)
 	cd.HasOverlap = req.Overlap
 	for i, result := range recvFiles {
-		t, err := sstable.OpenInMemoryTable(result.FileData, result.IndexData)
+		inMemReader := sstable.NewInMemFile(result.FileData, result.IndexData)
+		t, err := sstable.OpenInMemoryTable(inMemReader)
 		if err != nil {
 			return err
 		}

@@ -3,6 +3,8 @@ package sstable
 import (
 	"io/ioutil"
 	"os"
+	"sync/atomic"
+	"unsafe"
 
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/s3util"
@@ -10,38 +12,47 @@ import (
 	"github.com/pingcap/errors"
 )
 
-type DataReader interface {
+type TableFile interface {
 	ReadBlock(offset, length int64) ([]byte, error)
 	ReadIndex() (*TableIndex, error)
+	LoadToMem() error
 	Close()
+	Delete()
 }
 
-// InMemReader keep data in memory.
-type InMemReader struct {
+// InMemFile keep data in memory.
+type InMemFile struct {
 	blocksData []byte
 	index      *TableIndex
 }
 
-func NewInMemReader(blockData, indexData []byte) DataReader {
+func NewInMemFile(blockData, indexData []byte) *InMemFile {
 	index := NewTableIndex(indexData)
-	return &InMemReader{
+	return &InMemFile{
 		blocksData: blockData,
 		index:      index,
 	}
 }
 
-func (r *InMemReader) ReadBlock(offset, length int64) ([]byte, error) {
+func (r *InMemFile) ReadBlock(offset, length int64) ([]byte, error) {
 	return r.blocksData[offset : offset+length], nil
 }
 
-func (r *InMemReader) ReadIndex() (*TableIndex, error) {
+func (r *InMemFile) ReadIndex() (*TableIndex, error) {
 	return r.index, nil
 }
 
-func (r *InMemReader) Close() {
+func (r *InMemFile) Close() {
 }
 
-func NewInMemReaderFromFile(filename string) (DataReader, error) {
+func (r *InMemFile) Delete() {
+}
+
+func (r *InMemFile) LoadToMem() error {
+	return nil
+}
+
+func NewInMemFileFromFile(filename string) (*InMemFile, error) {
 	blockData, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return nil, err
@@ -50,17 +61,17 @@ func NewInMemReaderFromFile(filename string) (DataReader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewInMemReader(blockData, indexData), nil
+	return NewInMemFile(blockData, indexData), nil
 }
 
-type MMapReader struct {
-	*InMemReader
+type MMapFile struct {
+	*InMemFile
 
 	fd    *os.File
 	idxFd *os.File
 }
 
-func NewMMapReader(filename string) (DataReader, error) {
+func NewMMapFile(filename string) (TableFile, error) {
 	fd, tblSize, err := getFdWithSize(filename)
 	if err != nil {
 		return nil, err
@@ -70,10 +81,10 @@ func NewMMapReader(filename string) (DataReader, error) {
 		fd.Close()
 		return nil, err
 	}
-	mmReader := &MMapReader{
-		InMemReader: &InMemReader{},
-		fd:          fd,
-		idxFd:       fd,
+	mmReader := &MMapFile{
+		InMemFile: &InMemFile{},
+		fd:        fd,
+		idxFd:     fd,
 	}
 	mmReader.blocksData, err = y.Mmap(fd, false, tblSize)
 	if err != nil {
@@ -95,23 +106,34 @@ func NewMMapReader(filename string) (DataReader, error) {
 func getFdWithSize(filename string) (fd *os.File, size int64, err error) {
 	fd, err = y.OpenExistingFile(filename, 0)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.WithStack(err)
 	}
 	fdi, err := fd.Stat()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.WithStack(err)
 	}
 	return fd, fdi.Size(), nil
 }
 
-func (r *MMapReader) Close() {
+func (r *MMapFile) Close() {
 	y.Munmap(r.index.IndexData)
 	y.Munmap(r.blocksData)
 	r.idxFd.Close()
 	r.fd.Close()
 }
 
-type LocalFileBlockReader struct {
+func (r *MMapFile) LoadToMem() error {
+	return nil
+}
+
+func (r *MMapFile) Delete() {
+	filename := r.fd.Name()
+	r.Close()
+	os.Remove(filename)
+	os.Remove(IndexFilename(filename))
+}
+
+type LocalFile struct {
 	blockCache *cache.Cache
 	indexCache *cache.Cache
 	fid        uint32
@@ -119,9 +141,10 @@ type LocalFileBlockReader struct {
 	tblSize    uint32
 	idxFd      *os.File
 	idxSize    uint32
+	memReader  unsafe.Pointer
 }
 
-func NewLocalFileBlockReader(filename string, blockCache, indexCache *cache.Cache) (DataReader, error) {
+func NewLocalFile(filename string, blockCache, indexCache *cache.Cache) (TableFile, error) {
 	fid, ok := ParseFileID(filename)
 	if !ok {
 		return nil, errors.Errorf("Invalid filename: %s", filename)
@@ -135,7 +158,7 @@ func NewLocalFileBlockReader(filename string, blockCache, indexCache *cache.Cach
 		fd.Close()
 		return nil, err
 	}
-	reader := &LocalFileBlockReader{
+	reader := &LocalFile{
 		blockCache: blockCache,
 		indexCache: indexCache,
 		fid:        uint32(fid),
@@ -147,7 +170,10 @@ func NewLocalFileBlockReader(filename string, blockCache, indexCache *cache.Cach
 	return reader, nil
 }
 
-func (r *LocalFileBlockReader) ReadBlock(offset, length int64) ([]byte, error) {
+func (r *LocalFile) ReadBlock(offset, length int64) ([]byte, error) {
+	if ptr := atomic.LoadPointer(&r.memReader); ptr != nil {
+		return (*InMemFile)(ptr).ReadBlock(offset, length)
+	}
 	blockData, err := r.blockCache.GetOrCompute(blockCacheKey(r.fid, uint32(offset)), func() (interface{}, int64, error) {
 		data := make([]byte, length)
 		_, err := r.fd.ReadAt(data, offset)
@@ -159,7 +185,10 @@ func (r *LocalFileBlockReader) ReadBlock(offset, length int64) ([]byte, error) {
 	return blockData.([]byte), nil
 }
 
-func (r *LocalFileBlockReader) ReadIndex() (*TableIndex, error) {
+func (r *LocalFile) ReadIndex() (*TableIndex, error) {
+	if ptr := atomic.LoadPointer(&r.memReader); ptr != nil {
+		return (*InMemFile)(ptr).ReadIndex()
+	}
 	index, err := r.indexCache.GetOrCompute(uint64(r.fid), func() (interface{}, int64, error) {
 		data := make([]byte, r.idxSize)
 		_, err := r.idxFd.ReadAt(data, 0)
@@ -174,37 +203,58 @@ func (r *LocalFileBlockReader) ReadIndex() (*TableIndex, error) {
 	return index.(*TableIndex), nil
 }
 
-func (r *LocalFileBlockReader) Close() {
+func (r *LocalFile) Close() {
 	r.idxFd.Close()
 	r.fd.Close()
+}
+
+func (r *LocalFile) Delete() {
+	filename := r.fd.Name()
+	r.Close()
+	os.Remove(filename)
+	os.Remove(IndexFilename(filename))
+}
+
+func (r *LocalFile) LoadToMem() error {
+	memReader, err := NewInMemFileFromFile(r.fd.Name())
+	if err != nil {
+		return err
+	}
+	atomic.StorePointer(&r.memReader, unsafe.Pointer(memReader))
+	return nil
 }
 
 func blockCacheKey(fid, offset uint32) uint64 {
 	return uint64(fid)<<32 | uint64(offset)
 }
 
-type S3BlockReader struct {
+type S3File struct {
 	blockCache *cache.Cache
 	idxCache   *cache.Cache
-	instanceID uint32
 	fid        uint32
+	filename   string
 	s3c        *s3util.S3Client
+	memReader  unsafe.Pointer
 }
 
-func NewS3BlockReader(instanceID, fid uint32, blockCache, idxCache *cache.Cache, s3c *s3util.S3Client) (DataReader, error) {
-	reader := &S3BlockReader{
+func NewS3File(filename string, blockCache, idxCache *cache.Cache, s3c *s3util.S3Client) (TableFile, error) {
+	fid, _ := ParseFileID(filename)
+	reader := &S3File{
 		blockCache: blockCache,
 		idxCache:   idxCache,
-		instanceID: instanceID,
-		fid:        fid,
+		filename:   filename,
+		fid:        uint32(fid),
 		s3c:        s3c,
 	}
 	return reader, nil
 }
 
-func (r *S3BlockReader) ReadBlock(offset, length int64) ([]byte, error) {
+func (r *S3File) ReadBlock(offset, length int64) ([]byte, error) {
+	if ptr := atomic.LoadPointer(&r.memReader); ptr != nil {
+		return (*InMemFile)(ptr).ReadBlock(offset, length)
+	}
 	blockData, err := r.blockCache.GetOrCompute(blockCacheKey(r.fid, uint32(offset)), func() (interface{}, int64, error) {
-		data, err := r.s3c.Get(s3util.BlockKey(r.instanceID, r.fid), offset, length)
+		data, err := r.s3c.Get(r.s3c.BlockKey(r.fid), offset, length)
 		return data, length, err
 	})
 	if err != nil {
@@ -213,9 +263,12 @@ func (r *S3BlockReader) ReadBlock(offset, length int64) ([]byte, error) {
 	return blockData.([]byte), nil
 }
 
-func (r *S3BlockReader) ReadIndex() (*TableIndex, error) {
+func (r *S3File) ReadIndex() (*TableIndex, error) {
+	if ptr := atomic.LoadPointer(&r.memReader); ptr != nil {
+		return (*InMemFile)(ptr).ReadIndex()
+	}
 	index, err := r.idxCache.GetOrCompute(uint64(r.fid), func() (interface{}, int64, error) {
-		data, err := r.s3c.Get(s3util.IndexKey(r.instanceID, r.fid), 0, 0)
+		data, err := r.s3c.Get(r.s3c.IndexKey(r.fid), 0, 0)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -227,7 +280,28 @@ func (r *S3BlockReader) ReadIndex() (*TableIndex, error) {
 	return index.(*TableIndex), nil
 }
 
-func (r *S3BlockReader) Close() {
+func (r *S3File) Close() {
 	// Is del all blocks from the cache worth?
 	r.idxCache.Del(uint64(r.fid))
+}
+
+func (r *S3File) LoadToMem() error {
+	blockData, err := r.s3c.Get(r.s3c.BlockKey(r.fid), 0, 0)
+	if err != nil {
+		return err
+	}
+	idx, err := r.ReadIndex()
+	if err != nil {
+		return err
+	}
+	memReader := NewInMemFile(blockData, idx.IndexData)
+	atomic.StorePointer(&r.memReader, unsafe.Pointer(memReader))
+	return nil
+}
+
+func (r *S3File) Delete() {
+	r.s3c.Delete(r.s3c.BlockKey(r.fid))
+	r.s3c.Delete(r.s3c.IndexKey(r.fid))
+	os.Remove(r.filename)
+	os.Remove(IndexFilename(r.filename))
 }
