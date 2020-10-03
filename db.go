@@ -92,8 +92,6 @@ type DB struct {
 	vlogSize     int64
 	volatileMode bool
 
-	blobManger blobManager
-
 	resourceMgr *epoch.ResourceManager
 
 	s3client *s3util.S3Client
@@ -353,10 +351,6 @@ func Open(opt Options) (db *DB, err error) {
 	}()
 	db.mtbls.Store(newMemTables(<-db.memTableCh, &memTables{}))
 
-	if err = db.blobManger.Open(db, opt); err != nil {
-		return nil, err
-	}
-
 	if !opt.ReadOnly {
 		db.closers.compactors = y.NewCloser(1)
 		db.lc.startCompact(db.closers.compactors)
@@ -458,9 +452,6 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 			discardStats.collect(it.Value())
 		}
 		deletes[i] = tbl
-	}
-	if len(discardStats.ptrs) > 0 {
-		db.blobManger.discardCh <- &discardStats
 	}
 	guard.Delete(deletes)
 	guard.Done()
@@ -841,7 +832,6 @@ func arenaSize(opt Options) int64 {
 func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) (*sstable.BuildResult, error) {
 	iter := s.NewIterator(false)
 	var (
-		bb                   *blobFileBuilder
 		numWrite, bytesWrite int
 		err                  error
 	)
@@ -851,20 +841,6 @@ func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) (*sstable.BuildRes
 	for iter.Rewind(); iter.Valid(); y.NextAllVersion(iter) {
 		key := iter.Key()
 		value := iter.Value()
-		if db.opt.ValueThreshold > 0 && len(value.Value) > db.opt.ValueThreshold {
-			if bb == nil {
-				if bb, err = db.newBlobFileBuilder(); err != nil {
-					return nil, y.Wrap(err)
-				}
-			}
-
-			bp, err := bb.append(value.Value)
-			if err != nil {
-				return nil, err
-			}
-			value.Meta |= bitValuePointer
-			value.Value = bp
-		}
 		if err = b.Add(key, value); err != nil {
 			return nil, err
 		}
@@ -880,22 +856,7 @@ func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) (*sstable.BuildRes
 	if result, err = b.Finish(); err != nil {
 		return nil, y.Wrap(err)
 	}
-	if bb != nil {
-		bf, err1 := bb.finish()
-		if err1 != nil {
-			return nil, err1
-		}
-		log.Info("build L0 blob", zap.Uint32("id", bf.fid), zap.Uint32("size", bf.fileSize))
-		err1 = db.blobManger.addFile(bf)
-		if err1 != nil {
-			return nil, err1
-		}
-	}
 	return result, nil
-}
-
-func (db *DB) newBlobFileBuilder() (*blobFileBuilder, error) {
-	return newBlobFileBuilder(db.blobManger.allocFileID(), db.opt.Dir, db.opt.TableBuilderOptions.WriteBufferSize)
 }
 
 type flushTask struct {

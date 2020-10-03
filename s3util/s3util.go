@@ -26,7 +26,7 @@ type Options struct {
 
 type S3Client struct {
 	Options
-	cli       *s3.S3
+	cli *s3.S3
 }
 
 func NewS3Client(opts Options) *S3Client {

@@ -159,7 +159,6 @@ type Txn struct {
 	size         int64
 	count        int64
 	numIterators int32
-	blobCache    map[uint32]*blobCache
 }
 
 type pendingWritesIterator struct {
@@ -442,7 +441,6 @@ func (txn *Txn) Discard() {
 		panic("Unclosed iterator at time of Txn.Discard.")
 	}
 	txn.discarded = true
-	txn.blobCache = nil
 	if txn.update {
 		txn.db.orc.decrRef()
 	}

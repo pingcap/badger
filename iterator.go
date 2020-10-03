@@ -84,25 +84,11 @@ func (item *Item) IsEmpty() bool {
 // instead, or copy it yourself. Value might change once discard or commit is called.
 // Use ValueCopy if you want to do a Set after Get.
 func (item *Item) Value() ([]byte, error) {
-	if item.meta&bitValuePointer > 0 {
-		if item.slice == nil {
-			item.slice = new(y.Slice)
-		}
-		if item.txn.blobCache == nil {
-			item.txn.blobCache = map[uint32]*blobCache{}
-		}
-		return item.db.blobManger.read(item.vptr, item.slice, item.txn.blobCache)
-	}
 	return item.vptr, nil
 }
 
 // ValueSize returns the size of the value without the cost of retrieving the value.
 func (item *Item) ValueSize() int {
-	if item.meta&bitValuePointer > 0 {
-		var bp blobPointer
-		bp.decode(item.vptr)
-		return int(bp.length)
-	}
 	return len(item.vptr)
 }
 

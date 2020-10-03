@@ -326,16 +326,10 @@ func (lc *levelsController) setHasOverlapTable(cd *CompactDef) {
 type DiscardStats struct {
 	numSkips     int64
 	skippedBytes int64
-	ptrs         []blobPointer
 }
 
 func (ds *DiscardStats) collect(vs y.ValueStruct) {
-	if vs.Meta&bitValuePointer > 0 {
-		var bp blobPointer
-		bp.decode(vs.Value)
-		ds.ptrs = append(ds.ptrs, bp)
-		ds.skippedBytes += int64(bp.length)
-	}
+	ds.skippedBytes += int64(len(vs.Value) + len(vs.UserMeta))
 	ds.numSkips++
 }
 
@@ -616,9 +610,6 @@ func (lc *levelsController) handleStats(nexLevel int, stats *y.CompactionStats, 
 	stats.BytesDiscard = int(discardStats.skippedBytes)
 	lc.levels[nexLevel].metrics.UpdateCompactionStats(stats)
 	log.Info("compact send discard stats", zap.Stringer("stats", discardStats))
-	if len(discardStats.ptrs) > 0 {
-		lc.kv.blobManger.discardCh <- discardStats
-	}
 }
 
 func buildChangeSet(cd *CompactDef, newTables []table.Table) protos.ManifestChangeSet {

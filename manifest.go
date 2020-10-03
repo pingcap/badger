@@ -49,7 +49,7 @@ type Manifest struct {
 	Creations int
 	Deletions int
 
-	Head       *protos.HeadInfo
+	Head *protos.HeadInfo
 }
 
 func createManifest() Manifest {
