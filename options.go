@@ -112,6 +112,8 @@ type Options struct {
 	RemoteCompactionAddr string
 
 	S3Options s3util.Options
+
+	NumCFs int
 }
 
 // CompactionFilter is an interface that user can implement to remove certain keys.

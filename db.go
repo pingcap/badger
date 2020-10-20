@@ -200,33 +200,9 @@ func replayFunction(out *DB) func(Entry) error {
 
 // Open returns a new DB object.
 func Open(opt Options) (db *DB, err error) {
-	opt.maxBatchSize = (15 * opt.MaxMemTableSize) / 100
-	opt.maxBatchCount = opt.maxBatchSize / int64(memtable.MaxNodeSize)
-
-	if opt.ValueThreshold > math.MaxUint16-16 {
-		return nil, ErrValueThreshold
-	}
-
-	if opt.ReadOnly {
-		// Can't truncate if the DB is read only.
-		opt.Truncate = false
-	}
-
-	for _, path := range []string{opt.Dir, opt.ValueDir} {
-		dirExists, err := exists(path)
-		if err != nil {
-			return nil, y.Wrapf(err, "Invalid Dir: %q", path)
-		}
-		if !dirExists {
-			if opt.ReadOnly {
-				return nil, y.Wrapf(err, "Cannot find Dir for read-only open: %q", path)
-			}
-			// Try to create the directory
-			err = os.Mkdir(path, 0700)
-			if err != nil {
-				return nil, y.Wrapf(err, "Error Creating Dir: %q", path)
-			}
-		}
+	err = checkOptions(&opt)
+	if err != nil {
+		return nil, err
 	}
 	absDir, err := filepath.Abs(opt.Dir)
 	if err != nil {
@@ -257,9 +233,6 @@ func Open(opt Options) (db *DB, err error) {
 			_ = valueDirLockGuard.release()
 		}
 	}()
-	if !(opt.ValueLogFileSize <= 2<<30 && opt.ValueLogFileSize >= 1<<20) {
-		return nil, ErrValueLogSize
-	}
 	manifestFile, manifest, err := openOrCreateManifestFile(opt.Dir, opt.ReadOnly)
 	if err != nil {
 		return nil, err
@@ -276,28 +249,9 @@ func Open(opt Options) (db *DB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 
-	var blkCache, idxCache *cache.Cache
-	if opt.MaxBlockCacheSize != 0 {
-		var err error
-		blkCache, err = cache.NewCache(&cache.Config{
-			// The expected keys is MaxCacheSize / BlockSize, then x10 as documentation suggests.
-			NumCounters: opt.MaxBlockCacheSize / int64(opt.TableBuilderOptions.BlockSize) * 10,
-			MaxCost:     opt.MaxBlockCacheSize,
-			BufferItems: 64,
-		})
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create block cache")
-		}
-
-		indexSizeHint := float64(opt.TableBuilderOptions.MaxTableSize) / 6.0
-		idxCache, err = cache.NewCache(&cache.Config{
-			NumCounters: int64(float64(opt.MaxIndexCacheSize) / indexSizeHint * 10),
-			MaxCost:     opt.MaxIndexCacheSize,
-			BufferItems: 64,
-		})
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create index cache")
-		}
+	blkCache, idxCache, err := createCache(opt)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create block cache")
 	}
 	db = &DB{
 		flushChan:     make(chan *flushTask, opt.NumMemtables),
@@ -397,6 +351,66 @@ func Open(opt Options) (db *DB, err error) {
 	dirLockGuard = nil
 	manifestFile = nil
 	return db, nil
+}
+
+func checkOptions(opt *Options) error {
+	opt.maxBatchSize = (15 * opt.MaxMemTableSize) / 100
+	opt.maxBatchCount = opt.maxBatchSize / int64(memtable.MaxNodeSize)
+
+	if opt.ValueThreshold > math.MaxUint16-16 {
+		return ErrValueThreshold
+	}
+	if !(opt.ValueLogFileSize <= 2<<30 && opt.ValueLogFileSize >= 1<<20) {
+		return ErrValueLogSize
+	}
+
+	if opt.ReadOnly {
+		// Can't truncate if the DB is read only.
+		opt.Truncate = false
+	}
+
+	for _, path := range []string{opt.Dir, opt.ValueDir} {
+		dirExists, err := exists(path)
+		if err != nil {
+			return y.Wrapf(err, "Invalid Dir: %q", path)
+		}
+		if !dirExists {
+			if opt.ReadOnly {
+				return y.Wrapf(err, "Cannot find Dir for read-only open: %q", path)
+			}
+			// Try to create the directory
+			err = os.Mkdir(path, 0700)
+			if err != nil {
+				return y.Wrapf(err, "Error Creating Dir: %q", path)
+			}
+		}
+	}
+	return nil
+}
+
+func createCache(opt Options) (blkCache, idxCache *cache.Cache, err error) {
+	if opt.MaxBlockCacheSize != 0 {
+		blkCache, err = cache.NewCache(&cache.Config{
+			// The expected keys is MaxCacheSize / BlockSize, then x10 as documentation suggests.
+			NumCounters: opt.MaxBlockCacheSize / int64(opt.TableBuilderOptions.BlockSize) * 10,
+			MaxCost:     opt.MaxBlockCacheSize,
+			BufferItems: 64,
+		})
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "failed to create block cache")
+		}
+
+		indexSizeHint := float64(opt.TableBuilderOptions.MaxTableSize) / 6.0
+		idxCache, err = cache.NewCache(&cache.Config{
+			NumCounters: int64(float64(opt.MaxIndexCacheSize) / indexSizeHint * 10),
+			MaxCost:     opt.MaxIndexCacheSize,
+			BufferItems: 64,
+		})
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "failed to create index cache")
+		}
+	}
+	return
 }
 
 // DeleteFilesInRange delete files in [start, end).

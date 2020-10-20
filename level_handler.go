@@ -44,7 +44,7 @@ type levelHandler struct {
 	level        int
 	strLevel     string
 	maxTotalSize int64
-	db           *DB
+	numL0Stall   int
 	metrics      *y.LevelMetricsSet
 }
 
@@ -186,13 +186,13 @@ func containsTable(tables []table.Table, tbl table.Table) bool {
 	return false
 }
 
-func newLevelHandler(db *DB, level int) *levelHandler {
+func newLevelHandler(numL0Stall, level int, metrics *y.MetricsSet) *levelHandler {
 	label := fmt.Sprintf("L%d", level)
 	return &levelHandler{
-		level:    level,
-		strLevel: label,
-		db:       db,
-		metrics:  db.metrics.NewLevelMetricsSet(label),
+		level:      level,
+		strLevel:   label,
+		numL0Stall: numL0Stall,
+		metrics:    metrics.NewLevelMetricsSet(label),
 	}
 }
 
@@ -204,7 +204,7 @@ func (s *levelHandler) tryAddLevel0Table(t table.Table) bool {
 	defer s.Unlock()
 	// Return false only if number of tables is more than number of
 	// ZeroTableStall. For on disk L0, we should just add the tables to the level.
-	if len(s.tables) >= s.db.opt.NumLevelZeroTablesStall {
+	if len(s.tables) >= s.numL0Stall {
 		return false
 	}
 

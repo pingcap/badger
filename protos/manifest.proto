@@ -23,6 +23,7 @@ message ManifestChangeSet {
   // A set of changes that are applied atomically.
   repeated ManifestChange changes = 1;
   HeadInfo head = 2;
+  repeated ShardChange shardChange = 3;
 }
 
 message HeadInfo {
@@ -40,4 +41,15 @@ message ManifestChange {
   }
   Operation Op   = 2;
   uint32 Level   = 3;       // Only used for CREATE.
+}
+
+message ShardChange {
+  uint32 shardID  = 1;
+  enum Operation {
+    CREATE = 0;
+    DELETE = 1;
+  }
+  Operation Op    = 2;
+  bytes  startKey = 3;
+  bytes  endKey   = 4;
 }

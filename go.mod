@@ -32,6 +32,7 @@ require (
 	golang.org/x/sys v0.0.0-20190626221950-04f50cda93cb
 	golang.org/x/time v0.0.0-20181108054448-85acf8d2951c
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
+	github.com/google/btree v1.0.0
 )
 
 // this fork has some performance tweak (e.g. surf package's test time, 600s -> 100s)

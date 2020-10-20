@@ -224,26 +224,31 @@ var magicText = [4]byte{'B', 'd', 'g', 'r'}
 const magicVersion = 4
 
 func helpRewrite(dir string, m *Manifest) (*os.File, int, error) {
-	rewritePath := filepath.Join(dir, manifestRewriteFilename)
-	// We explicitly sync.
-	fp, err := y.OpenTruncFile(rewritePath, false)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	buf := make([]byte, 8)
-	copy(buf[0:4], magicText[:])
-	binary.BigEndian.PutUint32(buf[4:8], magicVersion)
-
 	netCreations := len(m.Tables)
 	changes := m.asChanges()
 	set := protos.ManifestChangeSet{Changes: changes, Head: m.Head}
 
 	changeBuf, err := set.Marshal()
 	if err != nil {
-		fp.Close()
 		return nil, 0, err
 	}
+	fp, err := rewriteManifest(changeBuf, dir)
+	if err != nil {
+		return nil, 0, err
+	}
+	return fp, netCreations, nil
+}
+
+func rewriteManifest(changeBuf []byte, dir string) (*os.File, error) {
+	rewritePath := filepath.Join(dir, manifestRewriteFilename)
+	// We explicitly sync.
+	fp, err := y.OpenTruncFile(rewritePath, false)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 8)
+	copy(buf[0:4], magicText[:])
+	binary.BigEndian.PutUint32(buf[4:8], magicVersion)
 	var lenCrcBuf [8]byte
 	binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(changeBuf)))
 	binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(changeBuf, y.CastagnoliCrcTable))
@@ -251,35 +256,34 @@ func helpRewrite(dir string, m *Manifest) (*os.File, int, error) {
 	buf = append(buf, changeBuf...)
 	if _, err := fp.Write(buf); err != nil {
 		fp.Close()
-		return nil, 0, err
+		return nil, err
 	}
 	if err := fp.Sync(); err != nil {
 		fp.Close()
-		return nil, 0, err
+		return nil, err
 	}
 
 	// In Windows the files should be closed before doing a Rename.
 	if err = fp.Close(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	manifestPath := filepath.Join(dir, ManifestFilename)
 	if err := os.Rename(rewritePath, manifestPath); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	fp, err = y.OpenExistingFile(manifestPath, 0)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	if _, err := fp.Seek(0, io.SeekEnd); err != nil {
 		fp.Close()
-		return nil, 0, err
+		return nil, err
 	}
 	if err := syncDir(dir); err != nil {
 		fp.Close()
-		return nil, 0, err
+		return nil, err
 	}
-
-	return fp, netCreations, nil
+	return fp, nil
 }
 
 // Must be called while appendLock is held.
@@ -328,56 +332,72 @@ var (
 // truncated at that point before further appends are made (if there is a partial entry after
 // that).  In normal conditions, truncOffset is the file size.
 func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error) {
-	r := countingReader{wrapped: bufio.NewReader(fp)}
-
-	var magicBuf [8]byte
-	if _, err := io.ReadFull(&r, magicBuf[:]); err != nil {
-		return Manifest{}, 0, errBadMagic
-	}
-	if !bytes.Equal(magicBuf[0:4], magicText[:]) {
-		return Manifest{}, 0, errBadMagic
-	}
-	version := binary.BigEndian.Uint32(magicBuf[4:8])
-	if version != magicVersion {
-		return Manifest{}, 0,
-			fmt.Errorf("manifest has unsupported version: %d (we support %d)", version, magicVersion)
+	r := &countingReader{wrapped: bufio.NewReader(fp)}
+	if err = readManifestMagic(r); err != nil {
+		return Manifest{}, 0, err
 	}
 
 	build := createManifest()
 	var offset int64
 	for {
 		offset = r.count
-		var lenCrcBuf [8]byte
-		_, err := io.ReadFull(&r, lenCrcBuf[:])
+		var changeSet *protos.ManifestChangeSet
+		changeSet, err = readChangeSet(r)
 		if err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				break
-			}
 			return Manifest{}, 0, err
 		}
-		length := binary.BigEndian.Uint32(lenCrcBuf[0:4])
-		var buf = make([]byte, length)
-		if _, err := io.ReadFull(&r, buf); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				break
-			}
-			return Manifest{}, 0, err
-		}
-		if crc32.Checksum(buf, y.CastagnoliCrcTable) != binary.BigEndian.Uint32(lenCrcBuf[4:8]) {
+		if changeSet == nil {
 			break
 		}
 
-		var changeSet protos.ManifestChangeSet
-		if err := changeSet.Unmarshal(buf); err != nil {
-			return Manifest{}, 0, err
-		}
-
-		if err := applyChangeSet(&build, &changeSet); err != nil {
+		if err := applyChangeSet(&build, changeSet); err != nil {
 			return Manifest{}, 0, err
 		}
 	}
 
 	return build, offset, err
+}
+
+func readManifestMagic(r io.Reader) error {
+	var magicBuf [8]byte
+	if _, err := io.ReadFull(r, magicBuf[:]); err != nil {
+		return errBadMagic
+	}
+	if !bytes.Equal(magicBuf[0:4], magicText[:]) {
+		return errBadMagic
+	}
+	version := binary.BigEndian.Uint32(magicBuf[4:8])
+	if version != magicVersion {
+		return fmt.Errorf("manifest has unsupported version: %d (we support %d)", version, magicVersion)
+	}
+	return nil
+}
+
+func readChangeSet(r io.Reader) (*protos.ManifestChangeSet, error) {
+	var lenCrcBuf [8]byte
+	_, err := io.ReadFull(r, lenCrcBuf[:])
+	if err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, nil
+		}
+		return nil, err
+	}
+	length := binary.BigEndian.Uint32(lenCrcBuf[0:4])
+	var buf = make([]byte, length)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if crc32.Checksum(buf, y.CastagnoliCrcTable) != binary.BigEndian.Uint32(lenCrcBuf[4:8]) {
+		return nil, nil
+	}
+	var changeSet protos.ManifestChangeSet
+	if err := changeSet.Unmarshal(buf); err != nil {
+		return nil, err
+	}
+	return &changeSet, nil
 }
 
 func addNewToManifest(build *Manifest, tc *protos.ManifestChange) {

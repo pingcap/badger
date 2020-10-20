@@ -180,8 +180,8 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	defer kv.Close()
 	kv.blockCache, kv.indexCache = testCache(), testCache()
 
-	lh0 := newLevelHandler(kv, 0)
-	lh1 := newLevelHandler(kv, 1)
+	lh0 := newLevelHandler(kv.opt.NumLevelZeroTablesStall, 0, kv.metrics)
+	lh1 := newLevelHandler(kv.opt.NumLevelZeroTablesStall, 1, kv.metrics)
 	f := buildTestTable(t, "k", 2)
 	reader, _ := newTableFile(f.Name(), kv)
 	t1, err := sstable.OpenTable(f.Name(), reader)

@@ -92,7 +92,7 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 	s.cstatus.levels = make([]*levelCompactStatus, kv.opt.TableBuilderOptions.MaxLevels)
 
 	for i := 0; i < kv.opt.TableBuilderOptions.MaxLevels; i++ {
-		s.levels[i] = newLevelHandler(kv, i)
+		s.levels[i] = newLevelHandler(kv.opt.NumLevelZeroTablesStall, i, kv.metrics)
 		if i == 0 {
 			// Do nothing.
 		} else if i == 1 {
