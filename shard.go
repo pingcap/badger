@@ -7,11 +7,11 @@ import (
 	"github.com/ncw/directio"
 	"github.com/pingcap/badger/epoch"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/google/btree"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
@@ -19,14 +19,7 @@ import (
 )
 
 type ShardManager struct {
-	// shardByID is a very frequent operation, we need to use plain map without lock to access.
-	// It is only used in write thread.
-	shardsByID map[uint32]*Shard
-	oldShards  map[uint32]*Shard
-	// for infrequent usage out of the write thread we use a sync.Map to access.
-	shardsByIDSafe sync.Map
-
-	shardsByKey *shardByKeyTree
+	shardsByKey unsafe.Pointer
 	lastShardID uint32
 	lastFid     *uint32
 	opt         Options
@@ -36,10 +29,11 @@ type ShardManager struct {
 
 func NewShardManager(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet) (*ShardManager, error) {
 	sm := &ShardManager{
-		shardsByID:  map[uint32]*Shard{},
-		shardsByKey: &shardByKeyTree{tree: btree.New(8)},
-		opt:         opt,
-		metrics:     metrics,
+		opt:     opt,
+		metrics: metrics,
+	}
+	shardByKey := &shardByKeyTree{
+		shards: make([]*Shard, 0, len(manifest.shards)),
 	}
 	for _, mShard := range manifest.shards {
 		shard := &Shard{
@@ -83,80 +77,41 @@ func NewShardManager(manifest *ShardingManifest, opt Options, metrics *y.Metrics
 				}
 			}
 		}
-		sm.shardsByID[shard.ID] = shard
+		shardByKey.shards = append(shardByKey.shards, shard)
 	}
-	for _, oldShard := range manifest.oldShards {
-		sm.oldShards[oldShard.ID] = &Shard{
-			ID:    oldShard.ID,
-			Start: oldShard.Start,
-			End:   oldShard.End,
-		}
-	}
+	sort.Slice(shardByKey.shards, func(i, j int) bool {
+		return bytes.Compare(shardByKey.shards[i].Start, shardByKey.shards[j].Start) < 0
+	})
+	atomic.StorePointer(&sm.shardsByKey, unsafe.Pointer(shardByKey))
 	return sm, nil
 }
 
+// This data structure is rarely written, so we can make it immutable.
 type shardByKeyTree struct {
-	mu   sync.RWMutex
-	tree *btree.BTree
+	shards []*Shard
 }
 
-func (st *shardByKeyTree) replace(removes []*Shard, adds []*Shard) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	for _, remove := range removes {
-		st.tree.Delete(shardItem{
-			startKey: remove.Start,
-		})
-	}
-	for _, add := range adds {
-		st.tree.ReplaceOrInsert(shardItem{
-			startKey: add.Start,
-			shardID:  add.ID,
-		})
-	}
-}
-
-type shardItem struct {
-	startKey []byte
-	shardID  uint32
-}
-
-func (si shardItem) Less(i btree.Item) bool {
-	return bytes.Compare(si.startKey, i.(shardItem).startKey) < 0
-}
-
-func (st *shardByKeyTree) get(key []byte) uint32 {
-	st.mu.RLock()
-	defer st.mu.RUnlock()
-	var shardID uint32
-	st.tree.DescendLessOrEqual(shardItem{
-		startKey: key,
-	}, func(i btree.Item) bool {
-		shardID = i.(shardItem).shardID
-		return false
+// the removes and adds has the same total range, so we can append before and after.
+func (st *shardByKeyTree) replace(removes []*Shard, adds []*Shard) *shardByKeyTree {
+	newShards := make([]*Shard, 0, len(st.shards)+len(adds)-len(removes))
+	idx := sort.Search(len(st.shards), func(i int) bool {
+		return bytes.Compare(st.shards[i].Start, removes[0].Start) < 0
 	})
-	return shardID
+	newShards = append(newShards, st.shards[:idx]...)
+	newShards = append(newShards, adds...)
+	newShards = append(newShards, st.shards[idx+len(removes):]...)
+	return &shardByKeyTree{shards: newShards}
 }
 
-func (sm *ShardManager) getShardByIDSafe(shardID uint32) *Shard {
-	val, ok := sm.shardsByIDSafe.Load(shardID)
-	if !ok {
-		return nil
-	}
-	return val.(*Shard)
+func (st *shardByKeyTree) get(key []byte) *Shard {
+	idx := sort.Search(len(st.shards), func(i int) bool {
+		return bytes.Compare(key, st.shards[i].End) < 0
+	})
+	return st.shards[idx]
 }
 
-func (sm *ShardManager) split(shardID uint32) error {
-	oldShard := sm.shardsByID[shardID]
-	newShards := sm.Split(oldShard)
-	for _, ns := range newShards {
-		sm.shardsByIDSafe.Store(ns.ID, ns)
-		sm.shardsByID[ns.ID] = ns
-	}
-	sm.shardsByKey.replace([]*Shard{oldShard}, newShards)
-	sm.shardsByIDSafe.Delete(shardID)
-	delete(sm.shardsByID, shardID)
-	return nil
+func (sm *ShardManager) loadShardByKeyTree() *shardByKeyTree {
+	return (*shardByKeyTree)(atomic.LoadPointer(&sm.shardsByKey))
 }
 
 func (sm *ShardManager) allocShardID() uint32 {
@@ -199,12 +154,23 @@ func (s *Shard) CASLevels(cf int, old, new *ShardLevels) bool {
 	return atomic.CompareAndSwapPointer(&s.cfLevels[cf], unsafe.Pointer(old), unsafe.Pointer(new))
 }
 
+func (st *Shard) Get(cf byte, key y.Key, keyHash uint64) y.ValueStruct {
+	levels := st.LoadShardLevels(int(cf))
+	for _, level := range levels.levels {
+		v := level.get(key, keyHash)
+		if v.Valid() {
+			return v
+		}
+	}
+	return y.ValueStruct{}
+}
+
 type Level struct {
 	tables []table.Table
 }
 
-// PreSplit blocks all compactions
-func (sm *ShardManager) PreSplit(s *Shard, keys [][]byte) error {
+// preSplit blocks all compactions
+func (sm *ShardManager) preSplit(s *Shard, keys [][]byte) error {
 	s.lock.Lock()
 	s.splitKeys = keys
 	s.lock.Unlock()
@@ -303,8 +269,8 @@ func builderToTable(b *sstable.Builder) (table.Table, error) {
 }
 
 // At this stage, all files are split by splitKeys, it is a fast operation.
-// This is done after PreSplit is done, so we don't need to acquire any lock, just atomic CAS will do.
-func (sm *ShardManager) Split(s *Shard) []*Shard {
+// This is done after preSplit is done, so we don't need to acquire any lock, just atomic CAS will do.
+func (sm *ShardManager) split(s *Shard) []*Shard {
 	newShards := make([]*Shard, 0, len(s.splitKeys)+1)
 	firstShard := &Shard{
 		ID:       sm.allocShardID(),
@@ -338,8 +304,6 @@ func (sm *ShardManager) Split(s *Shard) []*Shard {
 			}
 		}
 	}
-	sm.shardsByKey.replace([]*Shard{s}, newShards)
-
 	return newShards
 }
 
@@ -418,10 +382,9 @@ func (e *shardDataBuilder) Add(cf byte, key y.Key, value y.ValueStruct) {
 
 /*
 shard Data format:
- | CF0 Data | CF 0 index | CF1 Data | CF1 index | cfs index | shard meta | shard meta len
+ | CF0 Data | CF0 index | CF1 Data | CF1 index | cfs index
 */
-
-func (e *shardDataBuilder) Finish(meta []byte) []byte {
+func (e *shardDataBuilder) Finish() []byte {
 	cfDatas := make([][]byte, 0, len(e.builders)*2)
 	cfsIndex := make([]byte, len(e.builders)*8)
 	var fileSize int
@@ -434,14 +397,12 @@ func (e *shardDataBuilder) Finish(meta []byte) []byte {
 		fileSize += len(result.IndexData)
 		binary.LittleEndian.PutUint32(cfsIndex[i*8+4:], uint32(fileSize))
 	}
-	fileSize += len(meta) + 4
-	result := make([]byte, 0, fileSize)
+	result := make([]byte, 0, fileSize+len(cfsIndex)+1)
+	result = append(result)
 	for _, cfData := range cfDatas {
 		result = append(result, cfData...)
 	}
-	result = append(result, meta...)
-	metaLen := make([]byte, 4)
-	binary.LittleEndian.PutUint32(metaLen, uint32(len(meta)))
-	result = append(result, metaLen...)
+	result = append(result, cfsIndex...)
+	result = append(result, byte(len(e.builders))) // number of CF
 	return result
 }

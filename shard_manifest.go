@@ -2,10 +2,13 @@ package badger
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
@@ -13,13 +16,20 @@ import (
 
 // The manifest file is used to restore the tree
 type ShardingManifest struct {
+	dir         string
 	l0Files     []uint32
 	shards      map[uint32]*ShardInfo
-	oldShards   map[uint32]*ShardInfo
 	lastFileID  uint32
 	lastShardID uint32
 	version     uint64
 	fd          *os.File
+	deletions   int
+	creations   int
+
+	// Guards appends, which includes access to the manifest field.
+	appendLock sync.Mutex
+	// We make this configurable so that unit tests can hit rewrite() code quickly
+	deletionsRewriteThreshold int
 }
 
 type ShardInfo struct {
@@ -37,7 +47,6 @@ type LevelCF struct {
 }
 
 func OpenShardingManifest(dir string) (*ShardingManifest, error) {
-
 	path := filepath.Join(dir, ManifestFilename)
 	fd, err := y.OpenExistingFile(path, 0) // We explicitly sync in addChanges, outside the lock.
 	if err != nil {
@@ -45,10 +54,19 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 			return nil, err
 		}
 		m := &ShardingManifest{
-			shards:    map[uint32]*ShardInfo{},
-			oldShards: map[uint32]*ShardInfo{},
+			dir:    dir,
+			shards: map[uint32]*ShardInfo{},
 		}
-		m.fd, err = m.rewrite(dir)
+		endKey := make([]byte, 16)
+		for i := range endKey {
+			endKey[i] = 255
+		}
+		initShard := &ShardInfo{
+			ID:  1,
+			End: endKey,
+		}
+		m.shards[initShard.ID] = initShard
+		err = m.rewrite()
 		if err != nil {
 			return nil, err
 		}
@@ -94,13 +112,17 @@ func (m *ShardingManifest) toChangeSet() *protos.ManifestChangeSet {
 	return cs
 }
 
-func (m *ShardingManifest) rewrite(dir string) (*os.File, error) {
+func (m *ShardingManifest) rewrite() error {
 	changeSet := m.toChangeSet()
 	changeBuf, err := changeSet.Marshal()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return rewriteManifest(changeBuf, dir)
+	if m.fd != nil {
+		m.fd.Close()
+	}
+	m.fd, err = rewriteManifest(changeBuf, m.dir)
+	return nil
 }
 
 func (m *ShardingManifest) Close() error {
@@ -120,12 +142,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 				m.lastShardID = change.ShardID
 			}
 		case protos.ShardChange_DELETE:
-			oldShard, ok := m.shards[change.ShardID]
-			if !ok {
-				return fmt.Errorf("delete shard %d not found", change.ShardID)
-			}
 			delete(m.shards, change.ShardID)
-			m.oldShards[change.ShardID] = oldShard
 		}
 	}
 	for _, change := range cs.Changes {
@@ -139,7 +156,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 			m.applyL0Change(fid, change.Op)
 			continue
 		}
-		shardInfo := m.getShard(shardID)
+		shardInfo := m.shards[shardID]
 		if shardInfo == nil {
 			return fmt.Errorf("shard %d not found", shardID)
 		}
@@ -172,6 +189,37 @@ func (m *ShardingManifest) applyL0Change(fid uint32, op protos.ManifestChange_Op
 	}
 }
 
+func (m *ShardingManifest) addChanges(head *protos.HeadInfo, changesParam ...*protos.ManifestChange) error {
+	changes := protos.ManifestChangeSet{Changes: changesParam, Head: head}
+	buf, err := changes.Marshal()
+	if err != nil {
+		return err
+	}
+
+	// Maybe we could use O_APPEND instead (on certain file systems)
+	m.appendLock.Lock()
+	defer m.appendLock.Unlock()
+	if err := m.ApplyChangeSet(&changes); err != nil {
+		return err
+	}
+	// Rewrite manifest if it'd shrink by 1/10 and it's big enough to care
+	if m.deletions > m.deletionsRewriteThreshold &&
+		m.deletions > manifestDeletionsRatio*(m.creations-m.deletions) {
+		if err := m.rewrite(); err != nil {
+			return err
+		}
+	} else {
+		var lenCrcBuf [8]byte
+		binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(buf)))
+		binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(buf, y.CastagnoliCrcTable))
+		buf = append(lenCrcBuf[:], buf...)
+		if _, err := m.fd.Write(buf); err != nil {
+			return err
+		}
+	}
+	return m.fd.Sync()
+}
+
 type sfID uint64
 
 func newSFID(shardID, fid uint32) sfID {
@@ -200,29 +248,14 @@ func (cl cfLevel) level() uint16 {
 	return uint16(cl)
 }
 
-func (m *ShardingManifest) getShard(shardID uint32) *ShardInfo {
-	if shard, ok := m.shards[shardID]; ok {
-		return shard
-	}
-	if shard, ok := m.oldShards[shardID]; ok {
-		return shard
-	}
-	return nil
-}
-
 func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset int64, err error) {
 	r := &countingReader{wrapped: bufio.NewReader(fp)}
 	if err = readManifestMagic(r); err != nil {
 		return nil, 0, err
 	}
 	ret = &ShardingManifest{
-		shards:    map[uint32]*ShardInfo{},
-		oldShards: map[uint32]*ShardInfo{},
-		fd:        fp,
-	}
-
-	if err = readManifestMagic(r); err != nil {
-		return nil, 0, err
+		shards: map[uint32]*ShardInfo{},
+		fd:     fp,
 	}
 	var offset int64
 	for {

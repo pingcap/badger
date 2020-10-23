@@ -297,7 +297,7 @@ func (b *Builder) finishBlock() error {
 		b.buf = append(b.buf, b.tmpVals.getEntry(i)...)
 		b.entryEndOffsets = append(b.entryEndOffsets, uint32(len(b.buf)))
 	}
-	b.buf = append(b.buf, u32SliceToBytes(b.entryEndOffsets)...)
+	b.buf = append(b.buf, U32SliceToBytes(b.entryEndOffsets)...)
 	b.buf = append(b.buf, u32ToBytes(uint32(len(b.entryEndOffsets)))...)
 	b.buf = appendU16(b.buf, uint16(blockCommonLen))
 
@@ -350,7 +350,7 @@ func (b *Builder) flushSingleKeyOldVers() {
 	// numEntries
 	b.oldBlock = append(b.oldBlock, u32ToBytes(uint32(b.singleKeyOldVers.length()))...)
 	// endOffsets
-	b.oldBlock = append(b.oldBlock, u32SliceToBytes(b.singleKeyOldVers.endOffs)...)
+	b.oldBlock = append(b.oldBlock, U32SliceToBytes(b.singleKeyOldVers.endOffs)...)
 	// entries
 	b.oldBlock = append(b.oldBlock, b.singleKeyOldVers.data...)
 	b.singleKeyOldVers.reset()
@@ -438,9 +438,9 @@ func (b *Builder) Finish() (*BuildResult, error) {
 	encoder := newMetaEncoder(b.buf, ts)
 	encoder.append(b.smallest.UserKey, idSmallest)
 	encoder.append(b.biggest.UserKey, idBiggest)
-	encoder.append(u32SliceToBytes(b.baseKeys.endOffs), idBaseKeysEndOffs)
+	encoder.append(U32SliceToBytes(b.baseKeys.endOffs), idBaseKeysEndOffs)
 	encoder.append(b.baseKeys.data, idBaseKeys)
-	encoder.append(u32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)
+	encoder.append(U32SliceToBytes(b.blockEndOffsets), idBlockEndOffsets)
 	if len(b.oldBlock) > 1 {
 		encoder.append(u32ToBytes(uint32(len(b.oldBlock))), idOldBlockLen)
 	}
@@ -500,7 +500,7 @@ func u64ToBytes(v uint64) []byte {
 	return uBuf[:]
 }
 
-func u32SliceToBytes(u32s []uint32) []byte {
+func U32SliceToBytes(u32s []uint32) []byte {
 	if len(u32s) == 0 {
 		return nil
 	}
@@ -512,7 +512,7 @@ func u32SliceToBytes(u32s []uint32) []byte {
 	return b
 }
 
-func bytesToU32Slice(b []byte) []uint32 {
+func BytesToU32Slice(b []byte) []uint32 {
 	if len(b) == 0 {
 		return nil
 	}

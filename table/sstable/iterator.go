@@ -54,7 +54,7 @@ func (ski *singleKeyIterator) loadOld(oldBlock []byte) {
 	numEntries := bytesToU32(oldBlock[ski.oldOffset:])
 	endOffsStartIdx := ski.oldOffset + 4
 	endOffsEndIdx := endOffsStartIdx + 4*numEntries
-	ski.oldVals.endOffs = bytesToU32Slice(oldBlock[endOffsStartIdx:endOffsEndIdx])
+	ski.oldVals.endOffs = BytesToU32Slice(oldBlock[endOffsStartIdx:endOffsEndIdx])
 	valueEndOff := endOffsEndIdx + ski.oldVals.endOffs[numEntries-1]
 	ski.oldVals.data = oldBlock[endOffsEndIdx:valueEndOff]
 	ski.loaded = true
@@ -103,7 +103,7 @@ func (itr *blockIterator) loadEntries(data []byte) {
 	entriesNum := int(bytesToU32(data[dataLen-6:]))
 	entriesEnd := dataLen - 6
 	entriesStart := entriesEnd - entriesNum*4
-	itr.entries.endOffs = bytesToU32Slice(data[entriesStart:entriesEnd])
+	itr.entries.endOffs = BytesToU32Slice(data[entriesStart:entriesEnd])
 	itr.entries.data = data[:entriesStart]
 }
 

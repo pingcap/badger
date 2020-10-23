@@ -218,7 +218,7 @@ func (t *Table) initTableInfo() error {
 				t.biggest = y.KeyWithTs(y.Copy(k), 0)
 			}
 		case idBlockEndOffsets:
-			offsets := bytesToU32Slice(d.decode())
+			offsets := BytesToU32Slice(d.decode())
 			t.tableSize = int64(offsets[len(offsets)-1])
 		case idOldBlockLen:
 			t.oldBlockLen = int64(bytesToU32(d.decode()))
@@ -233,11 +233,11 @@ func (d *metaDecoder) decodeTableIndex() *TableIndex {
 	for ; d.valid(); d.next() {
 		switch d.currentId() {
 		case idBaseKeysEndOffs:
-			idx.baseKeys.endOffs = bytesToU32Slice(d.decode())
+			idx.baseKeys.endOffs = BytesToU32Slice(d.decode())
 		case idBaseKeys:
 			idx.baseKeys.data = d.decode()
 		case idBlockEndOffsets:
-			idx.blockEndOffsets = bytesToU32Slice(d.decode())
+			idx.blockEndOffsets = BytesToU32Slice(d.decode())
 		case idBloomFilter:
 			if d := d.decode(); len(d) != 0 {
 				idx.bf = new(bbloom.Bloom)

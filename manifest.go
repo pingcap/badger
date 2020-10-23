@@ -361,10 +361,10 @@ func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error
 func readManifestMagic(r io.Reader) error {
 	var magicBuf [8]byte
 	if _, err := io.ReadFull(r, magicBuf[:]); err != nil {
-		return errBadMagic
+		return errors.Wrap(errBadMagic, err.Error())
 	}
 	if !bytes.Equal(magicBuf[0:4], magicText[:]) {
-		return errBadMagic
+		return errors.Wrap(errBadMagic, fmt.Sprintf("magic not match got %x expect %x", magicBuf[:4], magicText))
 	}
 	version := binary.BigEndian.Uint32(magicBuf[4:8])
 	if version != magicVersion {
