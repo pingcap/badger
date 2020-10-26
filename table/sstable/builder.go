@@ -398,6 +398,8 @@ type BuildResult struct {
 	FileName  string
 	FileData  []byte
 	IndexData []byte
+	Smallest  y.Key
+	Biggest   y.Key
 }
 
 // Finish finishes the table by appending the index.
@@ -481,6 +483,8 @@ func (b *Builder) Finish() (*BuildResult, error) {
 	if b.file == nil {
 		result.IndexData = y.Copy(b.w.(*inMemWriter).Bytes())
 	}
+	result.Smallest.Copy(b.smallest)
+	result.Biggest.Copy(b.biggest)
 	return result, nil
 }
 

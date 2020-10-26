@@ -2,7 +2,6 @@ package badger
 
 import (
 	"bytes"
-	"encoding/binary"
 	"os"
 	"sort"
 	"sync/atomic"
@@ -78,15 +77,6 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask) {
 	return writeTasks, splitTask
 }
 
-func (sdb *ShardingDB) loadWritableMemTable() *memtable.CFTable {
-	tbls := sdb.loadMemTableSlice()
-	return tbls.tables[0]
-}
-
-func (sdb *ShardingDB) loadMemTableSlice() *shardingMemTables {
-	return (*shardingMemTables)(atomic.LoadPointer(&sdb.memTbls))
-}
-
 func (sdb *ShardingDB) switchMemTable(minSize int64) {
 	writableMemTbl := sdb.loadWritableMemTable()
 	newTableSize := sdb.opt.MaxMemTableSize
@@ -94,9 +84,9 @@ func (sdb *ShardingDB) switchMemTable(minSize int64) {
 		newTableSize = minSize
 	}
 	log.S().Infof("switch mem table new size %d", newTableSize)
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.opt.NumCFs)
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
 	for {
-		oldMemTbls := sdb.loadMemTableSlice()
+		oldMemTbls := sdb.loadMemTables()
 		newMemTbls := &shardingMemTables{
 			tables: make([]*memtable.CFTable, 0, len(oldMemTbls.tables)+1),
 		}
@@ -118,16 +108,23 @@ func (sdb *ShardingDB) executeWriteTasks(tasks []*WriteBatch) {
 		sdb.switchMemTable(estimatedSize)
 		memTable = sdb.loadWritableMemTable()
 	}
+	cts := sdb.orc.allocTs()
 	for cf, cfEntries := range entries {
+		if !sdb.opt.CFs[cf].Managed {
+			for _, entry := range cfEntries {
+				entry.Value.Version = cts
+			}
+		}
 		memTable.PutEntries(byte(cf), cfEntries)
 	}
+	sdb.orc.doneCommit(cts)
 	for _, task := range tasks {
 		task.notify <- nil
 	}
 }
 
 func (sdb *ShardingDB) buildMemEntries(tasks []*WriteBatch) (entries [][]*memtable.Entry, estimateSize int64) {
-	entries = make([][]*memtable.Entry, sdb.opt.NumCFs)
+	entries = make([][]*memtable.Entry, sdb.numCFs)
 	for _, task := range tasks {
 		for _, entry := range task.entries {
 			memEntry := &memtable.Entry{Key: entry.key, Value: entry.val}
@@ -135,7 +132,7 @@ func (sdb *ShardingDB) buildMemEntries(tasks []*WriteBatch) (entries [][]*memtab
 			estimateSize += memEntry.EstimateSize()
 		}
 	}
-	for cf := 0; cf < sdb.opt.NumCFs; cf++ {
+	for cf := 0; cf < sdb.numCFs; cf++ {
 		cfEntries := entries[cf]
 		sort.Slice(cfEntries, func(i, j int) bool {
 			return bytes.Compare(cfEntries[i].Key, cfEntries[j].Key) < 0
@@ -158,10 +155,14 @@ func (sdb *ShardingDB) createL0File(fid uint32) (fd, idxFD *os.File, err error) 
 	return fd, idxFD, nil
 }
 
+func (sdb *ShardingDB) allocFid() uint32 {
+	return atomic.AddUint32(&sdb.lastFID, 1)
+}
+
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 	defer c.Done()
 	for m := range sdb.flushCh {
-		fid := atomic.AddUint32(&sdb.lastFID, 1)
+		fid := sdb.allocFid()
 		fd, idxFD, err := sdb.createL0File(fid)
 		if err != nil {
 			panic(err)
@@ -173,15 +174,18 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 		filename := fd.Name()
 		fd.Close()
 		idxFD.Close()
-		l0Table, err := openShardL0Table(filename, fid)
+		l0Table, err := openGlobalL0Table(filename, fid)
 		if err != nil {
 			panic(err)
 		}
-		sdb.addL0Table(l0Table)
+		err = sdb.addL0Table(l0Table)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
-func (sdb *ShardingDB) addL0Table(l0Table *shardL0Table) error {
+func (sdb *ShardingDB) addL0Table(l0Table *globalL0Table) error {
 	err := sdb.manifest.addChanges(&protos.HeadInfo{
 		Version: sdb.orc.commitTs(),
 	}, &protos.ManifestChange{
@@ -192,13 +196,13 @@ func (sdb *ShardingDB) addL0Table(l0Table *shardL0Table) error {
 	if err != nil {
 		return err
 	}
-	oldL0Tables := sdb.loadShardL0Tables()
-	newL0Tables := &shardL0Tables{tables: make([]*shardL0Table, 0, len(oldL0Tables.tables)+1)}
+	oldL0Tables := sdb.loadGlobalL0Tables()
+	newL0Tables := &globalL0Tables{tables: make([]*globalL0Table, 0, len(oldL0Tables.tables)+1)}
 	newL0Tables.tables = append(newL0Tables.tables, l0Table)
 	newL0Tables.tables = append(newL0Tables.tables, oldL0Tables.tables...)
 	atomic.StorePointer(&sdb.l0Tbls, unsafe.Pointer(newL0Tables))
 	for {
-		oldMemTbls := sdb.loadMemTableSlice()
+		oldMemTbls := sdb.loadMemTables()
 		newMemTbls := &shardingMemTables{tables: make([]*memtable.CFTable, len(oldMemTbls.tables)-1)}
 		copy(newMemTbls.tables, oldMemTbls.tables)
 		if atomic.CompareAndSwapPointer(&sdb.memTbls, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
@@ -211,8 +215,8 @@ func (sdb *ShardingDB) addL0Table(l0Table *shardL0Table) error {
 func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable, fd, idxFD *os.File) error {
 	writer := fileutil.NewDirectWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
 	builders := map[uint32]*shardDataBuilder{}
-	shardByKey := sdb.shards.loadShardByKeyTree()
-	for cf := 0; cf < sdb.opt.NumCFs; cf++ {
+	shardByKey := sdb.loadShardTree()
+	for cf := 0; cf < sdb.numCFs; cf++ {
 		it := m.NewIterator(byte(cf))
 		var lastShardBuilder *shardDataBuilder
 		for it.SeekToFirst(); it.Valid(); it.Next() {
@@ -223,7 +227,7 @@ func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable, fd, idxFD *os.File) er
 				shard := shardByKey.get(it.Key().UserKey)
 				shardBuilder = builders[shard.ID]
 				if shardBuilder == nil {
-					shardBuilder = newShardDataBuilder(shard, sdb.opt.NumCFs, sdb.opt.TableBuilderOptions)
+					shardBuilder = newShardDataBuilder(shard, sdb.numCFs, sdb.opt.TableBuilderOptions)
 					builders[shard.ID] = shardBuilder
 				}
 				lastShardBuilder = shardBuilder
@@ -277,63 +281,11 @@ func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable, fd, idxFD *os.File) er
 }
 
 func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
-	shardByKey := sdb.shards.loadShardByKeyTree()
+	shardByKey := sdb.loadShardTree()
 	for _, shard := range task.shards {
-		newShards := sdb.shards.split(shard.shard)
+		newShards := sdb.split(shard.shard)
 		shardByKey = shardByKey.replace([]*Shard{shard.shard}, newShards)
 	}
-	atomic.StorePointer(&sdb.shards.shardsByKey, unsafe.Pointer(shardByKey))
+	atomic.StorePointer(&sdb.shardTree, unsafe.Pointer(shardByKey))
 	task.notify <- nil
-}
-
-// l0 index file format
-//  | numShards(4) | shardDataOffsets(4) ... | shardKeys(2 + len(key)) ...
-type l0ShardIndex struct {
-	startKeys  [][]byte
-	endKey     []byte
-	endOffsets []uint32
-}
-
-func (idx *l0ShardIndex) encode() []byte {
-	l := 4 + 4 + 4 + len(idx.endOffsets)*4
-	for _, key := range idx.startKeys {
-		l += 2 + len(key)
-	}
-	l += 2 + len(idx.endKey)
-	data := make([]byte, l)
-	off := 0
-	binary.LittleEndian.PutUint32(data[off:], uint32(len(idx.endOffsets)))
-	off += 4
-	for _, endOff := range idx.endOffsets {
-		binary.LittleEndian.PutUint32(data[off:], endOff)
-		off += 4
-	}
-	for _, startKey := range idx.startKeys {
-		binary.LittleEndian.PutUint16(data[off:], uint16(len(startKey)))
-		off += 2
-		copy(data[off:], startKey)
-		off += len(startKey)
-	}
-	binary.LittleEndian.PutUint16(data[off:], uint16(len(idx.endKey)))
-	off += 2
-	copy(data[off:], idx.endKey)
-	return data
-}
-
-func (idx *l0ShardIndex) decode(data []byte) {
-	off := 0
-	numShard := int(binary.LittleEndian.Uint32(data[off:]))
-	off += 4
-	idx.endOffsets = sstable.BytesToU32Slice(data[off : off+numShard*4])
-	off += numShard * 4
-	idx.startKeys = make([][]byte, numShard)
-	for i := 0; i < numShard; i++ {
-		keyLen := int(binary.LittleEndian.Uint16(data[off:]))
-		off += 2
-		idx.startKeys[i] = data[off : off+keyLen]
-		off += keyLen
-	}
-	endKeyLen := int(binary.LittleEndian.Uint16(data[off:]))
-	off += 2
-	idx.endKey = data[off : off+endKeyLen]
 }

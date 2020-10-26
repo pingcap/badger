@@ -113,7 +113,11 @@ type Options struct {
 
 	S3Options s3util.Options
 
-	NumCFs int
+	CFs []CFConfig
+}
+
+type CFConfig struct {
+	Managed bool
 }
 
 // CompactionFilter is an interface that user can implement to remove certain keys.

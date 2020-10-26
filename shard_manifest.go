@@ -62,8 +62,9 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 			endKey[i] = 255
 		}
 		initShard := &ShardInfo{
-			ID:  1,
-			End: endKey,
+			ID:    1,
+			End:   endKey,
+			files: map[uint32]cfLevel{},
 		}
 		m.shards[initShard.ID] = initShard
 		err = m.rewrite()
@@ -137,6 +138,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 				ID:    change.ShardID,
 				Start: change.StartKey,
 				End:   change.EndKey,
+				files: map[uint32]cfLevel{},
 			}
 			if m.lastShardID < change.ShardID {
 				m.lastShardID = change.ShardID

@@ -6,29 +6,84 @@ import (
 	"io/ioutil"
 	"os"
 	"sort"
-	"sync/atomic"
 
+	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 )
 
-type shardL0Table struct {
+// globalL0Table contains data in all shards.
+type globalL0Table struct {
 	fd       *os.File
 	data     []byte
 	l0Shards []*l0Shard
+	cfs      [][]table.Table
 	fid      uint32
 }
 
-func openShardL0Table(filename string, fid uint32) (*shardL0Table, error) {
-	log.S().Infof("open shard l0 table %d", fid)
-	shardIdxData, err := ioutil.ReadFile(sstable.IndexFilename(filename))
+// l0 index file format
+//  | numShards(4) | shardDataOffsets(4) ... | shardKeys(2 + len(key)) ...
+type l0ShardIndex struct {
+	startKeys  [][]byte
+	endKey     []byte
+	endOffsets []uint32
+}
+
+func (idx *l0ShardIndex) encode() []byte {
+	l := 4 + 4 + 4 + len(idx.endOffsets)*4
+	for _, key := range idx.startKeys {
+		l += 2 + len(key)
+	}
+	l += 2 + len(idx.endKey)
+	data := make([]byte, l)
+	off := 0
+	y.Assert(len(idx.endOffsets) > 0)
+	binary.LittleEndian.PutUint32(data[off:], uint32(len(idx.endOffsets)))
+	off += 4
+	for _, endOff := range idx.endOffsets {
+		binary.LittleEndian.PutUint32(data[off:], endOff)
+		off += 4
+	}
+	for _, startKey := range idx.startKeys {
+		binary.LittleEndian.PutUint16(data[off:], uint16(len(startKey)))
+		off += 2
+		copy(data[off:], startKey)
+		off += len(startKey)
+	}
+	binary.LittleEndian.PutUint16(data[off:], uint16(len(idx.endKey)))
+	off += 2
+	copy(data[off:], idx.endKey)
+	return data
+}
+
+func (idx *l0ShardIndex) decode(data []byte) {
+	off := 0
+	numShard := int(binary.LittleEndian.Uint32(data[off:]))
+	y.Assert(numShard > 0)
+	off += 4
+	idx.endOffsets = sstable.BytesToU32Slice(data[off : off+numShard*4])
+	off += numShard * 4
+	idx.startKeys = make([][]byte, numShard)
+	for i := 0; i < numShard; i++ {
+		keyLen := int(binary.LittleEndian.Uint16(data[off:]))
+		off += 2
+		idx.startKeys[i] = data[off : off+keyLen]
+		off += keyLen
+	}
+	endKeyLen := int(binary.LittleEndian.Uint16(data[off:]))
+	off += 2
+	idx.endKey = data[off : off+endKeyLen]
+}
+
+func openGlobalL0Table(filename string, fid uint32) (*globalL0Table, error) {
+	globalL0IdxData, err := ioutil.ReadFile(sstable.IndexFilename(filename))
 	if err != nil {
 		return nil, err
 	}
 	shardIdx := &l0ShardIndex{}
-	shardIdx.decode(shardIdxData)
+	shardIdx.decode(globalL0IdxData)
 	fd, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -37,7 +92,7 @@ func openShardL0Table(filename string, fid uint32) (*shardL0Table, error) {
 	if err != nil {
 		return nil, err
 	}
-	shardL0Table := &shardL0Table{
+	shardL0Table := &globalL0Table{
 		fid:      fid,
 		fd:       fd,
 		data:     data,
@@ -63,6 +118,19 @@ func openShardL0Table(filename string, fid uint32) (*shardL0Table, error) {
 			return nil, err
 		}
 		shardL0Table.l0Shards[i] = l0Shard
+	}
+	numCFs := len(shardL0Table.l0Shards[0].cfs)
+	numShards := len(shardL0Table.l0Shards)
+	shardL0Table.cfs = make([][]table.Table, numCFs)
+	for i := 0; i < numCFs; i++ {
+		cfTables := make([]table.Table, 0, numShards)
+		for j := 0; j < numShards; j++ {
+			tbl := shardL0Table.l0Shards[j].cfs[i]
+			if tbl != nil {
+				cfTables = append(cfTables, tbl)
+			}
+		}
+		shardL0Table.cfs[i] = cfTables
 	}
 	return shardL0Table, nil
 }
@@ -101,7 +169,7 @@ func (s *l0Shard) loadTables(shardData []byte) error {
 	return nil
 }
 
-func (t *shardL0Table) Get(cf byte, key y.Key, keyHash uint64) y.ValueStruct {
+func (t *globalL0Table) Get(cf byte, key y.Key, keyHash uint64) y.ValueStruct {
 	idx := sort.Search(len(t.l0Shards), func(i int) bool {
 		shard := t.l0Shards[i]
 		return bytes.Compare(shard.end, key.UserKey) > 0
@@ -124,10 +192,13 @@ func (t *shardL0Table) Get(cf byte, key y.Key, keyHash uint64) y.ValueStruct {
 	return v
 }
 
-type shardL0Tables struct {
-	tables []*shardL0Table
+func (t *globalL0Table) newIterator(cf byte, reverse bool) y.Iterator {
+	if len(t.cfs[cf]) == 0 {
+		return nil
+	}
+	return table.NewConcatIterator(t.cfs[cf], reverse)
 }
 
-func (sdb *ShardingDB) loadShardL0Tables() *shardL0Tables {
-	return (*shardL0Tables)(atomic.LoadPointer(&sdb.l0Tbls))
+type globalL0Tables struct {
+	tables []*globalL0Table
 }
