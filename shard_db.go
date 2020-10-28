@@ -41,6 +41,7 @@ type ShardingDB struct {
 }
 
 func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
+	log.Info("Open sharding DB")
 	err = checkOptions(&opt)
 	if err != nil {
 		return nil, err
@@ -66,7 +67,6 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		nextCommit: manifest.version + 1,
 		commits:    make(map[uint64]uint64),
 	}
-	log.S().Infof("manifest l0 %d", len(manifest.l0Files))
 	sort.Slice(manifest.l0Files, func(i, j int) bool {
 		return manifest.l0Files[i] > manifest.l0Files[j]
 	})
@@ -112,11 +112,10 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	go db.runFlushMemTable(db.closers.memtable)
 	db.closers.writes = y.NewCloser(1)
 	go db.runWriteLoop(db.closers.writes)
-	db.closers.compactors = y.NewCloser(1)
-	if db.opt.DoNotCompact {
-		db.closers.compactors.Done()
-	} else {
-		go db.runL0CompactionLoop(db.closers.compactors)
+	if !db.opt.DoNotCompact {
+		db.closers.compactors = y.NewCloser(2)
+		go db.runGlobalL0CompactionLoop(db.closers.compactors)
+		go db.runShardInternalCompactionLoop(db.closers.compactors)
 	}
 	return db, nil
 }
@@ -131,9 +130,23 @@ func (sdb *ShardingDB) Close() error {
 	}
 	close(sdb.flushCh)
 	sdb.closers.memtable.SignalAndWait()
-	sdb.closers.compactors.SignalAndWait()
+	if !sdb.opt.DoNotCompact {
+		sdb.closers.compactors.SignalAndWait()
+	}
 	sdb.closers.resourceManager.SignalAndWait()
 	return sdb.dirLock.release()
+}
+
+func (sdb *ShardingDB) printStructure() {
+	tree := sdb.loadShardTree()
+	for _, shard := range tree.shards {
+		for cf, scf := range shard.cfs {
+			for i := 0; i < len(scf.levels); i++ {
+				level := scf.getLevelHandler(i)
+				log.S().Infof("shard %d cf %d level %d tables %v", shard.ID, cf, i, getIDs(level.tables))
+			}
+		}
+	}
 }
 
 type wbEntry struct {

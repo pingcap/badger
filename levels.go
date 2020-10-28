@@ -265,8 +265,10 @@ func (l *levelHandler) isCompactable(deltaSize int64) bool {
 }
 
 type compactionPriority struct {
+	cf    int
 	level int
 	score float64
+	shard *Shard
 }
 
 // pickCompactLevel determines which level to compact.

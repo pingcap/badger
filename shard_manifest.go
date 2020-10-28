@@ -96,11 +96,13 @@ func (m *ShardingManifest) toChangeSet() *protos.ManifestChangeSet {
 		ShardChange: make([]*protos.ShardChange, 0, len(m.shards)),
 	}
 	for shardID, shard := range m.shards {
-		for fid, levelCF := range shard.files {
+		for fid, cfLevel := range shard.files {
 			cs.Changes = append(cs.Changes, &protos.ManifestChange{
-				Id:    uint64(newSFID(shardID, fid)),
-				Op:    protos.ManifestChange_CREATE,
-				Level: uint32(levelCF),
+				ShardID: shardID,
+				Id:      uint64(fid),
+				Op:      protos.ManifestChange_CREATE,
+				Level:   cfLevel.level,
+				CF:      cfLevel.cf,
 			})
 		}
 		cs.ShardChange = append(cs.ShardChange, &protos.ShardChange{
@@ -148,9 +150,8 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 		}
 	}
 	for _, change := range cs.Changes {
-		id := sfID(change.Id)
-		shardID := id.shardID()
-		fid := id.fid()
+		shardID := change.ShardID
+		fid := uint32(change.Id)
 		if fid > m.lastFileID {
 			m.lastFileID = fid
 		}
@@ -164,14 +165,14 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 		}
 		switch change.Op {
 		case protos.ManifestChange_CREATE:
-			shardInfo.files[fid] = cfLevel(change.Level)
+			shardInfo.files[fid] = cfLevel{cf: change.CF, level: change.Level}
 		case protos.ManifestChange_DELETE:
 			delete(shardInfo.files, fid)
 		case protos.ManifestChange_MOVE_DOWN:
 			if _, ok := shardInfo.files[fid]; !ok {
 				return fmt.Errorf("move down file %d not found", fid)
 			}
-			shardInfo.files[fid] = cfLevel(change.Level)
+			shardInfo.files[fid] = cfLevel{cf: change.CF, level: change.Level}
 		}
 	}
 	m.version = cs.Head.Version
@@ -191,8 +192,8 @@ func (m *ShardingManifest) applyL0Change(fid uint32, op protos.ManifestChange_Op
 	}
 }
 
-func (m *ShardingManifest) addChanges(head *protos.HeadInfo, changesParam ...*protos.ManifestChange) error {
-	changes := protos.ManifestChangeSet{Changes: changesParam, Head: head}
+func (m *ShardingManifest) addChanges(commitTS uint64, changesParam ...*protos.ManifestChange) error {
+	changes := protos.ManifestChangeSet{Changes: changesParam, Head: &protos.HeadInfo{Version: commitTS}}
 	buf, err := changes.Marshal()
 	if err != nil {
 		return err
@@ -222,32 +223,9 @@ func (m *ShardingManifest) addChanges(head *protos.HeadInfo, changesParam ...*pr
 	return m.fd.Sync()
 }
 
-type sfID uint64
-
-func newSFID(shardID, fid uint32) sfID {
-	return sfID(shardID)<<32 + sfID(fid)
-}
-
-func (id sfID) shardID() uint32 {
-	return uint32(id >> 32)
-}
-
-func (id sfID) fid() uint32 {
-	return uint32(id)
-}
-
-type cfLevel uint32
-
-func newCFLevel(cf, level uint16) cfLevel {
-	return cfLevel(cf)<<16 + cfLevel(level)
-}
-
-func (cl cfLevel) cf() uint16 {
-	return uint16(cl >> 16)
-}
-
-func (cl cfLevel) level() uint16 {
-	return uint16(cl)
+type cfLevel struct {
+	cf    uint32
+	level uint32
 }
 
 func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset int64, err error) {

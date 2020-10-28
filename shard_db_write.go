@@ -83,7 +83,6 @@ func (sdb *ShardingDB) switchMemTable(minSize int64) {
 	if newTableSize < minSize {
 		newTableSize = minSize
 	}
-	log.S().Infof("switch mem table new size %d", newTableSize)
 	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
 	for {
 		oldMemTbls := sdb.loadMemTables()
@@ -156,7 +155,13 @@ func (sdb *ShardingDB) createL0File(fid uint32) (fd, idxFD *os.File, err error) 
 }
 
 func (sdb *ShardingDB) allocFid() uint32 {
-	return atomic.AddUint32(&sdb.lastFID, 1)
+	fid := atomic.AddUint32(&sdb.lastFID, 1)
+	log.S().Debugf("alloc fid %d", fid)
+	return fid
+}
+
+func (sdb *ShardingDB) allocFid64() uint64 {
+	return uint64(sdb.allocFid())
 }
 
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
@@ -186,9 +191,7 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 }
 
 func (sdb *ShardingDB) addL0Table(l0Table *globalL0Table) error {
-	err := sdb.manifest.addChanges(&protos.HeadInfo{
-		Version: sdb.orc.commitTs(),
-	}, &protos.ManifestChange{
+	err := sdb.manifest.addChanges(sdb.orc.commitTs(), &protos.ManifestChange{
 		Id:    uint64(l0Table.fid),
 		Op:    protos.ManifestChange_CREATE,
 		Level: 0,
@@ -213,6 +216,7 @@ func (sdb *ShardingDB) addL0Table(l0Table *globalL0Table) error {
 }
 
 func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable, fd, idxFD *os.File) error {
+	log.S().Info("flush memtable")
 	writer := fileutil.NewDirectWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
 	builders := map[uint32]*shardDataBuilder{}
 	shardByKey := sdb.loadShardTree()

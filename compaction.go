@@ -148,6 +148,9 @@ type thisAndNextLevelRLocked struct{}
 // compareAndAdd will check whether we can run this CompactDef. That it doesn't overlap with any
 // other running compaction. If it can be run, it would store this run in the compactStatus state.
 func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd *CompactDef, thisHandler *levelHandler) bool {
+	if cs == nil {
+		return true
+	}
 	cs.Lock()
 	defer cs.Unlock()
 
@@ -179,6 +182,9 @@ func (cs *compactStatus) compareAndAdd(_ thisAndNextLevelRLocked, cd *CompactDef
 }
 
 func (cs *compactStatus) delete(cd *CompactDef) {
+	if cs == nil {
+		return
+	}
 	cs.Lock()
 	defer cs.Unlock()
 
@@ -205,6 +211,9 @@ func (cs *compactStatus) delete(cd *CompactDef) {
 }
 
 func (cs *compactStatus) isCompacting(level int, tables ...table.Table) bool {
+	if cs == nil {
+		return false
+	}
 	if len(tables) == 0 {
 		return false
 	}

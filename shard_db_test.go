@@ -23,13 +23,14 @@ func TestShardingDB(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
+	opts.NumCompactors = 2
 	opts.NumLevelZeroTables = 1
 	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}, {Managed: false}}
 	db, err := OpenShardingDB(opts)
 	require.NoError(t, err)
 
 	wb := NewWriteBatch(opts.CFs)
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 20000; i++ {
 		key := []byte(fmt.Sprintf("key%04d", i))
 		require.NoError(t, wb.Put(0, key, y.ValueStruct{Value: key, Version: 1}))
 		require.NoError(t, wb.Put(1, key, y.ValueStruct{Value: bytes.Repeat(key, 2)}))
@@ -40,7 +41,7 @@ func TestShardingDB(t *testing.T) {
 			wb = NewWriteBatch(opts.CFs)
 		}
 	}
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 20000; i++ {
 		key := []byte(fmt.Sprintf("key%04d", i))
 		val := db.Get(0, y.KeyWithTs(key, 2))
 		require.Equal(t, string(key), string(val.Value))
@@ -54,7 +55,7 @@ func TestShardingDB(t *testing.T) {
 	require.NoError(t, err)
 	db, err = OpenShardingDB(opts)
 	require.NoError(t, err)
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < 20000; i++ {
 		key := []byte(fmt.Sprintf("key%04d", i))
 		val := db.Get(0, y.KeyWithTs(key, 2))
 		require.Equal(t, string(val.Value), string(key))

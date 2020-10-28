@@ -25,6 +25,8 @@ type ShardManager struct {
 	guard       *epoch.Guard
 }
 
+const shardMaxLevel = 4
+
 func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet) (*shardTree, error) {
 	tree := &shardTree{
 		shards: make([]*Shard, 0, len(manifest.shards)),
@@ -38,21 +40,20 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 		}
 		for i := 0; i < len(opt.CFs); i++ {
 			sCF := &shardCF{
-				levels: make([]unsafe.Pointer, opt.TableBuilderOptions.MaxLevels),
+				levels: make([]unsafe.Pointer, shardMaxLevel),
 			}
-			sCF.setLevelHandler(0, newLevelHandler(opt.NumLevelZeroTablesStall, 0, metrics))
+			for j := 0; j < shardMaxLevel; j++ {
+				ok := sCF.casLevelHandler(j, nil, newLevelHandler(opt.NumLevelZeroTablesStall, j, metrics))
+				y.Assert(ok)
+			}
 			shard.cfs[i] = sCF
 		}
 
 		for fid, cfLevel := range mShard.files {
-			cf := cfLevel.cf()
-			level := cfLevel.level()
+			cf := cfLevel.cf
+			level := cfLevel.level
 			scf := shard.cfs[cf]
 			handler := scf.getLevelHandler(int(level))
-			if handler == nil {
-				handler = newLevelHandler(opt.NumLevelZeroTablesStall, int(level), metrics)
-				scf.setLevelHandler(int(level), handler)
-			}
 			filename := sstable.NewFilename(uint64(fid), opt.Dir)
 			reader, err := sstable.NewMMapFile(filename)
 			if err != nil {
@@ -68,9 +69,7 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 			scf := shard.cfs[i]
 			for i := range scf.levels {
 				handler := scf.getLevelHandler(i)
-				if handler != nil {
-					sortTables(handler.tables)
-				}
+				sortTables(handler.tables)
 			}
 		}
 		tree.shards = append(tree.shards, shard)
@@ -136,19 +135,32 @@ func (scf *shardCF) getLevelHandler(i int) *levelHandler {
 	return (*levelHandler)(atomic.LoadPointer(&scf.levels[i]))
 }
 
-func (scf *shardCF) setLevelHandler(i int, h *levelHandler) {
-	atomic.StorePointer(&scf.levels[i], unsafe.Pointer(h))
+func (scf *shardCF) casLevelHandler(i int, oldH, newH *levelHandler) bool {
+	return atomic.CompareAndSwapPointer(&scf.levels[i], unsafe.Pointer(oldH), unsafe.Pointer(newH))
+}
+
+func (scf *shardCF) setHasOverlapping(cd *CompactDef) {
+	if cd.moveDown() {
+		return
+	}
+	kr := getKeyRange(cd.Top)
+	for i := cd.Level + 2; i < len(scf.levels); i++ {
+		lh := scf.getLevelHandler(i)
+		left, right := lh.overlappingTables(levelHandlerRLocked{}, kr)
+		if right-left > 0 {
+			cd.HasOverlap = true
+			return
+		}
+	}
+	return
 }
 
 func (st *Shard) Get(cf byte, key y.Key, keyHash uint64) y.ValueStruct {
 	scf := st.cfs[cf]
 	for i := range scf.levels {
 		level := scf.getLevelHandler(i)
-		if i == 0 {
-			y.Assert(level != nil)
-		}
-		if level == nil {
-			return y.ValueStruct{}
+		if len(level.tables) == 0 {
+			continue
 		}
 		v := level.get(key, keyHash)
 		if v.Valid() {
@@ -172,9 +184,6 @@ func (sdb *ShardingDB) preSplit(s *Shard, keys [][]byte, guard *epoch.Guard) err
 	for _, scf := range s.cfs {
 		for i := range scf.levels {
 			handler := scf.getLevelHandler(i)
-			if handler == nil {
-				continue
-			}
 			if err := sdb.splitTables(handler, keys, guard); err != nil {
 				return err
 			}
@@ -227,7 +236,7 @@ func (sdb *ShardingDB) splitTables(handler *levelHandler, keys [][]byte, guard *
 }
 
 func (sdb *ShardingDB) buildTableBeforeKey(itr y.Iterator, key []byte, level int, opt options.TableBuilderOptions) (table.Table, error) {
-	filename := sstable.NewFilename(uint64(sdb.allocShardID()), sdb.opt.Dir)
+	filename := sstable.NewFilename(sdb.allocFid64(), sdb.opt.Dir)
 	fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
@@ -323,9 +332,6 @@ func (sdb *ShardingDB) split(s *Shard) []*Shard {
 	for i, scf := range s.cfs {
 		for j := range scf.levels {
 			level := scf.getLevelHandler(j)
-			if level == nil {
-				continue
-			}
 			for _, t := range level.tables {
 				sdb.insertTableToNewShard(t, i, level.level, newShards)
 			}
@@ -340,15 +346,14 @@ func (sdb *ShardingDB) insertTableToNewShard(t table.Table, cf, level int, shard
 			sCF := shard.cfs[cf]
 			if sCF == nil {
 				sCF = &shardCF{
-					levels: make([]unsafe.Pointer, sdb.opt.TableBuilderOptions.MaxLevels),
+					levels: make([]unsafe.Pointer, shardMaxLevel),
+				}
+				for i := 0; i < shardMaxLevel; i++ {
+					sCF.casLevelHandler(i, nil, newLevelHandler(sdb.opt.NumLevelZeroTablesStall, i, sdb.metrics))
 				}
 				shard.cfs[cf] = sCF
 			}
 			handler := sCF.getLevelHandler(level)
-			if handler == nil {
-				handler = newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level, sdb.metrics)
-				sCF.setLevelHandler(level, handler)
-			}
 			handler.tables = append(handler.tables, t)
 			break
 		}
