@@ -17,14 +17,6 @@ import (
 	"github.com/pingcap/badger/y"
 )
 
-type ShardManager struct {
-	lastShardID uint32
-	lastFid     *uint32
-	opt         Options
-	metrics     *y.MetricsSet
-	guard       *epoch.Guard
-}
-
 const shardMaxLevel = 4
 
 func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet) (*shardTree, error) {
@@ -102,10 +94,24 @@ func (st *shardTree) replace(removes []*Shard, adds []*Shard) *shardTree {
 }
 
 func (st *shardTree) get(key []byte) *Shard {
-	idx := sort.Search(len(st.shards), func(i int) bool {
-		return bytes.Compare(key, st.shards[i].End) < 0
+	return getShard(st.shards, key)
+}
+
+func getShard(shards []*Shard, key []byte) *Shard {
+	idx := sort.Search(len(shards), func(i int) bool {
+		return bytes.Compare(key, shards[i].End) < 0
 	})
-	return st.shards[idx]
+	return shards[idx]
+}
+
+func (st *shardTree) getShards(start, end []byte) []*Shard {
+	left := sort.Search(len(st.shards), func(i int) bool {
+		return bytes.Compare(start, st.shards[i].End) < 0
+	})
+	right := sort.Search(len(st.shards), func(i int) bool {
+		return bytes.Compare(end, st.shards[i].Start) <= 0
+	})
+	return st.shards[left:right]
 }
 
 func (sdb *ShardingDB) allocShardID() uint32 {
@@ -153,21 +159,6 @@ func (scf *shardCF) setHasOverlapping(cd *CompactDef) {
 		}
 	}
 	return
-}
-
-func (st *Shard) Get(cf byte, key y.Key, keyHash uint64) y.ValueStruct {
-	scf := st.cfs[cf]
-	for i := range scf.levels {
-		level := scf.getLevelHandler(i)
-		if len(level.tables) == 0 {
-			continue
-		}
-		v := level.get(key, keyHash)
-		if v.Valid() {
-			return v
-		}
-	}
-	return y.ValueStruct{}
 }
 
 type Level struct {

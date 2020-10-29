@@ -226,28 +226,67 @@ func (sdb *ShardingDB) loadShardTree() *shardTree {
 	return (*shardTree)(atomic.LoadPointer(&sdb.shardTree))
 }
 
-func (sdb *ShardingDB) Get(cf byte, key y.Key) y.ValueStruct {
-	guard := sdb.resourceMgr.Acquire()
-	defer guard.Done()
-	if !sdb.opt.CFs[cf].Managed && key.Version == 0 {
-		key.Version = sdb.orc.readTs()
+type Snapshot struct {
+	guard    *epoch.Guard
+	readTS   uint64
+	memTbls  *shardingMemTables
+	l0Tbls   *globalL0Tables
+	shards   []*Shard
+	cfs      []CFConfig
+	startKey []byte
+	endKey   []byte
+}
+
+func (s *Snapshot) Get(cf byte, key y.Key) y.ValueStruct {
+	if !s.cfs[cf].Managed && key.Version == 0 {
+		key.Version = s.readTS
 	}
-	memTbls := sdb.loadMemTables()
-	for _, mtbl := range memTbls.tables {
+	for _, mtbl := range s.memTbls.tables {
 		v := mtbl.Get(cf, key.UserKey, key.Version)
 		if v.Valid() {
 			return v
 		}
 	}
 	keyHash := farm.Fingerprint64(key.UserKey)
-	l0Tables := sdb.loadGlobalL0Tables()
-	for _, l0Tbl := range l0Tables.tables {
+	for _, l0Tbl := range s.l0Tbls.tables {
 		v := l0Tbl.Get(cf, key, keyHash)
 		if v.Valid() {
 			return v
 		}
 	}
-	tree := sdb.loadShardTree()
-	shard := tree.get(key.UserKey)
-	return shard.Get(cf, key, keyHash)
+	shard := getShard(s.shards, key.UserKey)
+	scf := shard.cfs[cf]
+	for i := range scf.levels {
+		level := scf.getLevelHandler(i)
+		if len(level.tables) == 0 {
+			continue
+		}
+		v := level.get(key, keyHash)
+		if v.Valid() {
+			return v
+		}
+	}
+	return y.ValueStruct{}
+}
+
+func (s *Snapshot) Discard() {
+	s.guard.Done()
+}
+
+func (sdb *ShardingDB) NewSnapshot(startKey, endKey []byte) *Snapshot {
+	if len(endKey) == 0 {
+		endKey = globalShardEndKey
+	}
+	readTS := sdb.orc.readTs()
+	guard := sdb.resourceMgr.AcquireWithPayload(readTS)
+	return &Snapshot{
+		guard:    guard,
+		readTS:   readTS,
+		memTbls:  sdb.loadMemTables(),
+		l0Tbls:   sdb.loadGlobalL0Tables(),
+		shards:   sdb.loadShardTree().getShards(startKey, endKey),
+		cfs:      sdb.opt.CFs,
+		startKey: startKey,
+		endKey:   endKey,
+	}
 }

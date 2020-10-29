@@ -43,8 +43,11 @@ func (cft *CFTable) Get(cf byte, key []byte, version uint64) y.ValueStruct {
 	return cft.skls[cf].Get(key, version)
 }
 
-func (cft *CFTable) NewIterator(cf byte) *Iterator {
-	return cft.skls[cf].NewIterator()
+func (cft *CFTable) NewIterator(cf byte, reversed bool) *UniIterator {
+	if cft.skls[cf].Empty() {
+		return nil
+	}
+	return cft.skls[cf].NewUniIterator(reversed)
 }
 
 func (cft *CFTable) Empty() bool {

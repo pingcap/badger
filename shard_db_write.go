@@ -221,9 +221,12 @@ func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable, fd, idxFD *os.File) er
 	builders := map[uint32]*shardDataBuilder{}
 	shardByKey := sdb.loadShardTree()
 	for cf := 0; cf < sdb.numCFs; cf++ {
-		it := m.NewIterator(byte(cf))
+		it := m.NewIterator(byte(cf), false)
+		if it == nil {
+			continue
+		}
 		var lastShardBuilder *shardDataBuilder
-		for it.SeekToFirst(); it.Valid(); it.Next() {
+		for it.Rewind(); it.Valid(); y.NextAllVersion(it) {
 			var shardBuilder *shardDataBuilder
 			if lastShardBuilder != nil && bytes.Compare(it.Key().UserKey, lastShardBuilder.shard.End) < 0 {
 				shardBuilder = lastShardBuilder

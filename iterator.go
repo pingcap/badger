@@ -286,7 +286,7 @@ func (txn *Txn) NewIterator(opt IteratorOptions) *Iterator {
 // This item is only valid until it.Next() gets called.
 func (it *Iterator) Item() *Item {
 	tx := it.txn
-	if tx.update {
+	if tx != nil && tx.update {
 		// Track reads if this is an update txn.
 		tx.reads = append(tx.reads, farm.Fingerprint64(it.item.Key()))
 	}
@@ -304,7 +304,9 @@ func (it *Iterator) ValidForPrefix(prefix []byte) bool {
 
 // Close would close the iterator. It is important to call this when you're done with iteration.
 func (it *Iterator) Close() {
-	atomic.AddInt32(&it.txn.numIterators, -1)
+	if it.txn != nil {
+		atomic.AddInt32(&it.txn.numIterators, -1)
+	}
 }
 
 // Next would advance the iterator by one. Always check it.Valid() after a Next()

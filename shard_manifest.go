@@ -46,6 +46,8 @@ type LevelCF struct {
 	CF    uint16
 }
 
+var globalShardEndKey = []byte{255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+
 func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 	path := filepath.Join(dir, ManifestFilename)
 	fd, err := y.OpenExistingFile(path, 0) // We explicitly sync in addChanges, outside the lock.
@@ -57,13 +59,9 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 			dir:    dir,
 			shards: map[uint32]*ShardInfo{},
 		}
-		endKey := make([]byte, 16)
-		for i := range endKey {
-			endKey[i] = 255
-		}
 		initShard := &ShardInfo{
 			ID:    1,
-			End:   endKey,
+			End:   globalShardEndKey,
 			files: map[uint32]cfLevel{},
 		}
 		m.shards[initShard.ID] = initShard

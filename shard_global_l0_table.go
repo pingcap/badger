@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io/ioutil"
+	"math"
 	"os"
 	"sort"
 
@@ -192,11 +193,19 @@ func (t *globalL0Table) Get(cf byte, key y.Key, keyHash uint64) y.ValueStruct {
 	return v
 }
 
-func (t *globalL0Table) newIterator(cf byte, reverse bool) y.Iterator {
+func (t *globalL0Table) newIterator(cf byte, reverse bool, stareKey, endKey []byte) y.Iterator {
 	if len(t.cfs[cf]) == 0 {
 		return nil
 	}
-	return table.NewConcatIterator(t.cfs[cf], reverse)
+	if len(endKey) == 0 {
+		endKey = globalShardEndKey
+	}
+	tbls := t.cfs[cf]
+	left, right := getTablesInRange(tbls, y.KeyWithTs(stareKey, math.MaxUint64), y.KeyWithTs(endKey, 0))
+	if left == right {
+		return nil
+	}
+	return table.NewConcatIterator(tbls[left:right], reverse)
 }
 
 type globalL0Tables struct {

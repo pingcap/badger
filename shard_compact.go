@@ -215,7 +215,7 @@ func (sdb *ShardingDB) getCFSafeTS(cf int) uint64 {
 func (sdb *ShardingDB) buildShardTablesForCF(l0Tbls *globalL0Tables, cf byte) ([]*sstable.BuildResult, error) {
 	iters := make([]y.Iterator, 0, len(l0Tbls.tables))
 	for i := 0; i < len(l0Tbls.tables); i++ {
-		iter := l0Tbls.tables[i].newIterator(cf, false)
+		iter := l0Tbls.tables[i].newIterator(cf, false, nil, nil)
 		if iter == nil {
 			continue
 		}
