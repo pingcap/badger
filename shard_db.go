@@ -91,20 +91,21 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	}
 	memTbls := &shardingMemTables{tables: []*memtable.CFTable{memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs))}}
 	db = &ShardingDB{
-		opt:       opt,
-		numCFs:    len(opt.CFs),
-		orc:       orc,
-		dirLock:   dirLockGuard,
-		metrics:   metrics,
-		memTbls:   unsafe.Pointer(memTbls),
-		l0Tbls:    unsafe.Pointer(l0Tbls),
-		shardTree: unsafe.Pointer(shardTree),
-		blkCache:  blkCache,
-		idxCache:  idxCache,
-		flushCh:   make(chan *memtable.CFTable, opt.NumMemtables),
-		writeCh:   make(chan engineTask, kvWriteChCapacity),
-		manifest:  manifest,
-		lastFID:   manifest.lastFileID,
+		opt:         opt,
+		numCFs:      len(opt.CFs),
+		orc:         orc,
+		dirLock:     dirLockGuard,
+		metrics:     metrics,
+		memTbls:     unsafe.Pointer(memTbls),
+		l0Tbls:      unsafe.Pointer(l0Tbls),
+		shardTree:   unsafe.Pointer(shardTree),
+		blkCache:    blkCache,
+		idxCache:    idxCache,
+		flushCh:     make(chan *memtable.CFTable, opt.NumMemtables),
+		writeCh:     make(chan engineTask, kvWriteChCapacity),
+		manifest:    manifest,
+		lastFID:     manifest.lastFileID,
+		lastShardID: manifest.lastShardID,
 	}
 	db.closers.resourceManager = y.NewCloser(0)
 	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
@@ -141,10 +142,25 @@ func (sdb *ShardingDB) printStructure() {
 	tree := sdb.loadShardTree()
 	for _, shard := range tree.shards {
 		for cf, scf := range shard.cfs {
+			var tableIDs [][]uint64
 			for i := 0; i < len(scf.levels); i++ {
 				level := scf.getLevelHandler(i)
-				log.S().Infof("shard %d cf %d level %d tables %v", shard.ID, cf, i, getIDs(level.tables))
+				tableIDs = append(tableIDs, getTblIDs(level.tables))
 			}
+			log.S().Infof("shard %d cf %d tables %v", shard.ID, cf, tableIDs)
+		}
+	}
+	for id, fi := range sdb.manifest.shards {
+		cfs := make([][]uint32, sdb.numCFs)
+		for fid := range fi.files {
+			cfLevel, ok := sdb.manifest.globalFiles[fid]
+			if !ok {
+				log.S().Errorf("shard %d fid %d not found in global", fi.ID, fid)
+			}
+			cfs[cfLevel.cf] = append(cfs[cfLevel.cf], fid)
+		}
+		for cf, cfIDs := range cfs {
+			log.S().Infof("manifest shard %d cf %d tables %v", id, cf, cfIDs)
 		}
 	}
 }

@@ -274,8 +274,7 @@ func (h *shardL0BuildHelper) setFD(fd *os.File) {
 }
 
 func (h *shardL0BuildHelper) buildOne(it y.Iterator) (*sstable.BuildResult, error) {
-	fid := h.db.allocFid64()
-	filename := sstable.NewFilename(fid, h.db.opt.Dir)
+	filename := sstable.NewFilename(uint64(h.db.allocFid("shardL0")), h.db.opt.Dir)
 	fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
@@ -422,7 +421,8 @@ func (sdb *ShardingDB) compactShard(pri compactionPriority, guard *epoch.Guard) 
 
 func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, guard *epoch.Guard) error {
 	timeStart := time.Now()
-
+	shard.lock.Lock()
+	defer shard.lock.Unlock()
 	scf := shard.cfs[cf]
 	thisLevel := scf.getLevelHandler(cd.Level)
 	nextLevel := scf.getLevelHandler(cd.Level + 1)
@@ -452,7 +452,6 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 		}
 		changes = buildShardChangeSet(shard.ID, cf, cd, newTables)
 	}
-
 	// We write to the manifest _before_ we delete files (and after we created files)
 	if err := sdb.manifest.addChanges(sdb.orc.commitTs(), changes...); err != nil {
 		return err
@@ -487,10 +486,18 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 	return nil
 }
 
-func getIDs(tables []table.Table) []uint64 {
+func getTblIDs(tables []table.Table) []uint64 {
 	var ids []uint64
 	for _, tbl := range tables {
 		ids = append(ids, tbl.ID())
+	}
+	return ids
+}
+
+func getShardIDs(shards []*Shard) []uint32 {
+	var ids []uint32
+	for _, s := range shards {
+		ids = append(ids, s.ID)
 	}
 	return ids
 }
@@ -612,7 +619,7 @@ func (sdb *ShardingDB) prepareCompactionDef(cf int, cd *CompactDef) error {
 	}
 	cd.Opt = sdb.opt.TableBuilderOptions
 	cd.Dir = sdb.opt.Dir
-	cd.AllocIDFunc = sdb.allocFid64
+	cd.AllocIDFunc = sdb.allocFidForCompaction
 	cd.S3 = sdb.opt.S3Options
 	for _, t := range cd.Top {
 		if sst, ok := t.(*sstable.Table); ok {

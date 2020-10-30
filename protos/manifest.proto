@@ -54,4 +54,5 @@ message ShardChange {
   Operation Op    = 2;
   bytes  startKey = 3;
   bytes  endKey   = 4;
+  repeated uint32 tableIDs = 5;
 }

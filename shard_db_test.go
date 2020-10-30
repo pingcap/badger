@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/pingcap/badger/y"
+	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
 )
 
 func TestShardingDB(t *testing.T) {
+	runPprof()
 	dir, err := ioutil.TempDir("", "sharding")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
@@ -28,9 +32,19 @@ func TestShardingDB(t *testing.T) {
 		t: t,
 		n: 20000,
 	}
+	ch := make(chan time.Duration)
+	go func() {
+		time.Sleep(time.Millisecond * 500)
+		begin := time.Now()
+		for i := 1000; i < 20000; i += 4000 {
+			sc.split(db, sc.iToKey(i), sc.iToKey(i+2000))
+		}
+		ch <- time.Since(begin)
+	}()
+	begin := time.Now()
 	sc.loadData(db)
+	log.S().Infof("time split %v; load %v", <-ch, time.Since(begin))
 	sc.checkData(db)
-	time.Sleep(time.Second * 2)
 	err = db.Close()
 	require.NoError(t, err)
 	db, err = OpenShardingDB(opts)
@@ -91,19 +105,26 @@ func (sc *shardingCase) checkIterator(snap *Snapshot) {
 	}
 }
 
+func (sc *shardingCase) split(db *ShardingDB, keys ...[]byte) {
+	err := db.Split(keys)
+	require.NoError(sc.t, err)
+}
+
 func (sc *shardingCase) checkData(db *ShardingDB) {
 	snap := db.NewSnapshot(nil, nil)
+	log.S().Infof("shard ids %v", getShardIDs(snap.shards))
 	sc.checkGet(snap)
 	sc.checkIterator(snap)
 	snap.Discard()
 }
 
 func TestShardingTree(t *testing.T) {
-	shardKeys := [][]byte{nil, []byte("a"), []byte("b"), []byte("c"), nil}
+	shardID := new(uint32)
+	shardKeys := [][]byte{nil, []byte("a"), []byte("b"), []byte("c"), globalShardEndKey}
 	var shards []*Shard
 	for i := 0; i < 4; i++ {
 		shards = append(shards, &Shard{
-			ID:    uint32(i + 1),
+			ID:    atomic.AddUint32(shardID, 1),
 			Start: shardKeys[i],
 			End:   shardKeys[i+1],
 		})
@@ -123,4 +144,33 @@ func TestShardingTree(t *testing.T) {
 	require.Equal(t, shard.ID, uint32(4))
 	shard = tree.get([]byte("fsd"))
 	require.Equal(t, shard.ID, uint32(4))
+
+	shards = []*Shard{
+		{
+			ID:    atomic.AddUint32(shardID, 1),
+			Start: nil,
+			End:   globalShardEndKey,
+		},
+	}
+	tree = &shardTree{shards: shards}
+	old := shards[0]
+	newShards := []*Shard{
+		{
+			ID:  atomic.AddUint32(shardID, 1),
+			End: []byte("a"),
+		},
+		{
+			ID:    atomic.AddUint32(shardID, 1),
+			Start: []byte("a"),
+			End:   globalShardEndKey,
+		},
+	}
+	tree = tree.replace([]*Shard{old}, newShards)
+	require.Equal(t, len(tree.shards), 2)
+}
+
+func runPprof() {
+	go func() {
+		http.ListenAndServe(":9291", nil)
+	}()
 }

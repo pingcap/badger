@@ -12,6 +12,7 @@ import (
 	"github.com/ncw/directio"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
+	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -24,24 +25,9 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 		shards: make([]*Shard, 0, len(manifest.shards)),
 	}
 	for _, mShard := range manifest.shards {
-		shard := &Shard{
-			ID:    mShard.ID,
-			Start: mShard.Start,
-			End:   mShard.End,
-			cfs:   make([]*shardCF, len(opt.CFs)),
-		}
-		for i := 0; i < len(opt.CFs); i++ {
-			sCF := &shardCF{
-				levels: make([]unsafe.Pointer, shardMaxLevel),
-			}
-			for j := 0; j < shardMaxLevel; j++ {
-				ok := sCF.casLevelHandler(j, nil, newLevelHandler(opt.NumLevelZeroTablesStall, j, metrics))
-				y.Assert(ok)
-			}
-			shard.cfs[i] = sCF
-		}
-
-		for fid, cfLevel := range mShard.files {
+		shard := newShard(mShard.ID, mShard.Start, mShard.End, opt, metrics)
+		for fid := range mShard.files {
+			cfLevel := manifest.globalFiles[fid]
 			cf := cfLevel.cf
 			level := cfLevel.level
 			scf := shard.cfs[cf]
@@ -84,12 +70,10 @@ func (tree *shardTree) last() *Shard {
 // the removes and adds has the same total range, so we can append before and after.
 func (st *shardTree) replace(removes []*Shard, adds []*Shard) *shardTree {
 	newShards := make([]*Shard, 0, len(st.shards)+len(adds)-len(removes))
-	idx := sort.Search(len(st.shards), func(i int) bool {
-		return bytes.Compare(st.shards[i].Start, removes[0].Start) < 0
-	})
-	newShards = append(newShards, st.shards[:idx]...)
+	left, right := getShardRange(st.shards, removes[0].Start, removes[len(removes)-1].End)
+	newShards = append(newShards, st.shards[:left]...)
 	newShards = append(newShards, adds...)
-	newShards = append(newShards, st.shards[idx+len(removes):]...)
+	newShards = append(newShards, st.shards[right:]...)
 	return &shardTree{shards: newShards}
 }
 
@@ -104,13 +88,18 @@ func getShard(shards []*Shard, key []byte) *Shard {
 	return shards[idx]
 }
 
+func getShardRange(shards []*Shard, start, end []byte) (left, right int) {
+	left = sort.Search(len(shards), func(i int) bool {
+		return bytes.Compare(start, shards[i].End) < 0
+	})
+	right = sort.Search(len(shards), func(i int) bool {
+		return bytes.Compare(end, shards[i].Start) <= 0
+	})
+	return
+}
+
 func (st *shardTree) getShards(start, end []byte) []*Shard {
-	left := sort.Search(len(st.shards), func(i int) bool {
-		return bytes.Compare(start, st.shards[i].End) < 0
-	})
-	right := sort.Search(len(st.shards), func(i int) bool {
-		return bytes.Compare(end, st.shards[i].Start) <= 0
-	})
+	left, right := getShardRange(st.shards, start, end)
 	return st.shards[left:right]
 }
 
@@ -125,12 +114,43 @@ func (sdb *ShardingDB) allocShardID() uint32 {
 // 4. After all existing files are split by the split keys, the state is changed to SplitDone.
 // 5. After SplitDone, the shard map replace the old shard two new shardsByID.
 type Shard struct {
-	ID        uint32
-	Start     []byte
-	End       []byte
-	splitKeys [][]byte
-	cfs       []*shardCF
-	lock      sync.Mutex
+	ID    uint32
+	Start []byte
+	End   []byte
+	cfs   []*shardCF
+	lock  sync.Mutex
+}
+
+func newShard(id uint32, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
+	shard := &Shard{
+		ID:    id,
+		Start: start,
+		End:   end,
+		cfs:   make([]*shardCF, len(opt.CFs)),
+	}
+	for i := 0; i < len(opt.CFs); i++ {
+		sCF := &shardCF{
+			levels: make([]unsafe.Pointer, shardMaxLevel),
+		}
+		for j := 0; j < shardMaxLevel; j++ {
+			sCF.casLevelHandler(j, nil, newLevelHandler(opt.NumLevelZeroTablesStall, j, metrics))
+		}
+		shard.cfs[i] = sCF
+	}
+	return shard
+}
+
+func (s *Shard) tableIDs() []uint32 {
+	var ids []uint32
+	for _, scf := range s.cfs {
+		for i := 0; i < shardMaxLevel; i++ {
+			l := scf.getLevelHandler(i)
+			for _, tbl := range l.tables {
+				ids = append(ids, uint32(tbl.ID()))
+			}
+		}
+	}
+	return ids
 }
 
 type shardCF struct {
@@ -166,16 +186,14 @@ type Level struct {
 }
 
 // preSplit blocks all compactions
-func (sdb *ShardingDB) preSplit(s *Shard, keys [][]byte, guard *epoch.Guard) error {
+func (sdb *ShardingDB) preSplit(s *Shard, keys [][]byte, guard *epoch.Guard, change *protos.ManifestChangeSet) error {
 	s.lock.Lock()
-	s.splitKeys = keys
-	s.lock.Unlock()
+	defer s.lock.Unlock()
 	// Set split keys so any compaction would fail.
 	// We can safely split our tables.
-	for _, scf := range s.cfs {
-		for i := range scf.levels {
-			handler := scf.getLevelHandler(i)
-			if err := sdb.splitTables(handler, keys, guard); err != nil {
+	for cf := 0; cf < sdb.numCFs; cf++ {
+		for lvl := 0; lvl < shardMaxLevel; lvl++ {
+			if err := sdb.splitTables(s, cf, lvl, keys, guard, change); err != nil {
 				return err
 			}
 		}
@@ -183,11 +201,12 @@ func (sdb *ShardingDB) preSplit(s *Shard, keys [][]byte, guard *epoch.Guard) err
 	return nil
 }
 
-func (sdb *ShardingDB) splitTables(handler *levelHandler, keys [][]byte, guard *epoch.Guard) error {
-	handler.Lock()
-	oldTables := handler.tables
-	handler.Unlock()
+func (sdb *ShardingDB) splitTables(shard *Shard, cf int, level int, keys [][]byte, guard *epoch.Guard, changeSet *protos.ManifestChangeSet) error {
+	scf := shard.cfs[cf]
+	oldHandler := scf.getLevelHandler(level)
+	oldTables := oldHandler.tables
 	newTbls := make([]table.Table, 0, len(oldTables)+len(keys))
+	toDeleteIDs := make(map[uint64]struct{})
 	var relatedKeys [][]byte
 	for _, tbl := range oldTables {
 		relatedKeys = relatedKeys[:0]
@@ -201,33 +220,39 @@ func (sdb *ShardingDB) splitTables(handler *levelHandler, keys [][]byte, guard *
 			newTbls = append(newTbls, tbl)
 			continue
 		}
+		toDeleteIDs[tbl.ID()] = struct{}{}
 		// append an end key to build the last table.
-		relatedKeys = append(relatedKeys, nil)
+		relatedKeys = append(relatedKeys, globalShardEndKey)
 		itr := tbl.NewIterator(false)
 		itr.Rewind()
 		for _, relatedKey := range relatedKeys {
-			tbl, err := sdb.buildTableBeforeKey(itr, relatedKey, handler.level, sdb.opt.TableBuilderOptions)
+			ntbl, err := sdb.buildTableBeforeKey(itr, relatedKey, level, sdb.opt.TableBuilderOptions)
 			if err != nil {
 				return err
 			}
-			if tbl != nil {
-				newTbls = append(newTbls, tbl)
+			if ntbl != nil {
+				changeSet.Changes = append(changeSet.Changes, newShardCreateChange(shard.ID, ntbl.ID(), cf, level))
+				newTbls = append(newTbls, ntbl)
 			}
 		}
+		changeSet.Changes = append(changeSet.Changes, newShardDeleteChange(shard.ID, tbl.ID(), cf))
 	}
-	handler.Lock()
-	handler.tables = newTbls
-	handler.Unlock()
-	toDelete := make([]epoch.Resource, len(oldTables))
-	for i, oldTbl := range oldTables {
-		toDelete[i] = oldTbl
+	newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level, sdb.metrics)
+	newHandler.totalSize = oldHandler.totalSize
+	newHandler.tables = newTbls
+	y.Assert(scf.casLevelHandler(level, oldHandler, newHandler))
+	toDelete := make([]epoch.Resource, 0, len(toDeleteIDs))
+	for _, oldTbl := range oldTables {
+		if _, ok := toDeleteIDs[oldTbl.ID()]; ok {
+			toDelete = append(toDelete, oldTbl)
+		}
 	}
 	guard.Delete(toDelete)
 	return nil
 }
 
 func (sdb *ShardingDB) buildTableBeforeKey(itr y.Iterator, key []byte, level int, opt options.TableBuilderOptions) (table.Table, error) {
-	filename := sstable.NewFilename(sdb.allocFid64(), sdb.opt.Dir)
+	filename := sstable.NewFilename(uint64(sdb.allocFid("splitTable")), sdb.opt.Dir)
 	fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
@@ -266,7 +291,8 @@ func (sdb *ShardingDB) Split(keys [][]byte) error {
 	defer guard.Done()
 	sdb.splitLock.Lock()
 	defer sdb.splitLock.Unlock()
-	shardByKey := sdb.loadShardTree()
+	tree := sdb.loadShardTree()
+	changeSet := &protos.ManifestChangeSet{}
 	var shardTasks []shardSplitTask
 	for _, key := range keys {
 		if len(shardTasks) > 0 {
@@ -277,19 +303,20 @@ func (sdb *ShardingDB) Split(keys [][]byte) error {
 			}
 		}
 		shardTask := shardSplitTask{
-			shard: shardByKey.get(key),
+			shard: tree.get(key),
 			keys:  [][]byte{key},
 		}
 		shardTasks = append(shardTasks, shardTask)
 	}
 	for _, shardTask := range shardTasks {
-		if err := sdb.preSplit(shardTask.shard, shardTask.keys, guard); err != nil {
+		if err := sdb.preSplit(shardTask.shard, shardTask.keys, guard, changeSet); err != nil {
 			return err
 		}
 	}
 	task := &splitTask{
 		shards: shardTasks,
 		notify: make(chan error, 1),
+		change: changeSet,
 	}
 	sdb.writeCh <- engineTask{splitTask: task}
 	return <-task.notify
@@ -297,28 +324,18 @@ func (sdb *ShardingDB) Split(keys [][]byte) error {
 
 // At this stage, all files are split by splitKeys, it is a fast operation.
 // This is done after preSplit is done, so we don't need to acquire any lock, just atomic CAS will do.
-func (sdb *ShardingDB) split(s *Shard) []*Shard {
-	newShards := make([]*Shard, 0, len(s.splitKeys)+1)
-	firstShard := &Shard{
-		ID:    sdb.allocShardID(),
-		Start: s.Start,
-		End:   s.splitKeys[0],
-		cfs:   make([]*shardCF, len(s.cfs)),
-	}
+func (sdb *ShardingDB) split(s *Shard, splitKeys [][]byte) []*Shard {
+	newShards := make([]*Shard, 0, len(splitKeys)+1)
+	firstShard := newShard(sdb.allocShardID(), s.Start, splitKeys[0], sdb.opt, sdb.metrics)
 	newShards = append(newShards, firstShard)
-	for i, splitKey := range s.splitKeys {
+	for i, splitKey := range splitKeys {
 		var endKey []byte
-		if i == len(s.splitKeys)-1 {
+		if i == len(splitKeys)-1 {
 			endKey = s.End
 		} else {
-			endKey = s.splitKeys[i+1]
+			endKey = splitKeys[i+1]
 		}
-		newShards = append(newShards, &Shard{
-			ID:    sdb.allocShardID(),
-			Start: splitKey,
-			End:   endKey,
-			cfs:   make([]*shardCF, len(s.cfs)),
-		})
+		newShards = append(newShards, newShard(sdb.allocShardID(), splitKey, endKey, sdb.opt, sdb.metrics))
 	}
 	for i, scf := range s.cfs {
 		for j := range scf.levels {
@@ -332,23 +349,10 @@ func (sdb *ShardingDB) split(s *Shard) []*Shard {
 }
 
 func (sdb *ShardingDB) insertTableToNewShard(t table.Table, cf, level int, shards []*Shard) {
-	for _, shard := range shards {
-		if bytes.Compare(shard.Start, t.Smallest().UserKey) <= 0 {
-			sCF := shard.cfs[cf]
-			if sCF == nil {
-				sCF = &shardCF{
-					levels: make([]unsafe.Pointer, shardMaxLevel),
-				}
-				for i := 0; i < shardMaxLevel; i++ {
-					sCF.casLevelHandler(i, nil, newLevelHandler(sdb.opt.NumLevelZeroTablesStall, i, sdb.metrics))
-				}
-				shard.cfs[cf] = sCF
-			}
-			handler := sCF.getLevelHandler(level)
-			handler.tables = append(handler.tables, t)
-			break
-		}
-	}
+	shard := getShard(shards, t.Smallest().UserKey)
+	sCF := shard.cfs[cf]
+	handler := sCF.getLevelHandler(level)
+	handler.tables = append(handler.tables, t)
 }
 
 type shardDataBuilder struct {

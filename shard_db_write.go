@@ -27,6 +27,7 @@ type engineTask struct {
 
 type splitTask struct {
 	shards []shardSplitTask
+	change *protos.ManifestChangeSet
 	notify chan error
 }
 
@@ -154,20 +155,20 @@ func (sdb *ShardingDB) createL0File(fid uint32) (fd, idxFD *os.File, err error) 
 	return fd, idxFD, nil
 }
 
-func (sdb *ShardingDB) allocFid() uint32 {
+func (sdb *ShardingDB) allocFid(allocFor string) uint32 {
 	fid := atomic.AddUint32(&sdb.lastFID, 1)
-	log.S().Debugf("alloc fid %d", fid)
+	log.S().Debugf("alloc fid %d for %s", fid, allocFor)
 	return fid
 }
 
-func (sdb *ShardingDB) allocFid64() uint64 {
-	return uint64(sdb.allocFid())
+func (sdb *ShardingDB) allocFidForCompaction() uint64 {
+	return uint64(sdb.allocFid("compaction"))
 }
 
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 	defer c.Done()
 	for m := range sdb.flushCh {
-		fid := sdb.allocFid()
+		fid := sdb.allocFid("flushMemTable")
 		fd, idxFD, err := sdb.createL0File(fid)
 		if err != nil {
 			panic(err)
@@ -289,10 +290,31 @@ func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable, fd, idxFD *os.File) er
 
 func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
 	shardByKey := sdb.loadShardTree()
+	var changes []*protos.ShardChange
 	for _, shard := range task.shards {
-		newShards := sdb.split(shard.shard)
+		newShards := sdb.split(shard.shard, shard.keys)
+		for _, newShard := range newShards {
+			changes = append(changes, &protos.ShardChange{
+				ShardID:  newShard.ID,
+				Op:       protos.ShardChange_CREATE,
+				StartKey: newShard.Start,
+				EndKey:   newShard.End,
+				TableIDs: newShard.tableIDs(),
+			})
+		}
+		changes = append(changes, &protos.ShardChange{
+			ShardID:  shard.shard.ID,
+			Op:       protos.ShardChange_DELETE,
+			StartKey: shard.shard.Start,
+			EndKey:   shard.shard.End,
+		})
 		shardByKey = shardByKey.replace([]*Shard{shard.shard}, newShards)
 	}
-	atomic.StorePointer(&sdb.shardTree, unsafe.Pointer(shardByKey))
-	task.notify <- nil
+	task.change.ShardChange = changes
+	task.change.Head = &protos.HeadInfo{Version: sdb.orc.commitTs()}
+	err := sdb.manifest.writeChangeSet(task.change)
+	if err == nil {
+		atomic.StorePointer(&sdb.shardTree, unsafe.Pointer(shardByKey))
+	}
+	task.notify <- err
 }
