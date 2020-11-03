@@ -1,16 +1,20 @@
 package memtable
 
-import "github.com/pingcap/badger/y"
+import (
+	"github.com/pingcap/badger/y"
+)
 
 type CFTable struct {
+	id    uint32
 	skls  []*skiplist
 	arena *arena
 }
 
-func NewCFTable(arenaSize int64, numCFs int) *CFTable {
+func NewCFTable(arenaSize int64, numCFs int, id uint32) *CFTable {
 	t := &CFTable{
 		skls:  make([]*skiplist, numCFs),
 		arena: newArena(arenaSize),
+		id:    id,
 	}
 	for i := 0; i < numCFs; i++ {
 		head := newNode(t.arena, nil, y.ValueStruct{}, maxHeight)
@@ -43,6 +47,10 @@ func (cft *CFTable) Get(cf byte, key []byte, version uint64) y.ValueStruct {
 	return cft.skls[cf].Get(key, version)
 }
 
+func (cft *CFTable) DeleteKey(cf byte, key []byte) bool {
+	return cft.skls[cf].DeleteKey(key)
+}
+
 func (cft *CFTable) NewIterator(cf byte, reversed bool) *UniIterator {
 	if cft.skls[cf].Empty() {
 		return nil
@@ -57,4 +65,8 @@ func (cft *CFTable) Empty() bool {
 		}
 	}
 	return true
+}
+
+func (cft *CFTable) ID() uint32 {
+	return cft.id
 }

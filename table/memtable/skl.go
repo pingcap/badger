@@ -536,6 +536,39 @@ func (s *skiplist) Get(key []byte, version uint64) y.ValueStruct {
 	return y.ValueStruct{}
 }
 
+// The DeleteKey operation is not thread safe, it can only be run on a single thread.
+func (s *skiplist) DeleteKey(key []byte) bool {
+	h := new(hint)
+	listHeight := s.getHeight()
+	recomputeHeight := s.calculateRecomputeHeight(key, h, listHeight)
+	var n *node
+	if recomputeHeight > 0 {
+		for i := recomputeHeight - 1; i >= 0; i-- {
+			var match bool
+			h.prev[i], h.next[i], match = s.findSpliceForLevel(key, h.prev[i+1], int(i))
+			if match {
+				n = h.next[i]
+				for j := i; j >= 0; j-- {
+					h.prev[j] = h.prev[i]
+					h.next[j] = s.getNext(n, int(j))
+				}
+				break
+			}
+		}
+	} else {
+		n = h.next[0]
+	}
+	if n == nil {
+		return false
+	}
+	nodeOff := s.arena.getNodeOffset(n)
+	for i := int(n.height) - 1; i >= 0; i-- {
+		// Change the nexts from higher to lower, so the data is consistent at any point.
+		y.Assert(h.prev[i].casNextOffset(i, nodeOff, n.getNextOffset(i)))
+	}
+	return true
+}
+
 // NewIterator returns a skiplist iterator.  You have to Close() the iterator.
 func (s *skiplist) NewIterator() *Iterator {
 	return &Iterator{list: s}

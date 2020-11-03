@@ -10,27 +10,8 @@ import (
 )
 
 func (s *Snapshot) NewIterator(cf byte, reversed, allVersions bool) *Iterator {
-	iters := make([]y.Iterator, 0, 12)
-	for _, memTbl := range s.memTbls.tables {
-		iter := memTbl.NewIterator(cf, reversed)
-		if iter != nil {
-			iters = append(iters, iter)
-		}
-	}
-	for _, l0Tbl := range s.l0Tbls.tables {
-		iter := l0Tbl.newIterator(cf, reversed, s.startKey, s.endKey)
-		if iter != nil {
-			iters = append(iters, iter)
-		}
-	}
-	if len(s.shards) == 1 {
-		iters = append(iters, s.shards[0].GetIterators(cf, reversed)...)
-	} else {
-		iters = append(iters, newShardConcatIterator(cf, s.shards, reversed))
-	}
-
 	iter := &Iterator{
-		iitr: table.NewMergeIterator(iters, reversed),
+		iitr: newShardConcatIterator(cf, s, reversed),
 		opt:  IteratorOptions{Reverse: reversed, AllVersions: allVersions},
 	}
 	if s.cfs[cf].Managed {
@@ -41,8 +22,41 @@ func (s *Snapshot) NewIterator(cf byte, reversed, allVersions bool) *Iterator {
 	return iter
 }
 
-func (st *Shard) GetIterators(cf byte, reverse bool) []y.Iterator {
-	iters := make([]y.Iterator, 0, 8)
+func (s *Snapshot) newIteratorForShard(cf byte, reversed bool, shard *Shard) y.Iterator {
+	minGlobalL0 := shard.loadMinGlobalL0()
+	iters := make([]y.Iterator, 0, 12)
+	for _, memTbl := range s.memTbls.tables {
+		if minGlobalL0 > memTbl.ID() {
+			continue
+		}
+		iter := memTbl.NewIterator(cf, reversed)
+		if iter != nil && validInRange(iter, reversed, shard.Start, shard.End) {
+			iters = append(iters, iter)
+		}
+	}
+	for _, l0 := range s.l0Tbls.tables {
+		if minGlobalL0 > l0.fid {
+			continue
+		}
+		iter := l0.newIterator(cf, reversed, shard.Start, shard.End)
+		if iter != nil {
+			iters = append(iters, iter)
+		}
+	}
+	iters = shard.AppendIterators(iters, cf, reversed)
+	return y.NewBoundedIterator(table.NewMergeIterator(iters, reversed), shard.Start, shard.End, reversed)
+}
+
+func validInRange(iter y.Iterator, reversed bool, start, end []byte) bool {
+	if reversed {
+		iter.Seek(end)
+		return iter.Valid() && bytes.Compare(start, iter.Key().UserKey) <= 0
+	}
+	iter.Seek(start)
+	return iter.Valid() && bytes.Compare(iter.Key().UserKey, end) < 0
+}
+
+func (st *Shard) AppendIterators(iters []y.Iterator, cf byte, reverse bool) []y.Iterator {
 	scf := st.cfs[cf]
 	l0 := scf.getLevelHandler(0)
 	for _, tbl := range l0.tables {
@@ -59,7 +73,7 @@ func (st *Shard) GetIterators(cf byte, reverse bool) []y.Iterator {
 }
 
 type shardConcatIterator struct {
-	shards   []*Shard
+	snap     *Snapshot
 	idx      int // Which iterator is active now.
 	cur      y.Iterator
 	iters    []y.Iterator // Corresponds to tables.
@@ -67,17 +81,14 @@ type shardConcatIterator struct {
 	cf       byte
 }
 
-func newShardConcatIterator(cf byte, shards []*Shard, reversed bool) y.Iterator {
+func newShardConcatIterator(cf byte, snap *Snapshot, reversed bool) y.Iterator {
 	iter := &shardConcatIterator{
-		shards:   shards,
+		snap:     snap,
 		idx:      0,
 		reversed: reversed,
 		cf:       cf,
 	}
-	iter.iters = make([]y.Iterator, 0, len(shards))
-	for _, shard := range shards {
-		iter.iters = append(iter.iters, table.NewMergeIterator(shard.GetIterators(cf, reversed), reversed))
-	}
+	iter.iters = make([]y.Iterator, len(snap.shards))
 	return iter
 }
 
@@ -87,7 +98,7 @@ func (s *shardConcatIterator) setIdx(idx int) {
 		s.cur = nil
 	} else {
 		if s.iters[s.idx] == nil {
-			ti := table.NewMergeIterator(s.shards[s.idx].GetIterators(s.cf, s.reversed), s.reversed)
+			ti := s.snap.newIteratorForShard(s.cf, s.reversed, s.snap.shards[idx])
 			ti.Rewind()
 			s.iters[s.idx] = ti
 		}
@@ -131,16 +142,16 @@ func (s *shardConcatIterator) FillValue(vs *y.ValueStruct) {
 func (s *shardConcatIterator) Seek(key []byte) {
 	var idx int
 	if !s.reversed {
-		idx = sort.Search(len(s.shards), func(i int) bool {
-			return bytes.Compare(s.shards[i].End, key) >= 0
+		idx = sort.Search(len(s.snap.shards), func(i int) bool {
+			return bytes.Compare(s.snap.shards[i].End, key) >= 0
 		})
 	} else {
-		n := len(s.shards)
+		n := len(s.snap.shards)
 		idx = n - 1 - sort.Search(n, func(i int) bool {
-			return bytes.Compare(s.shards[n-1-i].Start, key) <= 0
+			return bytes.Compare(s.snap.shards[n-1-i].Start, key) <= 0
 		})
 	}
-	if idx >= len(s.shards) || idx < 0 {
+	if idx >= len(s.snap.shards) || idx < 0 {
 		s.setIdx(-1)
 		return
 	}

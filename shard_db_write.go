@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/ncw/directio"
+	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
@@ -23,10 +24,11 @@ type shardingMemTables struct {
 type engineTask struct {
 	writeTask *WriteBatch
 	splitTask *splitTask
+	truncates *truncateTask
 }
 
 type splitTask struct {
-	shards []shardSplitTask
+	shards map[uint32]*shardSplitTask
 	change *protos.ManifestChangeSet
 	notify chan error
 }
@@ -36,11 +38,17 @@ type shardSplitTask struct {
 	keys  [][]byte
 }
 
+type truncateTask struct {
+	guard  *epoch.Guard
+	shards []*Shard
+	notify chan error
+}
+
 func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
 	defer closer.Done()
 	for {
-		writeTasks, splitTask := sdb.collectTasks(closer)
-		if len(writeTasks) == 0 && splitTask == nil {
+		writeTasks, splitTask, truncate := sdb.collectTasks(closer)
+		if len(writeTasks) == 0 && splitTask == nil && truncate == nil {
 			return
 		}
 		if len(writeTasks) > 0 {
@@ -49,18 +57,24 @@ func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
 		if splitTask != nil {
 			sdb.executeSplitTask(splitTask)
 		}
+		if truncate != nil {
+			sdb.executeTruncateTask(truncate)
+		}
 	}
 }
 
-func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask) {
+func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask, *truncateTask) {
 	var writeTasks []*WriteBatch
 	var splitTask *splitTask
+	var truncateTask *truncateTask
 	select {
 	case x := <-sdb.writeCh:
 		if x.writeTask != nil {
 			writeTasks = append(writeTasks, x.writeTask)
-		} else {
+		} else if x.splitTask != nil {
 			splitTask = x.splitTask
+		} else {
+			truncateTask = x.truncates
 		}
 		l := len(sdb.writeCh)
 		for i := 0; i < l; i++ {
@@ -73,9 +87,9 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask) {
 			}
 		}
 	case <-c.HasBeenClosed():
-		return nil, nil
+		return nil, nil, nil
 	}
-	return writeTasks, splitTask
+	return writeTasks, splitTask, truncateTask
 }
 
 func (sdb *ShardingDB) switchMemTable(minSize int64) {
@@ -84,7 +98,7 @@ func (sdb *ShardingDB) switchMemTable(minSize int64) {
 	if newTableSize < minSize {
 		newTableSize = minSize
 	}
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.allocFid("l0"))
 	for {
 		oldMemTbls := sdb.loadMemTables()
 		newMemTbls := &shardingMemTables{
@@ -168,8 +182,7 @@ func (sdb *ShardingDB) allocFidForCompaction() uint64 {
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 	defer c.Done()
 	for m := range sdb.flushCh {
-		fid := sdb.allocFid("flushMemTable")
-		fd, idxFD, err := sdb.createL0File(fid)
+		fd, idxFD, err := sdb.createL0File(m.ID())
 		if err != nil {
 			panic(err)
 		}
@@ -180,7 +193,7 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 		filename := fd.Name()
 		fd.Close()
 		idxFD.Close()
-		l0Table, err := openGlobalL0Table(filename, fid)
+		l0Table, err := openGlobalL0Table(filename, m.ID())
 		if err != nil {
 			panic(err)
 		}
@@ -317,4 +330,66 @@ func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
 		atomic.StorePointer(&sdb.shardTree, unsafe.Pointer(shardByKey))
 	}
 	task.notify <- err
+}
+
+func (sdb *ShardingDB) executeTruncateTask(task *truncateTask) {
+	memTbl := sdb.loadWritableMemTable()
+	minID := memTbl.ID()
+	log.S().Infof("truncate to min id %d", minID)
+	shards := task.shards
+	changeSet := &protos.ManifestChangeSet{Head: &protos.HeadInfo{Version: sdb.orc.commitTs()}}
+	for _, shard := range shards {
+		changeSet.ShardChange = append(changeSet.ShardChange, &protos.ShardChange{MinGlobalL0: minID, ShardID: shard.ID, Op: protos.ShardChange_TRUNCATE})
+	}
+	err := sdb.manifest.writeChangeSet(changeSet)
+	if err != nil {
+		task.notify <- err
+		return
+	}
+	for _, shard := range shards {
+		atomic.StoreUint32(&shard.minGlobalL0, minID)
+		sdb.removeShardTables(shard, task.guard)
+	}
+	sdb.removeRangeInMemTable(memTbl, shards[0].Start, shards[len(shards)-1].End)
+	task.notify <- nil
+}
+
+func (sdb *ShardingDB) removeShardTables(s *Shard, guard *epoch.Guard) {
+	// Lock the shard so compaction will not add new tables after truncate.
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	var toBeDelete []epoch.Resource
+	for _, scf := range s.cfs {
+		for i := 0; i < shardMaxLevel; i++ {
+			l := scf.getLevelHandler(i)
+			if len(l.tables) == 0 {
+				continue
+			}
+			scf.casLevelHandler(i, l, newLevelHandler(sdb.opt.NumLevelZeroTablesStall, 0, sdb.metrics))
+			for _, t := range l.tables {
+				toBeDelete = append(toBeDelete, t)
+			}
+		}
+	}
+	guard.Delete(toBeDelete)
+}
+
+func (sdb *ShardingDB) removeRangeInMemTable(memTbl *memtable.CFTable, start, end []byte) {
+	var keys [][]byte
+	for cf := 0; cf < sdb.numCFs; cf++ {
+		keys = keys[:0]
+		itr := memTbl.NewIterator(byte(cf), false)
+		if itr == nil {
+			continue
+		}
+		for itr.Seek(start); itr.Valid(); itr.Next() {
+			if bytes.Compare(itr.Key().UserKey, end) >= 0 {
+				break
+			}
+			keys = append(keys, y.SafeCopy(nil, itr.Key().UserKey))
+		}
+		for _, key := range keys {
+			memTbl.DeleteKey(byte(cf), key)
+		}
+	}
 }

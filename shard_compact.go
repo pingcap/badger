@@ -395,8 +395,16 @@ func (sdb *ShardingDB) getCompactionPriority(shard *Shard) compactionPriority {
 func (sdb *ShardingDB) compactShard(pri compactionPriority, guard *epoch.Guard) error {
 	shard := pri.shard
 	scf := shard.cfs[pri.cf]
-	log.Info("start compaction", zap.Int("cf", pri.cf), zap.Int("level", pri.level), zap.Float64("score", pri.score))
+	log.Info("start compaction", zap.Uint32("shard", shard.ID), zap.Int("cf", pri.cf), zap.Int("level", pri.level), zap.Float64("score", pri.score))
+	shard.lock.Lock()
+	defer shard.lock.Unlock()
 	thisLevel := scf.getLevelHandler(pri.level)
+	if len(thisLevel.tables) == 0 {
+		// The shard must have been truncated.
+		y.Assert(shard.loadMinGlobalL0() > 0)
+		log.Info("stop compaction due to shard truncated", zap.Uint32("shard", shard.ID))
+		return nil
+	}
 	nextLevel := scf.getLevelHandler(pri.level + 1)
 	cd := &CompactDef{
 		Level: pri.level,
@@ -421,8 +429,7 @@ func (sdb *ShardingDB) compactShard(pri compactionPriority, guard *epoch.Guard) 
 
 func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, guard *epoch.Guard) error {
 	timeStart := time.Now()
-	shard.lock.Lock()
-	defer shard.lock.Unlock()
+
 	scf := shard.cfs[cf]
 	thisLevel := scf.getLevelHandler(cd.Level)
 	nextLevel := scf.getLevelHandler(cd.Level + 1)

@@ -1,6 +1,7 @@
 package badger
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 	"sync"
@@ -89,7 +90,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	if err != nil {
 		return nil, err
 	}
-	memTbls := &shardingMemTables{tables: []*memtable.CFTable{memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs))}}
+	memTbls := &shardingMemTables{}
 	db = &ShardingDB{
 		opt:         opt,
 		numCFs:      len(opt.CFs),
@@ -107,6 +108,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		lastFID:     manifest.lastFileID,
 		lastShardID: manifest.lastShardID,
 	}
+	memTbls.tables = append(memTbls.tables, memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs), db.allocFid("l0")))
 	db.closers.resourceManager = y.NewCloser(0)
 	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
 	db.closers.memtable = y.NewCloser(1)
@@ -305,4 +307,43 @@ func (sdb *ShardingDB) NewSnapshot(startKey, endKey []byte) *Snapshot {
 		startKey: startKey,
 		endKey:   endKey,
 	}
+}
+
+func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
+	if len(end) == 0 {
+		end = globalShardEndKey
+	}
+	guard := sdb.resourceMgr.Acquire()
+	defer guard.Done()
+	sdb.splitLock.Lock()
+	defer sdb.splitLock.Unlock()
+	tree := sdb.loadShardTree()
+	shards := tree.getShards(start, end)
+	var splitKeys [][]byte
+	if !bytes.Equal(shards[0].Start, start) {
+		splitKeys = append(splitKeys, start)
+	}
+	if !bytes.Equal(shards[len(shards)-1].End, end) {
+		splitKeys = append(splitKeys, end)
+	}
+	log.S().Infof("split keys %s", splitKeys)
+	if len(splitKeys) > 0 {
+		err := sdb.splitInLock(splitKeys, guard)
+		if err != nil {
+			return err
+		}
+		tree = sdb.loadShardTree()
+		shards = tree.getShards(start, end)
+		log.S().Infof("shard Start %s start %s", shards[0].Start, start)
+		y.Assert(bytes.Equal(shards[0].Start, start))
+		log.S().Infof("shard end %s end %s", shards[0].End, end)
+		y.Assert(bytes.Equal(shards[len(shards)-1].End, end))
+	}
+	task := &truncateTask{
+		guard:  guard,
+		shards: shards,
+		notify: make(chan error, 1),
+	}
+	sdb.writeCh <- engineTask{truncates: task}
+	return <-task.notify
 }

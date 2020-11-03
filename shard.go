@@ -119,6 +119,9 @@ type Shard struct {
 	End   []byte
 	cfs   []*shardCF
 	lock  sync.Mutex
+
+	// minGlobalL0 is used to ignore data in global l0 files that has been range deleted.
+	minGlobalL0 uint32
 }
 
 func newShard(id uint32, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
@@ -142,15 +145,28 @@ func newShard(id uint32, start, end []byte, opt Options, metrics *y.MetricsSet) 
 
 func (s *Shard) tableIDs() []uint32 {
 	var ids []uint32
-	for _, scf := range s.cfs {
+	s.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		for _, tbl := range level.tables {
+			ids = append(ids, uint32(tbl.ID()))
+		}
+		return false
+	})
+	return ids
+}
+
+func (s *Shard) foreachLevel(f func(cf int, level *levelHandler) (stop bool)) {
+	for cf, scf := range s.cfs {
 		for i := 0; i < shardMaxLevel; i++ {
 			l := scf.getLevelHandler(i)
-			for _, tbl := range l.tables {
-				ids = append(ids, uint32(tbl.ID()))
+			if stop := f(cf, l); stop {
+				return
 			}
 		}
 	}
-	return ids
+}
+
+func (s *Shard) loadMinGlobalL0() uint32 {
+	return atomic.LoadUint32(&s.minGlobalL0)
 }
 
 type shardCF struct {
@@ -291,22 +307,23 @@ func (sdb *ShardingDB) Split(keys [][]byte) error {
 	defer guard.Done()
 	sdb.splitLock.Lock()
 	defer sdb.splitLock.Unlock()
+	return sdb.splitInLock(keys, guard)
+}
+
+func (sdb *ShardingDB) splitInLock(keys [][]byte, guard *epoch.Guard) error {
 	tree := sdb.loadShardTree()
 	changeSet := &protos.ManifestChangeSet{}
-	var shardTasks []shardSplitTask
+	shardTasks := map[uint32]*shardSplitTask{}
 	for _, key := range keys {
-		if len(shardTasks) > 0 {
-			shardTask := shardTasks[len(shardTasks)-1]
-			if bytes.Compare(shardTask.shard.End, key) > 0 {
-				shardTask.keys = append(shardTask.keys, key)
-				continue
+		shard := tree.get(key)
+		task, ok := shardTasks[shard.ID]
+		if !ok {
+			task = &shardSplitTask{
+				shard: shard,
 			}
+			shardTasks[shard.ID] = task
 		}
-		shardTask := shardSplitTask{
-			shard: tree.get(key),
-			keys:  [][]byte{key},
-		}
-		shardTasks = append(shardTasks, shardTask)
+		task.keys = append(task.keys, key)
 	}
 	for _, shardTask := range shardTasks {
 		if err := sdb.preSplit(shardTask.shard, shardTask.keys, guard, changeSet); err != nil {

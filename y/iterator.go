@@ -17,6 +17,7 @@
 package y
 
 import (
+	"bytes"
 	"encoding/binary"
 )
 
@@ -111,4 +112,51 @@ func NextAllVersion(it Iterator) {
 	if !it.NextVersion() {
 		it.Next()
 	}
+}
+
+type BoundedIterator struct {
+	Iterator
+	reverse bool
+	start   []byte
+	end     []byte
+}
+
+func NewBoundedIterator(it Iterator, start, end []byte, reverse bool) *BoundedIterator {
+	return &BoundedIterator{
+		Iterator: it,
+		reverse:  reverse,
+		start:    start,
+		end:      end,
+	}
+}
+
+func (li *BoundedIterator) Seek(key []byte) {
+	if li.reverse {
+		if bytes.Compare(li.end, key) < 0 {
+			key = li.end
+		}
+	} else {
+		if bytes.Compare(key, li.start) < 0 {
+			key = li.start
+		}
+	}
+	li.Iterator.Seek(key)
+}
+
+func (li *BoundedIterator) Rewind() {
+	if li.reverse {
+		li.Iterator.Seek(li.end)
+	} else {
+		li.Iterator.Seek(li.start)
+	}
+}
+
+func (li *BoundedIterator) Valid() bool {
+	if !li.Iterator.Valid() {
+		return false
+	}
+	if li.reverse {
+		return bytes.Compare(li.start, li.Key().UserKey) <= 0
+	}
+	return bytes.Compare(li.Key().UserKey, li.end) < 0
 }

@@ -52,6 +52,57 @@ func TestShardingDB(t *testing.T) {
 	sc.checkData(db)
 }
 
+func TestShardingDeleteRange(t *testing.T) {
+	runPprof()
+	dir, err := ioutil.TempDir("", "sharding")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.NumCompactors = 2
+	opts.NumLevelZeroTables = 1
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}, {Managed: false}}
+	db, err := OpenShardingDB(opts)
+	require.NoError(t, err)
+	sc := &shardingCase{
+		t: t,
+		n: 20000,
+	}
+	sc.loadData(db)
+	sc.split(db, sc.iToKey(10000))
+	err = db.DeleteRange(sc.iToKey(1000), sc.iToKey(3000))
+	require.NoError(t, err)
+	err = db.DeleteRange(sc.iToKey(18000), sc.iToKey(20000))
+	require.NoError(t, err)
+	err = db.DeleteRange(sc.iToKey(9000), sc.iToKey(11000))
+	require.NoError(t, err)
+	snap := db.NewSnapshot(nil, nil)
+	defer snap.Discard()
+	for cf := 0; cf < 3; cf++ {
+		it := snap.NewIterator(0, false, true)
+		cnt := 0
+		for it.Rewind(); it.Valid(); it.Next() {
+			cnt++
+		}
+		require.Equal(t, cnt, 14000)
+	}
+	require.NoError(t, db.Close())
+	// TODO:
+	// Currently we compact global L0 by CF, the truncated shard can not ignore l0 tables.
+	// need to change the global l0 compaction to compact by shard, so we can use minL0ID to ignore l0 tables.
+	/*
+		snap = db.NewSnapshot(nil, nil)
+		defer snap.Discard()
+		for cf := 0; cf < 3; cf++ {
+			it := snap.NewIterator(0, false, true)
+			cnt := 0
+			for it.Rewind(); it.Valid(); it.Next() {
+				cnt++
+			}
+			require.Equal(t, cnt, 14000)
+		}
+	*/
+}
+
 type shardingCase struct {
 	t *testing.T
 	n int
