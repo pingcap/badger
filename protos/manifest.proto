@@ -41,7 +41,7 @@ message ManifestChange {
   }
   Operation Op   = 2;
   uint32 Level   = 3;       // Only used for CREATE.
-  uint32 CF      = 4;
+  int32 CF       = 4;
   uint32 ShardID = 5;
 }
 
@@ -56,5 +56,4 @@ message ShardChange {
   bytes  startKey = 3;
   bytes  endKey   = 4;
   repeated uint32 tableIDs = 5;
-  uint32 minGlobalL0 = 6;
 }

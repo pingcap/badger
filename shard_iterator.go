@@ -2,14 +2,13 @@ package badger
 
 import (
 	"bytes"
-	"math"
-	"sort"
-
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/y"
+	"math"
+	"sort"
 )
 
-func (s *Snapshot) NewIterator(cf byte, reversed, allVersions bool) *Iterator {
+func (s *Snapshot) NewIterator(cf int, reversed, allVersions bool) *Iterator {
 	iter := &Iterator{
 		iitr: newShardConcatIterator(cf, s, reversed),
 		opt:  IteratorOptions{Reverse: reversed, AllVersions: allVersions},
@@ -22,54 +21,29 @@ func (s *Snapshot) NewIterator(cf byte, reversed, allVersions bool) *Iterator {
 	return iter
 }
 
-func (s *Snapshot) newIteratorForShard(cf byte, reversed bool, shard *Shard) y.Iterator {
-	minGlobalL0 := shard.loadMinGlobalL0()
+func (s *Snapshot) newIteratorForShard(cf int, reverse bool, shard *Shard) y.Iterator {
 	iters := make([]y.Iterator, 0, 12)
-	for _, memTbl := range s.memTbls.tables {
-		if minGlobalL0 > memTbl.ID() {
-			continue
-		}
-		iter := memTbl.NewIterator(cf, reversed)
-		if iter != nil && validInRange(iter, reversed, shard.Start, shard.End) {
-			iters = append(iters, iter)
+	for _, tbl := range shard.loadMemTables().tables {
+		it := tbl.NewIterator(cf, reverse)
+		if it != nil {
+			iters = append(iters, it)
 		}
 	}
-	for _, l0 := range s.l0Tbls.tables {
-		if minGlobalL0 > l0.fid {
-			continue
-		}
-		iter := l0.newIterator(cf, reversed, shard.Start, shard.End)
-		if iter != nil {
-			iters = append(iters, iter)
+	for _, tbl := range shard.loadL0Tables().tables {
+		it := tbl.newIterator(cf, reverse)
+		if it != nil {
+			iters = append(iters, it)
 		}
 	}
-	iters = shard.AppendIterators(iters, cf, reversed)
-	return y.NewBoundedIterator(table.NewMergeIterator(iters, reversed), shard.Start, shard.End, reversed)
-}
-
-func validInRange(iter y.Iterator, reversed bool, start, end []byte) bool {
-	if reversed {
-		iter.Seek(end)
-		return iter.Valid() && bytes.Compare(start, iter.Key().UserKey) <= 0
-	}
-	iter.Seek(start)
-	return iter.Valid() && bytes.Compare(iter.Key().UserKey, end) < 0
-}
-
-func (st *Shard) AppendIterators(iters []y.Iterator, cf byte, reverse bool) []y.Iterator {
-	scf := st.cfs[cf]
-	l0 := scf.getLevelHandler(0)
-	for _, tbl := range l0.tables {
-		iters = append(iters, tbl.NewIterator(reverse))
-	}
-	for i := 1; i < shardMaxLevel; i++ {
+	scf := shard.cfs[cf]
+	for i := 1; i <= shardMaxLevel; i++ {
 		h := scf.getLevelHandler(i)
 		if len(h.tables) == 0 {
 			continue
 		}
 		iters = append(iters, table.NewConcatIterator(h.tables, reverse))
 	}
-	return iters
+	return table.NewMergeIterator(iters, reverse)
 }
 
 type shardConcatIterator struct {
@@ -78,10 +52,10 @@ type shardConcatIterator struct {
 	cur      y.Iterator
 	iters    []y.Iterator // Corresponds to tables.
 	reversed bool
-	cf       byte
+	cf       int
 }
 
-func newShardConcatIterator(cf byte, snap *Snapshot, reversed bool) y.Iterator {
+func newShardConcatIterator(cf int, snap *Snapshot, reversed bool) y.Iterator {
 	iter := &shardConcatIterator{
 		snap:     snap,
 		idx:      0,

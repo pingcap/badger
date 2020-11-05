@@ -3,19 +3,20 @@ package badger
 import (
 	"bytes"
 	"encoding/binary"
-	"os"
-	"sort"
-	"sync"
-	"sync/atomic"
-	"unsafe"
-
+	"github.com/dgryski/go-farm"
 	"github.com/ncw/directio"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table"
+	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
+	"os"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
 const shardMaxLevel = 4
@@ -29,6 +30,16 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 		for fid := range mShard.files {
 			cfLevel := manifest.globalFiles[fid]
 			cf := cfLevel.cf
+			if cf == -1 {
+				filename := sstable.NewFilename(uint64(fid), opt.Dir)
+				sl0Tbl, err := openShardL0Table(filename, fid)
+				if err != nil {
+					return nil, err
+				}
+				l0Tbls := shard.loadL0Tables()
+				l0Tbls.tables = append(l0Tbls.tables, sl0Tbl)
+				continue
+			}
 			level := cfLevel.level
 			scf := shard.cfs[cf]
 			handler := scf.getLevelHandler(int(level))
@@ -43,10 +54,10 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 			}
 			handler.tables = append(handler.tables, tbl)
 		}
-		for i := 0; i < len(opt.CFs); i++ {
-			scf := shard.cfs[i]
-			for i := range scf.levels {
-				handler := scf.getLevelHandler(i)
+		for cf := 0; cf < len(opt.CFs); cf++ {
+			scf := shard.cfs[cf]
+			for level := 1; level <= shardMaxLevel; level++ {
+				handler := scf.getLevelHandler(level)
 				sortTables(handler.tables)
 			}
 		}
@@ -120,8 +131,9 @@ type Shard struct {
 	cfs   []*shardCF
 	lock  sync.Mutex
 
-	// minGlobalL0 is used to ignore data in global l0 files that has been range deleted.
-	minGlobalL0 uint32
+	memTbls unsafe.Pointer
+	l0s     unsafe.Pointer
+	flushCh chan *shardFlushTask
 }
 
 func newShard(id uint32, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
@@ -131,11 +143,13 @@ func newShard(id uint32, start, end []byte, opt Options, metrics *y.MetricsSet) 
 		End:   end,
 		cfs:   make([]*shardCF, len(opt.CFs)),
 	}
+	shard.memTbls = unsafe.Pointer(&shardingMemTables{})
+	shard.l0s = unsafe.Pointer(&shardL0Tables{})
 	for i := 0; i < len(opt.CFs); i++ {
 		sCF := &shardCF{
 			levels: make([]unsafe.Pointer, shardMaxLevel),
 		}
-		for j := 0; j < shardMaxLevel; j++ {
+		for j := 1; j <= shardMaxLevel; j++ {
 			sCF.casLevelHandler(j, nil, newLevelHandler(opt.NumLevelZeroTablesStall, j, metrics))
 		}
 		shard.cfs[i] = sCF
@@ -156,7 +170,7 @@ func (s *Shard) tableIDs() []uint32 {
 
 func (s *Shard) foreachLevel(f func(cf int, level *levelHandler) (stop bool)) {
 	for cf, scf := range s.cfs {
-		for i := 0; i < shardMaxLevel; i++ {
+		for i := 1; i <= shardMaxLevel; i++ {
 			l := scf.getLevelHandler(i)
 			if stop := f(cf, l); stop {
 				return
@@ -165,20 +179,62 @@ func (s *Shard) foreachLevel(f func(cf int, level *levelHandler) (stop bool)) {
 	}
 }
 
-func (s *Shard) loadMinGlobalL0() uint32 {
-	return atomic.LoadUint32(&s.minGlobalL0)
+func (s *Shard) Get(cf int, key y.Key) y.ValueStruct {
+	memTbls := s.loadMemTables()
+	for _, tbl := range memTbls.tables {
+		v := tbl.Get(cf, key.UserKey, key.Version)
+		if v.Valid() {
+			return v
+		}
+	}
+	keyHash := farm.Fingerprint64(key.UserKey)
+	l0Tbls := s.loadL0Tables()
+	for _, tbl := range l0Tbls.tables {
+		v := tbl.Get(cf, key, keyHash)
+		if v.Valid() {
+			return v
+		}
+	}
+	scf := s.cfs[cf]
+	for i := 1; i <= shardMaxLevel; i++ {
+		level := scf.getLevelHandler(i)
+		if len(level.tables) == 0 {
+			continue
+		}
+		v := level.get(key, keyHash)
+		if v.Valid() {
+			return v
+		}
+	}
+	return y.ValueStruct{}
+}
+
+func (s *Shard) loadMemTables() *shardingMemTables {
+	return (*shardingMemTables)(atomic.LoadPointer(&s.memTbls))
+}
+
+func (s *Shard) loadWritableMemTable() *memtable.CFTable {
+	tbls := s.loadMemTables()
+	if len(tbls.tables) > 0 {
+		return tbls.tables[0]
+	}
+	return nil
+}
+
+func (s *Shard) loadL0Tables() *shardL0Tables {
+	return (*shardL0Tables)(atomic.LoadPointer(&s.l0s))
 }
 
 type shardCF struct {
 	levels []unsafe.Pointer
 }
 
-func (scf *shardCF) getLevelHandler(i int) *levelHandler {
-	return (*levelHandler)(atomic.LoadPointer(&scf.levels[i]))
+func (scf *shardCF) getLevelHandler(level int) *levelHandler {
+	return (*levelHandler)(atomic.LoadPointer(&scf.levels[level-1]))
 }
 
-func (scf *shardCF) casLevelHandler(i int, oldH, newH *levelHandler) bool {
-	return atomic.CompareAndSwapPointer(&scf.levels[i], unsafe.Pointer(oldH), unsafe.Pointer(newH))
+func (scf *shardCF) casLevelHandler(level int, oldH, newH *levelHandler) bool {
+	return atomic.CompareAndSwapPointer(&scf.levels[level-1], unsafe.Pointer(oldH), unsafe.Pointer(newH))
 }
 
 func (scf *shardCF) setHasOverlapping(cd *CompactDef) {
@@ -186,8 +242,8 @@ func (scf *shardCF) setHasOverlapping(cd *CompactDef) {
 		return
 	}
 	kr := getKeyRange(cd.Top)
-	for i := cd.Level + 2; i < len(scf.levels); i++ {
-		lh := scf.getLevelHandler(i)
+	for lvl := cd.Level + 2; lvl < len(scf.levels); lvl++ {
+		lh := scf.getLevelHandler(lvl)
 		left, right := lh.overlappingTables(levelHandlerRLocked{}, kr)
 		if right-left > 0 {
 			cd.HasOverlap = true
@@ -208,7 +264,7 @@ func (sdb *ShardingDB) preSplit(s *Shard, keys [][]byte, guard *epoch.Guard, cha
 	// Set split keys so any compaction would fail.
 	// We can safely split our tables.
 	for cf := 0; cf < sdb.numCFs; cf++ {
-		for lvl := 0; lvl < shardMaxLevel; lvl++ {
+		for lvl := 1; lvl <= shardMaxLevel; lvl++ {
 			if err := sdb.splitTables(s, cf, lvl, keys, guard, change); err != nil {
 				return err
 			}
@@ -354,11 +410,11 @@ func (sdb *ShardingDB) split(s *Shard, splitKeys [][]byte) []*Shard {
 		}
 		newShards = append(newShards, newShard(sdb.allocShardID(), splitKey, endKey, sdb.opt, sdb.metrics))
 	}
-	for i, scf := range s.cfs {
-		for j := range scf.levels {
-			level := scf.getLevelHandler(j)
+	for cf, scf := range s.cfs {
+		for l := 1; l <= shardMaxLevel; l++ {
+			level := scf.getLevelHandler(l)
 			for _, t := range level.tables {
-				sdb.insertTableToNewShard(t, i, level.level, newShards)
+				sdb.insertTableToNewShard(t, cf, level.level, newShards)
 			}
 		}
 	}

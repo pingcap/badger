@@ -3,19 +3,15 @@ package badger
 import (
 	"bytes"
 	"fmt"
-	"sort"
-	"sync"
-	"sync/atomic"
-	"unsafe"
-
-	"github.com/dgryski/go-farm"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/table/memtable"
-	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"sync"
+	"sync/atomic"
+	"unsafe"
 )
 
 type ShardingDB struct {
@@ -23,8 +19,6 @@ type ShardingDB struct {
 	numCFs        int
 	orc           *oracle
 	dirLock       *directoryLockGuard
-	memTbls       unsafe.Pointer
-	l0Tbls        unsafe.Pointer
 	shardTree     unsafe.Pointer
 	blkCache      *cache.Cache
 	idxCache      *cache.Cache
@@ -34,7 +28,7 @@ type ShardingDB struct {
 	lastFID       uint32
 	lastShardID   uint32
 	writeCh       chan engineTask
-	flushCh       chan *memtable.CFTable
+	flushCh       chan *shardFlushTask
 	splitLock     sync.Mutex
 	metrics       *y.MetricsSet
 	manifest      *ShardingManifest
@@ -68,18 +62,6 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		nextCommit: manifest.version + 1,
 		commits:    make(map[uint64]uint64),
 	}
-	sort.Slice(manifest.l0Files, func(i, j int) bool {
-		return manifest.l0Files[i] > manifest.l0Files[j]
-	})
-	l0Tbls := &globalL0Tables{tables: make([]*globalL0Table, 0, len(manifest.l0Files))}
-	for _, fid := range manifest.l0Files {
-		filename := sstable.NewFilename(uint64(fid), opt.Dir)
-		shardL0Tbl, err1 := openGlobalL0Table(filename, fid)
-		if err1 != nil {
-			return nil, err1
-		}
-		l0Tbls.tables = append(l0Tbls.tables, shardL0Tbl)
-	}
 
 	blkCache, idxCache, err := createCache(opt)
 	if err != nil {
@@ -97,12 +79,10 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		orc:         orc,
 		dirLock:     dirLockGuard,
 		metrics:     metrics,
-		memTbls:     unsafe.Pointer(memTbls),
-		l0Tbls:      unsafe.Pointer(l0Tbls),
 		shardTree:   unsafe.Pointer(shardTree),
 		blkCache:    blkCache,
 		idxCache:    idxCache,
-		flushCh:     make(chan *memtable.CFTable, opt.NumMemtables),
+		flushCh:     make(chan *shardFlushTask, opt.NumMemtables),
 		writeCh:     make(chan engineTask, kvWriteChCapacity),
 		manifest:    manifest,
 		lastFID:     manifest.lastFileID,
@@ -116,8 +96,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	db.closers.writes = y.NewCloser(1)
 	go db.runWriteLoop(db.closers.writes)
 	if !db.opt.DoNotCompact {
-		db.closers.compactors = y.NewCloser(2)
-		go db.runGlobalL0CompactionLoop(db.closers.compactors)
+		db.closers.compactors = y.NewCloser(1)
 		go db.runShardInternalCompactionLoop(db.closers.compactors)
 	}
 	return db, nil
@@ -126,10 +105,18 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 func (sdb *ShardingDB) Close() error {
 	log.S().Info("closing ShardingDB")
 	sdb.closers.writes.SignalAndWait()
-	mtbl := sdb.loadWritableMemTable()
-	if !mtbl.Empty() {
-		log.S().Info("flush memTable before close")
-		sdb.flushCh <- mtbl
+	log.S().Info("flush memTables before close")
+	tree := sdb.loadShardTree()
+	for _, shard := range tree.shards {
+		writableMemTbl := shard.loadMemTables().tables[0]
+		if writableMemTbl.Empty() {
+			continue
+		}
+		task := &shardFlushTask{
+			shard: shard,
+			tbl:   writableMemTbl,
+		}
+		sdb.flushCh <- task
 	}
 	close(sdb.flushCh)
 	sdb.closers.memtable.SignalAndWait()
@@ -143,24 +130,35 @@ func (sdb *ShardingDB) Close() error {
 func (sdb *ShardingDB) printStructure() {
 	tree := sdb.loadShardTree()
 	for _, shard := range tree.shards {
+		l0s := shard.loadL0Tables()
+		var l0IDs []uint32
+		for _, tbl := range l0s.tables {
+			l0IDs = append(l0IDs, tbl.fid)
+		}
+		log.S().Infof("shard %d l0 tables %v", shard.ID, l0IDs)
 		for cf, scf := range shard.cfs {
 			var tableIDs [][]uint64
-			for i := 0; i < len(scf.levels); i++ {
-				level := scf.getLevelHandler(i)
-				tableIDs = append(tableIDs, getTblIDs(level.tables))
+			for l := 1; l <= shardMaxLevel; l++ {
+				tableIDs = append(tableIDs, getTblIDs(scf.getLevelHandler(l).tables))
 			}
 			log.S().Infof("shard %d cf %d tables %v", shard.ID, cf, tableIDs)
 		}
 	}
 	for id, fi := range sdb.manifest.shards {
 		cfs := make([][]uint32, sdb.numCFs)
+		l0s := make([]uint32, 0, 10)
 		for fid := range fi.files {
 			cfLevel, ok := sdb.manifest.globalFiles[fid]
 			if !ok {
 				log.S().Errorf("shard %d fid %d not found in global", fi.ID, fid)
 			}
-			cfs[cfLevel.cf] = append(cfs[cfLevel.cf], fid)
+			if cfLevel.cf == -1 {
+				l0s = append(l0s, fid)
+			} else {
+				cfs[cfLevel.cf] = append(cfs[cfLevel.cf], fid)
+			}
 		}
+		log.S().Infof("manifest shard %d l0 tables %v", id, l0s)
 		for cf, cfIDs := range cfs {
 			log.S().Infof("manifest shard %d cf %d tables %v", id, cf, cfIDs)
 		}
@@ -174,15 +172,25 @@ type wbEntry struct {
 }
 
 type WriteBatch struct {
-	cfConfs []CFConfig
-	entries []*wbEntry
-	notify  chan error
+	tree         *shardTree
+	cfConfs      []CFConfig
+	notify       chan error
+	shardBatches map[uint32]*shardBatch
+	currentBatch *shardBatch
 }
 
-func NewWriteBatch(cfConfs []CFConfig) *WriteBatch {
+type shardBatch struct {
+	*Shard
+	entries       [][]*memtable.Entry
+	estimatedSize int
+}
+
+func (sdb *ShardingDB) NewWriteBatch() *WriteBatch {
 	return &WriteBatch{
-		cfConfs: cfConfs,
-		notify:  make(chan error, 1),
+		tree:         sdb.loadShardTree(),
+		shardBatches: map[uint32]*shardBatch{},
+		cfConfs:      sdb.opt.CFs,
+		notify:       make(chan error, 1),
 	}
 }
 
@@ -196,12 +204,27 @@ func (wb *WriteBatch) Put(cf byte, key []byte, val y.ValueStruct) error {
 			return fmt.Errorf("version is not zero for non-managed CF")
 		}
 	}
-	wb.entries = append(wb.entries, &wbEntry{
-		cf:  cf,
-		key: key,
-		val: val,
+	wb.resetCurrentBatch(key)
+	wb.currentBatch.entries[cf] = append(wb.currentBatch.entries[cf], &memtable.Entry{
+		Key:   key,
+		Value: val,
 	})
+	wb.currentBatch.estimatedSize += len(key) + int(val.EncodedSize()) + memtable.EstimateNodeSize
 	return nil
+}
+
+func (wb *WriteBatch) resetCurrentBatch(key []byte) {
+	if wb.currentBatch != nil && bytes.Compare(wb.currentBatch.Start, key) <= 0 && bytes.Compare(key, wb.currentBatch.End) < 0 {
+		return
+	}
+	shard := wb.tree.get(key)
+	var ok bool
+	wb.currentBatch, ok = wb.shardBatches[shard.ID]
+	if ok {
+		return
+	}
+	wb.currentBatch = &shardBatch{Shard: shard, entries: make([][]*memtable.Entry, len(wb.cfConfs))}
+	wb.shardBatches[shard.ID] = wb.currentBatch
 }
 
 func (wb *WriteBatch) Delete(cf byte, key []byte, version uint64) error {
@@ -214,30 +237,18 @@ func (wb *WriteBatch) Delete(cf byte, key []byte, version uint64) error {
 			return fmt.Errorf("version is not zero for non-managed CF")
 		}
 	}
-	wb.entries = append(wb.entries, &wbEntry{
-		cf:  cf,
-		key: key,
-		val: y.ValueStruct{Meta: bitDelete, Version: version},
+	wb.resetCurrentBatch(key)
+	wb.currentBatch.entries[cf] = append(wb.currentBatch.entries[cf], &memtable.Entry{
+		Key:   key,
+		Value: y.ValueStruct{Meta: bitDelete, Version: version},
 	})
+	wb.currentBatch.estimatedSize += len(key) + memtable.EstimateNodeSize
 	return nil
 }
 
 func (sdb *ShardingDB) Write(wb *WriteBatch) error {
 	sdb.writeCh <- engineTask{writeTask: wb}
 	return <-wb.notify
-}
-
-func (sdb *ShardingDB) loadWritableMemTable() *memtable.CFTable {
-	tbls := sdb.loadMemTables()
-	return tbls.tables[0]
-}
-
-func (sdb *ShardingDB) loadMemTables() *shardingMemTables {
-	return (*shardingMemTables)(atomic.LoadPointer(&sdb.memTbls))
-}
-
-func (sdb *ShardingDB) loadGlobalL0Tables() *globalL0Tables {
-	return (*globalL0Tables)(atomic.LoadPointer(&sdb.l0Tbls))
 }
 
 func (sdb *ShardingDB) loadShardTree() *shardTree {
@@ -247,44 +258,18 @@ func (sdb *ShardingDB) loadShardTree() *shardTree {
 type Snapshot struct {
 	guard    *epoch.Guard
 	readTS   uint64
-	memTbls  *shardingMemTables
-	l0Tbls   *globalL0Tables
 	shards   []*Shard
 	cfs      []CFConfig
 	startKey []byte
 	endKey   []byte
 }
 
-func (s *Snapshot) Get(cf byte, key y.Key) y.ValueStruct {
+func (s *Snapshot) Get(cf int, key y.Key) y.ValueStruct {
 	if !s.cfs[cf].Managed && key.Version == 0 {
 		key.Version = s.readTS
 	}
-	for _, mtbl := range s.memTbls.tables {
-		v := mtbl.Get(cf, key.UserKey, key.Version)
-		if v.Valid() {
-			return v
-		}
-	}
-	keyHash := farm.Fingerprint64(key.UserKey)
-	for _, l0Tbl := range s.l0Tbls.tables {
-		v := l0Tbl.Get(cf, key, keyHash)
-		if v.Valid() {
-			return v
-		}
-	}
 	shard := getShard(s.shards, key.UserKey)
-	scf := shard.cfs[cf]
-	for i := range scf.levels {
-		level := scf.getLevelHandler(i)
-		if len(level.tables) == 0 {
-			continue
-		}
-		v := level.get(key, keyHash)
-		if v.Valid() {
-			return v
-		}
-	}
-	return y.ValueStruct{}
+	return shard.Get(cf, key)
 }
 
 func (s *Snapshot) Discard() {
@@ -300,8 +285,6 @@ func (sdb *ShardingDB) NewSnapshot(startKey, endKey []byte) *Snapshot {
 	return &Snapshot{
 		guard:    guard,
 		readTS:   readTS,
-		memTbls:  sdb.loadMemTables(),
-		l0Tbls:   sdb.loadGlobalL0Tables(),
 		shards:   sdb.loadShardTree().getShards(startKey, endKey),
 		cfs:      sdb.opt.CFs,
 		startKey: startKey,

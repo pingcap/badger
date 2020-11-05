@@ -17,7 +17,6 @@ import (
 // The manifest file is used to restore the tree
 type ShardingManifest struct {
 	dir         string
-	l0Files     []uint32
 	shards      map[uint32]*ShardInfo
 	globalFiles map[uint32]cfLevel
 	lastFileID  uint32
@@ -47,7 +46,7 @@ type LevelCF struct {
 	CF    uint16
 }
 
-var globalShardEndKey = []byte{255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+var globalShardEndKey = []byte{255, 255, 255, 255, 255, 255, 255, 255}
 
 func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 	path := filepath.Join(dir, ManifestFilename)
@@ -146,10 +145,6 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 		if fid > m.lastFileID {
 			m.lastFileID = fid
 		}
-		if shardID == 0 {
-			m.applyL0Change(fid, change.Op)
-			continue
-		}
 		shardInfo := m.shards[shardID]
 		if shardInfo == nil {
 			return fmt.Errorf("shard %d not found", shardID)
@@ -196,21 +191,6 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 	return nil
 }
 
-func (m *ShardingManifest) applyL0Change(fid uint32, op protos.ManifestChange_Operation) {
-	if op == protos.ManifestChange_CREATE {
-		m.l0Files = append(m.l0Files, fid)
-		m.creations++
-		return
-	}
-	m.deletions++
-	for i, l0fid := range m.l0Files {
-		if fid == l0fid {
-			m.l0Files = append(m.l0Files[:i], m.l0Files[i+1:]...)
-			return
-		}
-	}
-}
-
 func (m *ShardingManifest) addChanges(commitTS uint64, changes ...*protos.ManifestChange) error {
 	changeSet := &protos.ManifestChangeSet{Changes: changes, Head: &protos.HeadInfo{Version: commitTS}}
 	return m.writeChangeSet(changeSet)
@@ -247,7 +227,7 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ManifestChangeSet) e
 }
 
 type cfLevel struct {
-	cf    uint32
+	cf    int32
 	level uint32
 }
 

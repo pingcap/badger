@@ -31,7 +31,7 @@ func (cft *CFTable) Put(cf byte, key []byte, val y.ValueStruct) {
 	cft.skls[cf].Put(key, val)
 }
 
-func (cft *CFTable) PutEntries(cf byte, entries []*Entry) {
+func (cft *CFTable) PutEntries(cf int, entries []*Entry) {
 	var h hint
 	skl := cft.skls[cf]
 	for _, entry := range entries {
@@ -43,7 +43,7 @@ func (cft *CFTable) Size() int64 {
 	return cft.arena.size()
 }
 
-func (cft *CFTable) Get(cf byte, key []byte, version uint64) y.ValueStruct {
+func (cft *CFTable) Get(cf int, key []byte, version uint64) y.ValueStruct {
 	return cft.skls[cf].Get(key, version)
 }
 
@@ -51,7 +51,7 @@ func (cft *CFTable) DeleteKey(cf byte, key []byte) bool {
 	return cft.skls[cf].DeleteKey(key)
 }
 
-func (cft *CFTable) NewIterator(cf byte, reversed bool) *UniIterator {
+func (cft *CFTable) NewIterator(cf int, reversed bool) *UniIterator {
 	if cft.skls[cf].Empty() {
 		return nil
 	}

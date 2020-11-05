@@ -1,16 +1,6 @@
 package badger
 
 import (
-	"bytes"
-	"fmt"
-	"math"
-	"os"
-	"sort"
-	"sync"
-	"sync/atomic"
-	"time"
-	"unsafe"
-
 	"github.com/ncw/directio"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
@@ -20,148 +10,23 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
+	"math"
+	"os"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unsafe"
 )
 
-func (sdb *ShardingDB) runGlobalL0CompactionLoop(c *y.Closer) {
-	defer c.Done()
-	for {
-		l0Tbls := sdb.loadGlobalL0Tables()
-		if len(l0Tbls.tables) < sdb.opt.NumLevelZeroTables {
-			select {
-			case <-time.After(time.Millisecond * 100):
-				continue
-			case <-c.HasBeenClosed():
-				return
-			}
-		}
-		log.S().Info("start global l0 compaction")
-		err := sdb.doL0Compaction()
-		if err != nil {
-			log.Error("failed to compact L0", zap.Error(err))
-		} else {
-			log.S().Info("finish global l0 compaction")
-		}
-	}
-}
-
-func (sdb *ShardingDB) doL0Compaction() error {
-	// prevent split run concurrently with compact L0.
-	sdb.splitLock.Lock()
-	defer sdb.splitLock.Unlock()
-	l0Tbls := sdb.loadGlobalL0Tables()
-	allResults := make([][]*sstable.BuildResult, sdb.numCFs)
-	for i := 0; i < sdb.numCFs; i++ {
-		cfResults, err := sdb.buildShardTablesForCF(l0Tbls, byte(i))
-		if err != nil {
-			return err
-		}
-		allResults[i] = cfResults
-	}
-	err := sdb.addToShards(l0Tbls, allResults)
-	if err != nil {
-		return err
-	}
-	for {
-		latestL0Tbls := sdb.loadGlobalL0Tables()
-		newL0Tbls := &globalL0Tables{
-			tables: make([]*globalL0Table, len(latestL0Tbls.tables)-len(l0Tbls.tables)),
-		}
-		copy(newL0Tbls.tables, latestL0Tbls.tables)
-		if atomic.CompareAndSwapPointer(&sdb.l0Tbls, unsafe.Pointer(latestL0Tbls), unsafe.Pointer(newL0Tbls)) {
-			break
-		}
-	}
-	return nil
-}
-
-func (sdb *ShardingDB) addToShards(l0Tbls *globalL0Tables, allResults [][]*sstable.BuildResult) error {
-	tree := sdb.loadShardTree()
-	shardMap := make(map[uint32]*shardL0Result)
-	for cf, cfResults := range allResults {
-		for _, result := range cfResults {
-			if result == nil {
-				continue
-			}
-			shard := tree.get(result.Smallest.UserKey)
-			shardL1Res, ok := shardMap[shard.ID]
-			if !ok {
-				shardL1Res = &shardL0Result{
-					cfResults: make([]*sstable.BuildResult, sdb.numCFs),
-					shard:     shard,
-				}
-				shardMap[shard.ID] = shardL1Res
-			}
-			shardL1Res.cfResults[cf] = result
-		}
-	}
-	var changes []*protos.ManifestChange
-	for _, sl0Result := range shardMap {
-		for cf, result := range sl0Result.cfResults {
-			if result == nil {
-				continue
-			}
-			fid, ok := sstable.ParseFileID(result.FileName)
-			if !ok {
-				return fmt.Errorf("failed to parse file id %s cf %d", result.FileName, cf)
-			}
-			changes = append(changes, sdb.newManifestChange(uint32(fid), sl0Result.shard.ID, byte(cf), 0, protos.ManifestChange_CREATE))
-			y.Assert(sl0Result.shard.ID != 0)
-		}
-	}
-	for _, l0Tbl := range l0Tbls.tables {
-		changes = append(changes, sdb.newManifestChange(l0Tbl.fid, 0, 0, 0, protos.ManifestChange_DELETE))
-	}
-	err := sdb.manifest.addChanges(sdb.orc.commitTs(), changes...)
-	if err != nil {
-		return err
-	}
-	for _, l1Result := range shardMap {
-		err = sdb.addToShard(l1Result)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (sdb *ShardingDB) newManifestChange(fid, shardID uint32, cf byte, level int, op protos.ManifestChange_Operation) *protos.ManifestChange {
+func (sdb *ShardingDB) newManifestChange(fid, shardID uint32, cf int, level int, op protos.ManifestChange_Operation) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		ShardID: shardID,
 		Id:      uint64(fid),
 		Op:      op,
 		Level:   uint32(level),
-		CF:      uint32(cf),
+		CF:      int32(cf),
 	}
-}
-
-func (sdb *ShardingDB) addToShard(sl0Result *shardL0Result) error {
-	for i, cfResult := range sl0Result.cfResults {
-		if cfResult == nil {
-			continue
-		}
-		var tbl table.Table
-		var err error
-		if cfResult.FileName != "" {
-			// must
-			var file sstable.TableFile
-			file, err = sstable.NewMMapFile(cfResult.FileName)
-			if err != nil {
-				return err
-			}
-			tbl, err = sstable.OpenTable(cfResult.FileName, file)
-			if err != nil {
-				return err
-			}
-		} else {
-			file := sstable.NewInMemFile(cfResult.FileData, cfResult.IndexData)
-			tbl, err = sstable.OpenInMemoryTable(file)
-			if err != nil {
-				return err
-			}
-		}
-		sdb.addTableToShardCF(sl0Result.shard.cfs[i], tbl)
-	}
-	return nil
 }
 
 func debugTableCount(tbl table.Table) int {
@@ -171,26 +36,6 @@ func debugTableCount(tbl table.Table) int {
 		rowCnt++
 	}
 	return rowCnt
-}
-
-func (sdb *ShardingDB) addTableToShardCF(scf *shardCF, tbl table.Table) {
-	for {
-		oldSubLevel0 := scf.getLevelHandler(0)
-		newSubLevel0 := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, 0, sdb.metrics)
-		newSubLevel0.totalSize = oldSubLevel0.totalSize
-		newSubLevel0.totalSize += tbl.Size()
-		newSubLevel0.tables = append(newSubLevel0.tables, tbl)
-		newSubLevel0.tables = append(newSubLevel0.tables, oldSubLevel0.tables...)
-		if scf.casLevelHandler(0, oldSubLevel0, newSubLevel0) {
-			break
-		}
-	}
-}
-
-type shardL0Result struct {
-	cfResults []*sstable.BuildResult
-	cfConfs   []CFConfig
-	shard     *Shard
 }
 
 func (sdb *ShardingDB) UpdateMangedSafeTs(ts uint64) {
@@ -212,57 +57,39 @@ func (sdb *ShardingDB) getCFSafeTS(cf int) uint64 {
 	return atomic.LoadUint64(&sdb.safeTsTracker.safeTs)
 }
 
-func (sdb *ShardingDB) buildShardTablesForCF(l0Tbls *globalL0Tables, cf byte) ([]*sstable.BuildResult, error) {
-	iters := make([]y.Iterator, 0, len(l0Tbls.tables))
-	for i := 0; i < len(l0Tbls.tables); i++ {
-		iter := l0Tbls.tables[i].newIterator(cf, false, nil, nil)
-		if iter == nil {
-			continue
-		}
-		iters = append(iters, iter)
-	}
-	if len(iters) == 0 {
-		return nil, nil
-	}
-	it := table.NewMergeIterator(iters, false)
-	it.Rewind()
-	helper := newBuildHelper(sdb, cf)
-	var buildResults []*sstable.BuildResult
-	for it.Valid() {
-		result, err := helper.buildOne(it)
-		if err != nil {
-			return nil, err
-		}
-		buildResults = append(buildResults, result)
-	}
-	return buildResults, nil
-}
-
 type shardL0BuildHelper struct {
-	db        *ShardingDB
-	builder   *sstable.Builder
-	shardTree *shardTree
-	endKey    []byte
-	lastKey   y.Key
-	skipKey   y.Key
-	safeTS    uint64
-	filter    CompactionFilter
+	db         *ShardingDB
+	builder    *sstable.Builder
+	shard      *Shard
+	l0Tbls     *shardL0Tables
+	lastKey    y.Key
+	skipKey    y.Key
+	safeTS     uint64
+	filter     CompactionFilter
+	iter       y.Iterator
+	oldHandler *levelHandler
 }
 
-func newBuildHelper(db *ShardingDB, cf byte) *shardL0BuildHelper {
-	helper := &shardL0BuildHelper{db: db}
-	helper.shardTree = db.loadShardTree()
+func newBuildHelper(db *ShardingDB, shard *Shard, l0Tbls *shardL0Tables, cf int) *shardL0BuildHelper {
+	helper := &shardL0BuildHelper{db: db, shard: shard}
 	if db.opt.CompactionFilterFactory != nil {
-		biggest := helper.shardTree.last().End
-		helper.filter = db.opt.CompactionFilterFactory(1, nil, biggest)
+		helper.filter = db.opt.CompactionFilterFactory(1, nil, globalShardEndKey)
 	}
-	helper.safeTS = db.getCFSafeTS(int(cf))
+	helper.safeTS = db.getCFSafeTS(cf)
+	iters := make([]y.Iterator, 0, len(l0Tbls.tables))
+	for _, tbl := range l0Tbls.tables {
+		it := tbl.newIterator(cf, false)
+		if it != nil {
+			iters = append(iters, tbl.newIterator(cf, false))
+		}
+	}
+	helper.oldHandler = shard.cfs[cf].getLevelHandler(1)
+	if len(helper.oldHandler.tables) > 0 {
+		iters = append(iters, table.NewConcatIterator(helper.oldHandler.tables, false))
+	}
+	helper.iter = table.NewMergeIterator(iters, false)
+	helper.iter.Rewind()
 	return helper
-}
-
-func (h *shardL0BuildHelper) resetEndKey(key []byte) {
-	shard := h.shardTree.get(key)
-	h.endKey = shard.End
 }
 
 func (h *shardL0BuildHelper) setFD(fd *os.File) {
@@ -273,7 +100,7 @@ func (h *shardL0BuildHelper) setFD(fd *os.File) {
 	}
 }
 
-func (h *shardL0BuildHelper) buildOne(it y.Iterator) (*sstable.BuildResult, error) {
+func (h *shardL0BuildHelper) buildOne() (*sstable.BuildResult, error) {
 	filename := sstable.NewFilename(uint64(h.db.allocFid("shardL0")), h.db.opt.Dir)
 	fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
@@ -282,7 +109,7 @@ func (h *shardL0BuildHelper) buildOne(it y.Iterator) (*sstable.BuildResult, erro
 	h.setFD(fd)
 	h.lastKey.Reset()
 	h.skipKey.Reset()
-	h.resetEndKey(it.Key().UserKey)
+	it := h.iter
 	for ; it.Valid(); y.NextAllVersion(it) {
 		vs := it.Value()
 		key := it.Key()
@@ -295,8 +122,8 @@ func (h *shardL0BuildHelper) buildOne(it y.Iterator) (*sstable.BuildResult, erro
 			}
 		}
 		if !key.SameUserKey(h.lastKey) {
-			// We only break on shard key, the generated table may exceeds max table size for L1 table.
-			if bytes.Compare(key.UserKey, h.endKey) >= 0 {
+			// We only break on table size.
+			if h.builder.EstimateSize() > int(h.db.opt.TableBuilderOptions.MaxTableSize) {
 				break
 			}
 			h.lastKey.Copy(key)
@@ -335,6 +162,61 @@ func (h *shardL0BuildHelper) buildOne(it y.Iterator) (*sstable.BuildResult, erro
 	return result, nil
 }
 
+func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) error {
+	l0Tbls := shard.loadL0Tables()
+	var changes []*protos.ManifestChange
+	var toBeDelete []epoch.Resource
+	for cf := 0; cf < sdb.numCFs; cf++ {
+		helper := newBuildHelper(sdb, shard, l0Tbls, cf)
+		var results []*sstable.BuildResult
+		for {
+			result, err := helper.buildOne()
+			if err != nil {
+				return err
+			}
+			if result == nil {
+				break
+			}
+			results = append(results, result)
+		}
+		newTables, err := sdb.openTables(results)
+		if err != nil {
+			return err
+		}
+		log.S().Infof("cf %d new tables %d", cf, len(newTables))
+		newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, 1, sdb.metrics)
+		newHandler.tables = newTables
+		y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
+		for _, newTbl := range newTables {
+			changes = append(changes, sdb.newManifestChange(uint32(newTbl.ID()), shard.ID, cf, 1, protos.ManifestChange_CREATE))
+		}
+		for _, oldTbl := range helper.oldHandler.tables {
+			changes = append(changes, sdb.newManifestChange(uint32(oldTbl.ID()), shard.ID, cf, 1, protos.ManifestChange_DELETE))
+			toBeDelete = append(toBeDelete, oldTbl)
+		}
+	}
+	for _, tbl := range l0Tbls.tables {
+		changes = append(changes, sdb.newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+		toBeDelete = append(toBeDelete, tbl)
+	}
+	err := sdb.manifest.addChanges(sdb.orc.commitTs(), changes...)
+	if err != nil {
+		return err
+	}
+	guard.Delete(toBeDelete)
+	originL0Len := len(l0Tbls.tables)
+	for {
+		l0Tbls = shard.loadL0Tables()
+		newAddedTbls := l0Tbls.tables[:len(l0Tbls.tables)-originL0Len]
+		newL0s := &shardL0Tables{}
+		newL0s.tables = append(newL0s.tables, newAddedTbls...)
+		if atomic.CompareAndSwapPointer(&shard.l0s, unsafe.Pointer(l0Tbls), unsafe.Pointer(newL0s)) {
+			break
+		}
+	}
+	return nil
+}
+
 func (sdb *ShardingDB) runShardInternalCompactionLoop(c *y.Closer) {
 	defer c.Done()
 	var priorities []compactionPriority
@@ -347,6 +229,9 @@ func (sdb *ShardingDB) runShardInternalCompactionLoop(c *y.Closer) {
 		sort.Slice(priorities, func(i, j int) bool {
 			return priorities[i].score > priorities[j].score
 		})
+		if len(priorities) > 0 {
+			log.S().Infof("priority shard %d cf %d", priorities[0].shard.ID, priorities[0].cf)
+		}
 		wg := new(sync.WaitGroup)
 		for i := 0; i < sdb.opt.NumCompactors && i < len(priorities); i++ {
 			pri := priorities[i]
@@ -373,19 +258,20 @@ func (sdb *ShardingDB) runShardInternalCompactionLoop(c *y.Closer) {
 
 func (sdb *ShardingDB) getCompactionPriority(shard *Shard) compactionPriority {
 	maxPri := compactionPriority{shard: shard}
+	l0 := shard.loadL0Tables()
+	if len(l0.tables) > sdb.opt.NumLevelZeroTables {
+		maxPri.score = float64(l0.totalSize()) * 10 / float64(sdb.opt.LevelOneSize)
+		maxPri.cf = -1
+		return maxPri
+	}
 	for i, scf := range shard.cfs {
-		for j := 0; j < shardMaxLevel-1; j++ {
-			h := scf.getLevelHandler(j)
-			var score float64
-			if j == 0 {
-				score = float64(len(h.tables)) - 5
-			} else {
-				score = float64(h.getTotalSize()) / (float64(sdb.opt.LevelOneSize) * math.Pow(10, float64(j-1)))
-			}
+		for level := 1; level <= shardMaxLevel; level++ {
+			h := scf.getLevelHandler(level)
+			score := float64(h.getTotalSize()) / (float64(sdb.opt.LevelOneSize) * math.Pow(10, float64(level-1)))
 			if score > maxPri.score {
 				maxPri.score = score
 				maxPri.cf = i
-				maxPri.level = j
+				maxPri.level = level
 			}
 		}
 	}
@@ -394,14 +280,17 @@ func (sdb *ShardingDB) getCompactionPriority(shard *Shard) compactionPriority {
 
 func (sdb *ShardingDB) compactShard(pri compactionPriority, guard *epoch.Guard) error {
 	shard := pri.shard
-	scf := shard.cfs[pri.cf]
-	log.Info("start compaction", zap.Uint32("shard", shard.ID), zap.Int("cf", pri.cf), zap.Int("level", pri.level), zap.Float64("score", pri.score))
 	shard.lock.Lock()
 	defer shard.lock.Unlock()
+	if pri.cf == -1 {
+		log.Info("compact shard multi cf", zap.Uint32("shard", shard.ID), zap.Float64("score", pri.score))
+		return sdb.compactShardMultiCFL0(shard, guard)
+	}
+	log.Info("start compaction", zap.Uint32("shard", shard.ID), zap.Int("cf", pri.cf), zap.Int("level", pri.level), zap.Float64("score", pri.score))
+	scf := shard.cfs[pri.cf]
 	thisLevel := scf.getLevelHandler(pri.level)
 	if len(thisLevel.tables) == 0 {
 		// The shard must have been truncated.
-		y.Assert(shard.loadMinGlobalL0() > 0)
 		log.Info("stop compaction due to shard truncated", zap.Uint32("shard", shard.ID))
 		return nil
 	}
@@ -565,7 +454,7 @@ func (sdb *ShardingDB) deleteTables(old *levelHandler, toDel []table.Table) *lev
 func newShardCreateChange(shardID uint32, fid uint64, cf, level int) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		ShardID: shardID,
-		CF:      uint32(cf),
+		CF:      int32(cf),
 		Id:      fid,
 		Op:      protos.ManifestChange_CREATE,
 		Level:   uint32(level),
@@ -577,7 +466,7 @@ func newShardDeleteChange(shardID uint32, id uint64, cf int) *protos.ManifestCha
 		ShardID: shardID,
 		Id:      id,
 		Op:      protos.ManifestChange_DELETE,
-		CF:      uint32(cf),
+		CF:      int32(cf),
 	}
 }
 
