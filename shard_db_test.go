@@ -37,19 +37,21 @@ func TestShardingDB(t *testing.T) {
 		begin := time.Now()
 		for i := 1000; i < 20000; i += 4000 {
 			// TODO: uncomment this line
-			//sc.split(db, sc.iToKey(i), sc.iToKey(i+2000))
+			sc.split(db, sc.iToKey(i), sc.iToKey(i+2000))
 		}
 		ch <- time.Since(begin)
 	}()
 	begin := time.Now()
 	sc.loadData(db)
 	log.S().Infof("time split %v; load %v", <-ch, time.Since(begin))
+	time.Sleep(time.Second * 3)
 	db.printStructure()
 	sc.checkData(db)
 	err = db.Close()
 	require.NoError(t, err)
 	db, err = OpenShardingDB(opts)
 	require.NoError(t, err)
+	db.printStructure()
 	sc.checkData(db)
 }
 

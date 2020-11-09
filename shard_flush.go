@@ -12,8 +12,10 @@ import (
 )
 
 type shardFlushTask struct {
-	shard *Shard
-	tbl   *memtable.CFTable
+	shard        *Shard
+	tbl          *memtable.CFTable
+	splittingIdx int
+	splitting    bool
 }
 
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
@@ -33,7 +35,7 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 		if err != nil {
 			panic(err)
 		}
-		err = sdb.addShardL0Table(task.shard, l0Table)
+		err = sdb.addShardL0Table(task, l0Table)
 		if err != nil {
 			panic(err)
 		}
@@ -44,40 +46,59 @@ func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 	m := task.tbl
 	log.S().Info("flush memtable")
 	writer := fileutil.NewDirectWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
-	builder := newShardDataBuilder(task.shard, sdb.numCFs, sdb.opt.TableBuilderOptions)
+	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		it := m.NewIterator(cf, false)
 		if it == nil {
 			continue
 		}
 		for it.Rewind(); it.Valid(); y.NextAllVersion(it) {
-			builder.Add(byte(cf), it.Key(), it.Value())
+			builder.Add(cf, it.Key(), it.Value())
 		}
 	}
-	shardData := builder.Finish()
-	_, err := writer.Write(shardData)
+	shardL0Data := builder.Finish()
+	_, err := writer.Write(shardL0Data)
 	if err != nil {
 		return err
 	}
 	return writer.Finish()
 }
 
-func (sdb *ShardingDB) addShardL0Table(shard *Shard, l0 *shardL0Table) error {
+func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) error {
+	shard := task.shard
 	change := sdb.newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
-	err := sdb.manifest.addChanges(sdb.orc.commitTs(), change)
+	err := sdb.manifest.addChanges(change)
 	if err != nil {
-		return err
+		if err != errShardNotFound {
+			return err
+		}
+		var shardStartKey []byte
+		if task.splittingIdx == 0 {
+			shardStartKey = task.shard.Start
+		} else {
+			shardStartKey = task.shard.splitKeys[task.splittingIdx-1]
+		}
+		shardID := sdb.loadShardTree().get(shardStartKey).ID
+		change = sdb.newManifestChange(l0.fid, shardID, -1, 0, protos.ManifestChange_CREATE)
 	}
-	oldL0Tbls := shard.loadL0Tables()
-	newL0Tbls := &shardL0Tables{tables: make([]*shardL0Table, 0, len(oldL0Tbls.tables)+1)}
+	oldL0Ptr := shard.l0s
+	oldMemTblsPtr := shard.memTbls
+	if task.splitting {
+		oldL0Ptr = shard.splittingL0s[task.splittingIdx]
+		oldMemTblsPtr = shard.splittingMemTbls[task.splittingIdx]
+	}
+	oldL0Tbls := (*shardL0Tables)(atomic.LoadPointer(oldL0Ptr))
+	newL0Tbls := &shardL0Tables{}
 	newL0Tbls.tables = append(newL0Tbls.tables, l0)
-	newL0Tbls.tables = append(newL0Tbls.tables, oldL0Tbls.tables...)
-	y.Assert(atomic.CompareAndSwapPointer(&shard.l0s, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)))
+	if oldL0Tbls != nil {
+		newL0Tbls.tables = append(newL0Tbls.tables, oldL0Tbls.tables...)
+	}
+	y.Assert(atomic.CompareAndSwapPointer(oldL0Ptr, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)))
 	for {
-		oldMemTbls := shard.loadMemTables()
+		oldMemTbls := (*shardingMemTables)(atomic.LoadPointer(oldMemTblsPtr))
 		newMemTbls := &shardingMemTables{tables: make([]*memtable.CFTable, len(oldMemTbls.tables)-1)}
 		copy(newMemTbls.tables, oldMemTbls.tables)
-		if atomic.CompareAndSwapPointer(&shard.memTbls, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
+		if atomic.CompareAndSwapPointer(oldMemTblsPtr, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
 			break
 		}
 	}

@@ -9,7 +9,6 @@ import (
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 )
@@ -29,7 +28,6 @@ type ShardingDB struct {
 	lastShardID   uint32
 	writeCh       chan engineTask
 	flushCh       chan *shardFlushTask
-	splitLock     sync.Mutex
 	metrics       *y.MetricsSet
 	manifest      *ShardingManifest
 	mangedSafeTS  uint64
@@ -62,6 +60,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		nextCommit: manifest.version + 1,
 		commits:    make(map[uint64]uint64),
 	}
+	manifest.orc = orc
 
 	blkCache, idxCache, err := createCache(opt)
 	if err != nil {
@@ -108,8 +107,8 @@ func (sdb *ShardingDB) Close() error {
 	log.S().Info("flush memTables before close")
 	tree := sdb.loadShardTree()
 	for _, shard := range tree.shards {
-		writableMemTbl := shard.loadMemTables().tables[0]
-		if writableMemTbl.Empty() {
+		writableMemTbl := shard.loadWritableMemTable()
+		if writableMemTbl == nil || writableMemTbl.Empty() {
 			continue
 		}
 		task := &shardFlushTask{
@@ -130,6 +129,18 @@ func (sdb *ShardingDB) Close() error {
 func (sdb *ShardingDB) printStructure() {
 	tree := sdb.loadShardTree()
 	for _, shard := range tree.shards {
+		if shard.isSplitting() {
+			var l0IDs []uint32
+			for i := 0; i < len(shard.splittingL0s); i++ {
+				splittingL0s := shard.loadSplittingL0Tables(i)
+				if splittingL0s != nil {
+					for _, tbl := range splittingL0s.tables {
+						l0IDs = append(l0IDs, tbl.fid)
+					}
+				}
+			}
+			log.S().Infof("shard %d splitting l0 tables %v", l0IDs)
+		}
 		l0s := shard.loadL0Tables()
 		var l0IDs []uint32
 		for _, tbl := range l0s.tables {
@@ -296,32 +307,18 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 	if len(end) == 0 {
 		end = globalShardEndKey
 	}
-	guard := sdb.resourceMgr.Acquire()
-	defer guard.Done()
-	sdb.splitLock.Lock()
-	defer sdb.splitLock.Unlock()
+	err := sdb.Split([][]byte{start, end})
+	if err != nil {
+		return err
+	}
 	tree := sdb.loadShardTree()
 	shards := tree.getShards(start, end)
-	var splitKeys [][]byte
-	if !bytes.Equal(shards[0].Start, start) {
-		splitKeys = append(splitKeys, start)
-	}
-	if !bytes.Equal(shards[len(shards)-1].End, end) {
-		splitKeys = append(splitKeys, end)
-	}
-	log.S().Infof("split keys %s", splitKeys)
-	if len(splitKeys) > 0 {
-		err := sdb.splitInLock(splitKeys, guard)
-		if err != nil {
-			return err
-		}
-		tree = sdb.loadShardTree()
-		shards = tree.getShards(start, end)
-		log.S().Infof("shard Start %s start %s", shards[0].Start, start)
-		y.Assert(bytes.Equal(shards[0].Start, start))
-		log.S().Infof("shard end %s end %s", shards[0].End, end)
-		y.Assert(bytes.Equal(shards[len(shards)-1].End, end))
-	}
+	log.S().Infof("shard Start %s start %s", shards[0].Start, start)
+	y.Assert(bytes.Equal(shards[0].Start, start))
+	log.S().Infof("shard end %s end %s", shards[0].End, end)
+	y.Assert(bytes.Equal(shards[len(shards)-1].End, end))
+	guard := sdb.resourceMgr.Acquire()
+	defer guard.Done()
 	task := &truncateTask{
 		guard:  guard,
 		shards: shards,

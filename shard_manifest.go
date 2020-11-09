@@ -3,7 +3,9 @@ package badger
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"github.com/pingcap/log"
 	"hash/crc32"
 	"io"
 	"os"
@@ -30,6 +32,7 @@ type ShardingManifest struct {
 	appendLock sync.Mutex
 	// We make this configurable so that unit tests can hit rewrite() code quickly
 	deletionsRewriteThreshold int
+	orc                       *oracle
 }
 
 type ShardInfo struct {
@@ -122,6 +125,7 @@ func (m *ShardingManifest) toChangeSet() *protos.ManifestChangeSet {
 }
 
 func (m *ShardingManifest) rewrite() error {
+	log.Info("rewrite manifest")
 	changeSet := m.toChangeSet()
 	changeBuf, err := changeSet.Marshal()
 	if err != nil {
@@ -138,7 +142,27 @@ func (m *ShardingManifest) Close() error {
 	return m.fd.Close()
 }
 
+var errShardNotFound = errors.New("shard not found")
+
 func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
+	for _, change := range cs.ShardChange {
+		if change.Op != protos.ShardChange_CREATE {
+			continue
+		}
+		shard := &ShardInfo{
+			ID:    change.ShardID,
+			Start: change.StartKey,
+			End:   change.EndKey,
+			files: map[uint32]struct{}{},
+		}
+		for _, tID := range change.TableIDs {
+			shard.files[tID] = struct{}{}
+		}
+		m.shards[change.ShardID] = shard
+		if m.lastShardID < change.ShardID {
+			m.lastShardID = change.ShardID
+		}
+	}
 	for _, change := range cs.Changes {
 		shardID := change.ShardID
 		fid := uint32(change.Id)
@@ -147,7 +171,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 		}
 		shardInfo := m.shards[shardID]
 		if shardInfo == nil {
-			return fmt.Errorf("shard %d not found", shardID)
+			return errShardNotFound
 		}
 		switch change.Op {
 		case protos.ManifestChange_CREATE:
@@ -168,43 +192,29 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 		}
 	}
 	for _, change := range cs.ShardChange {
-		switch change.Op {
-		case protos.ShardChange_CREATE:
-			shard := &ShardInfo{
-				ID:    change.ShardID,
-				Start: change.StartKey,
-				End:   change.EndKey,
-				files: map[uint32]struct{}{},
-			}
-			for _, tID := range change.TableIDs {
-				shard.files[tID] = struct{}{}
-			}
-			m.shards[change.ShardID] = shard
-			if m.lastShardID < change.ShardID {
-				m.lastShardID = change.ShardID
-			}
-		case protos.ShardChange_DELETE:
-			delete(m.shards, change.ShardID)
+		if change.Op != protos.ShardChange_DELETE {
+			continue
 		}
+		delete(m.shards, change.ShardID)
 	}
 	m.version = cs.Head.Version
 	return nil
 }
 
-func (m *ShardingManifest) addChanges(commitTS uint64, changes ...*protos.ManifestChange) error {
-	changeSet := &protos.ManifestChangeSet{Changes: changes, Head: &protos.HeadInfo{Version: commitTS}}
+func (m *ShardingManifest) addChanges(changes ...*protos.ManifestChange) error {
+	changeSet := &protos.ManifestChangeSet{Changes: changes}
 	return m.writeChangeSet(changeSet)
 }
 
 func (m *ShardingManifest) writeChangeSet(changeSet *protos.ManifestChangeSet) error {
+	// Maybe we could use O_APPEND instead (on certain file systems)
+	m.appendLock.Lock()
+	defer m.appendLock.Unlock()
+	changeSet.Head = &protos.HeadInfo{Version: m.orc.commitTs()}
 	buf, err := changeSet.Marshal()
 	if err != nil {
 		return err
 	}
-
-	// Maybe we could use O_APPEND instead (on certain file systems)
-	m.appendLock.Lock()
-	defer m.appendLock.Unlock()
 	if err := m.ApplyChangeSet(changeSet); err != nil {
 		return err
 	}

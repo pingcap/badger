@@ -186,7 +186,11 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		log.S().Infof("cf %d new tables %d", cf, len(newTables))
 		newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, 1, sdb.metrics)
 		newHandler.tables = newTables
-		y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
+
+		if !shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler) {
+			log.S().Infof("failed to cas level handler old %v helper old %v", shard.cfs[cf].getLevelHandler(1) == nil, helper.oldHandler == nil)
+		}
+		//y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
 		for _, newTbl := range newTables {
 			changes = append(changes, sdb.newManifestChange(uint32(newTbl.ID()), shard.ID, cf, 1, protos.ManifestChange_CREATE))
 		}
@@ -199,7 +203,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		changes = append(changes, sdb.newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
 		toBeDelete = append(toBeDelete, tbl)
 	}
-	err := sdb.manifest.addChanges(sdb.orc.commitTs(), changes...)
+	err := sdb.manifest.addChanges(changes...)
 	if err != nil {
 		return err
 	}
@@ -210,7 +214,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		newAddedTbls := l0Tbls.tables[:len(l0Tbls.tables)-originL0Len]
 		newL0s := &shardL0Tables{}
 		newL0s.tables = append(newL0s.tables, newAddedTbls...)
-		if atomic.CompareAndSwapPointer(&shard.l0s, unsafe.Pointer(l0Tbls), unsafe.Pointer(newL0s)) {
+		if atomic.CompareAndSwapPointer(shard.l0s, unsafe.Pointer(l0Tbls), unsafe.Pointer(newL0s)) {
 			break
 		}
 	}
@@ -223,25 +227,25 @@ func (sdb *ShardingDB) runShardInternalCompactionLoop(c *y.Closer) {
 	for {
 		priorities = priorities[:0]
 		tree := sdb.loadShardTree()
+		var shardIDs []uint32
 		for _, shard := range tree.shards {
+			shardIDs = append(shardIDs, shard.ID)
 			priorities = append(priorities, sdb.getCompactionPriority(shard))
 		}
 		sort.Slice(priorities, func(i, j int) bool {
 			return priorities[i].score > priorities[j].score
 		})
-		if len(priorities) > 0 {
-			log.S().Infof("priority shard %d cf %d", priorities[0].shard.ID, priorities[0].cf)
-		}
 		wg := new(sync.WaitGroup)
 		for i := 0; i < sdb.opt.NumCompactors && i < len(priorities); i++ {
 			pri := priorities[i]
 			if pri.score > 1 {
 				wg.Add(1)
 				go func() {
-					// TODO: the shard may be outdated after split, compaction may delete in used files.
-					// need to handle this case.
 					guard := sdb.resourceMgr.Acquire()
-					_ = sdb.compactShard(pri, guard)
+					err := sdb.compactShard(pri, guard)
+					if err != nil {
+						log.Error("compact shard failed", zap.Uint32("shard", pri.shard.ID), zap.Error(err))
+					}
 					guard.Done()
 					wg.Done()
 				}()
@@ -260,7 +264,9 @@ func (sdb *ShardingDB) getCompactionPriority(shard *Shard) compactionPriority {
 	maxPri := compactionPriority{shard: shard}
 	l0 := shard.loadL0Tables()
 	if len(l0.tables) > sdb.opt.NumLevelZeroTables {
-		maxPri.score = float64(l0.totalSize()) * 10 / float64(sdb.opt.LevelOneSize)
+		sizeScore := float64(l0.totalSize()) * 10 / float64(sdb.opt.LevelOneSize)
+		numTblsScore := float64(len(l0.tables)) / float64(sdb.opt.NumLevelZeroTables)
+		maxPri.score = sizeScore*0.6 + numTblsScore*0.4
 		maxPri.cf = -1
 		return maxPri
 	}
@@ -282,9 +288,15 @@ func (sdb *ShardingDB) compactShard(pri compactionPriority, guard *epoch.Guard) 
 	shard := pri.shard
 	shard.lock.Lock()
 	defer shard.lock.Unlock()
+	if shard.isSplitting() {
+		log.S().Infof("avoid compaction for splitting shard.")
+		return nil
+	}
 	if pri.cf == -1 {
 		log.Info("compact shard multi cf", zap.Uint32("shard", shard.ID), zap.Float64("score", pri.score))
-		return sdb.compactShardMultiCFL0(shard, guard)
+		err := sdb.compactShardMultiCFL0(shard, guard)
+		log.Info("compact shard multi cf done", zap.Uint32("shard", shard.ID), zap.Error(err))
+		return err
 	}
 	log.Info("start compaction", zap.Uint32("shard", shard.ID), zap.Int("cf", pri.cf), zap.Int("level", pri.level), zap.Float64("score", pri.score))
 	scf := shard.cfs[pri.cf]
@@ -349,7 +361,7 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 		changes = buildShardChangeSet(shard.ID, cf, cd, newTables)
 	}
 	// We write to the manifest _before_ we delete files (and after we created files)
-	if err := sdb.manifest.addChanges(sdb.orc.commitTs(), changes...); err != nil {
+	if err := sdb.manifest.addChanges(changes...); err != nil {
 		return err
 	}
 

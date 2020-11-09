@@ -27,7 +27,7 @@ func NewCFTable(arenaSize int64, numCFs int, id uint32) *CFTable {
 	return t
 }
 
-func (cft *CFTable) Put(cf byte, key []byte, val y.ValueStruct) {
+func (cft *CFTable) Put(cf int, key []byte, val y.ValueStruct) {
 	cft.skls[cf].Put(key, val)
 }
 

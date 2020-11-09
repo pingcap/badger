@@ -23,18 +23,20 @@ func (s *Snapshot) NewIterator(cf int, reversed, allVersions bool) *Iterator {
 
 func (s *Snapshot) newIteratorForShard(cf int, reverse bool, shard *Shard) y.Iterator {
 	iters := make([]y.Iterator, 0, 12)
-	for _, tbl := range shard.loadMemTables().tables {
-		it := tbl.NewIterator(cf, reverse)
-		if it != nil {
-			iters = append(iters, it)
+	if shard.isSplitting() {
+		for i := 0; i < len(shard.splittingMemTbls); i++ {
+			memTbls := shard.loadSplittingMemTables(i)
+			iters = s.appendMemTblIters(iters, memTbls, cf, reverse)
+		}
+		for i := 0; i < len(shard.splittingL0s); i++ {
+			l0s := shard.loadSplittingL0Tables(i)
+			iters = s.appendL0Iters(iters, l0s, cf, reverse)
 		}
 	}
-	for _, tbl := range shard.loadL0Tables().tables {
-		it := tbl.newIterator(cf, reverse)
-		if it != nil {
-			iters = append(iters, it)
-		}
-	}
+	memTbls := shard.loadMemTables()
+	iters = s.appendMemTblIters(iters, memTbls, cf, reverse)
+	l0s := shard.loadL0Tables()
+	iters = s.appendL0Iters(iters, l0s, cf, reverse)
 	scf := shard.cfs[cf]
 	for i := 1; i <= shardMaxLevel; i++ {
 		h := scf.getLevelHandler(i)
@@ -44,6 +46,30 @@ func (s *Snapshot) newIteratorForShard(cf int, reverse bool, shard *Shard) y.Ite
 		iters = append(iters, table.NewConcatIterator(h.tables, reverse))
 	}
 	return table.NewMergeIterator(iters, reverse)
+}
+
+func (s *Snapshot) appendMemTblIters(iters []y.Iterator, memTbls *shardingMemTables, cf int, reverse bool) []y.Iterator {
+	if memTbls != nil {
+		for _, tbl := range memTbls.tables {
+			it := tbl.NewIterator(cf, reverse)
+			if it != nil {
+				iters = append(iters, it)
+			}
+		}
+	}
+	return iters
+}
+
+func (s *Snapshot) appendL0Iters(iters []y.Iterator, l0s *shardL0Tables, cf int, reverse bool) []y.Iterator {
+	if l0s != nil {
+		for _, tbl := range l0s.tables {
+			it := tbl.newIterator(cf, reverse)
+			if it != nil {
+				iters = append(iters, it)
+			}
+		}
+	}
+	return iters
 }
 
 type shardConcatIterator struct {

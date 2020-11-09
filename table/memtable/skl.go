@@ -43,8 +43,8 @@ import (
 )
 
 const (
-	maxHeight      = 20
-	heightIncrease = math.MaxUint32 / 3
+	maxHeight      = 14
+	heightIncrease = math.MaxUint32 / 4
 )
 
 // MaxNodeSize is the memory footprint of a node of maximum height.

@@ -60,7 +60,11 @@ func openShardL0Table(filename string, fid uint32) (*shardL0Table, error) {
 }
 
 func (sl0 *shardL0Table) Get(cf int, key y.Key, keyHash uint64) y.ValueStruct {
-	v, err := sl0.cfs[cf].Get(key, keyHash)
+	tbl := sl0.cfs[cf]
+	if tbl == nil {
+		return y.ValueStruct{}
+	}
+	v, err := tbl.Get(key, keyHash)
 	if err != nil {
 		// TODO: handle error
 		log.Error("get data in table failed", zap.Error(err))

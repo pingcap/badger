@@ -2,13 +2,14 @@ package badger
 
 import (
 	"bytes"
+	"errors"
 	"github.com/ncw/directio"
 	"github.com/pingcap/badger/epoch"
-	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
+	"go.uber.org/zap"
 	"os"
 	"sync/atomic"
 	"unsafe"
@@ -26,13 +27,14 @@ type engineTask struct {
 
 type splitTask struct {
 	shards map[uint32]*shardSplitTask
-	change *protos.ManifestChangeSet
 	notify chan error
 }
 
 type shardSplitTask struct {
 	shard *Shard
 	keys  [][]byte
+	// reservedIDs is used to get smaller file IDs to use for split old l0 files.
+	reservedIDs []uint32
 }
 
 type truncateTask struct {
@@ -98,12 +100,12 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64) {
 	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.allocFid("l0"))
 	for {
 		oldMemTbls := shard.loadMemTables()
-		newMemTbls := &shardingMemTables{
-			tables: make([]*memtable.CFTable, 0, len(oldMemTbls.tables)+1),
-		}
+		newMemTbls := &shardingMemTables{}
 		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
-		newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
-		if atomic.CompareAndSwapPointer(&shard.memTbls, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
+		if oldMemTbls != nil {
+			newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
+		}
+		if atomic.CompareAndSwapPointer(shard.memTbls, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
 			break
 		}
 	}
@@ -115,10 +117,44 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64) {
 	}
 }
 
+func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize int64) {
+	writableMemTbl := shard.loadSplittingWritableMemTable(idx)
+	newTableSize := sdb.opt.MaxMemTableSize
+	if newTableSize < minSize {
+		newTableSize = minSize
+	}
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.allocFid("splittingL0"))
+	for {
+		oldMemTbls := shard.loadSplittingMemTables(idx)
+		newMemTbls := &shardingMemTables{}
+		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
+		if oldMemTbls != nil {
+			newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
+		}
+		if atomic.CompareAndSwapPointer(shard.splittingMemTbls[idx], unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
+			break
+		}
+	}
+	if writableMemTbl != nil && !writableMemTbl.Empty() {
+		oldMemTbls := shard.loadSplittingMemTables(idx)
+		log.Warn("send flush splitting task", zap.Int("mem cnt", len(oldMemTbls.tables)), zap.Int("shard", int(shard.ID)), zap.Int("split index", idx))
+		sdb.flushCh <- &shardFlushTask{
+			shard:        shard,
+			tbl:          writableMemTbl,
+			splittingIdx: idx,
+			splitting:    true,
+		}
+	}
+}
+
 func (sdb *ShardingDB) executeWriteTasks(tasks []*WriteBatch) {
-	cts := sdb.orc.allocTs()
+	commitTS := sdb.orc.allocTs()
 	for _, task := range tasks {
 		for _, batch := range task.shardBatches {
+			if batch.isSplitting() {
+				sdb.writeSplitting(batch, commitTS)
+				continue
+			}
 			memTbl := batch.loadWritableMemTable()
 			if memTbl == nil || memTbl.Size()+int64(batch.estimatedSize) > sdb.opt.MaxMemTableSize {
 				sdb.switchMemTable(batch.Shard, int64(batch.estimatedSize))
@@ -127,16 +163,35 @@ func (sdb *ShardingDB) executeWriteTasks(tasks []*WriteBatch) {
 			for cf, entries := range batch.entries {
 				if !sdb.opt.CFs[cf].Managed {
 					for _, entry := range entries {
-						entry.Value.Version = cts
+						entry.Value.Version = commitTS
 					}
 				}
 				memTbl.PutEntries(cf, entries)
 			}
 		}
 	}
-	sdb.orc.doneCommit(cts)
+	sdb.orc.doneCommit(commitTS)
 	for _, task := range tasks {
 		task.notify <- nil
+	}
+}
+
+func (sdb *ShardingDB) writeSplitting(batch *shardBatch, commitTS uint64) {
+	for cf, entries := range batch.entries {
+		if !sdb.opt.CFs[cf].Managed {
+			for _, entry := range entries {
+				entry.Value.Version = commitTS
+			}
+		}
+		for _, entry := range entries {
+			idx := batch.getSplittingIndex(entry.Key)
+			memTbl := batch.loadSplittingWritableMemTable(idx)
+			if memTbl == nil || memTbl.Size()+int64(batch.estimatedSize) > sdb.opt.MaxMemTableSize {
+				sdb.switchSplittingMemTable(batch.Shard, idx, int64(batch.estimatedSize))
+				memTbl = batch.loadSplittingWritableMemTable(idx)
+			}
+			memTbl.Put(cf, entry.Key, entry.Value)
+		}
 	}
 }
 
@@ -156,34 +211,20 @@ func (sdb *ShardingDB) allocFidForCompaction() uint64 {
 }
 
 func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
-	shardByKey := sdb.loadShardTree()
-	var changes []*protos.ShardChange
-	for _, shard := range task.shards {
-		newShards := sdb.split(shard.shard, shard.keys)
-		for _, newShard := range newShards {
-			changes = append(changes, &protos.ShardChange{
-				ShardID:  newShard.ID,
-				Op:       protos.ShardChange_CREATE,
-				StartKey: newShard.Start,
-				EndKey:   newShard.End,
-				TableIDs: newShard.tableIDs(),
-			})
+	for _, shardTask := range task.shards {
+		shard := shardTask.shard
+		if !shard.setSplitKeys(shardTask.keys) {
+			task.notify <- errors.New("failed to set split keys")
+			return
 		}
-		changes = append(changes, &protos.ShardChange{
-			ShardID:  shard.shard.ID,
-			Op:       protos.ShardChange_DELETE,
-			StartKey: shard.shard.Start,
-			EndKey:   shard.shard.End,
-		})
-		shardByKey = shardByKey.replace([]*Shard{shard.shard}, newShards)
+		sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize)
+		idCnt := (len(shard.loadL0Tables().tables) + len(shard.loadMemTables().tables)) * (len(shardTask.keys) + 1)
+		shardTask.reservedIDs = make([]uint32, 0, idCnt)
+		for i := 0; i < idCnt; i++ {
+			shardTask.reservedIDs = append(shardTask.reservedIDs, sdb.allocFid("reserveSplit"))
+		}
 	}
-	task.change.ShardChange = changes
-	task.change.Head = &protos.HeadInfo{Version: sdb.orc.commitTs()}
-	err := sdb.manifest.writeChangeSet(task.change)
-	if err == nil {
-		atomic.StorePointer(&sdb.shardTree, unsafe.Pointer(shardByKey))
-	}
-	task.notify <- err
+	task.notify <- nil
 }
 
 func (sdb *ShardingDB) removeShardTables(s *Shard, guard *epoch.Guard) {
