@@ -1,10 +1,8 @@
 package badger
 
 import (
-	"bytes"
 	"errors"
 	"github.com/ncw/directio"
-	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -22,7 +20,6 @@ type shardingMemTables struct {
 type engineTask struct {
 	writeTask *WriteBatch
 	splitTask *splitTask
-	truncates *truncateTask
 }
 
 type splitTask struct {
@@ -37,17 +34,11 @@ type shardSplitTask struct {
 	reservedIDs []uint32
 }
 
-type truncateTask struct {
-	guard  *epoch.Guard
-	shards []*Shard
-	notify chan error
-}
-
 func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
 	defer closer.Done()
 	for {
-		writeTasks, splitTask, truncate := sdb.collectTasks(closer)
-		if len(writeTasks) == 0 && splitTask == nil && truncate == nil {
+		writeTasks, splitTask := sdb.collectTasks(closer)
+		if len(writeTasks) == 0 && splitTask == nil {
 			return
 		}
 		if len(writeTasks) > 0 {
@@ -56,24 +47,18 @@ func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
 		if splitTask != nil {
 			sdb.executeSplitTask(splitTask)
 		}
-		if truncate != nil {
-			// TODO
-		}
 	}
 }
 
-func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask, *truncateTask) {
+func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask) {
 	var writeTasks []*WriteBatch
 	var splitTask *splitTask
-	var truncateTask *truncateTask
 	select {
 	case x := <-sdb.writeCh:
 		if x.writeTask != nil {
 			writeTasks = append(writeTasks, x.writeTask)
-		} else if x.splitTask != nil {
-			splitTask = x.splitTask
 		} else {
-			truncateTask = x.truncates
+			splitTask = x.splitTask
 		}
 		l := len(sdb.writeCh)
 		for i := 0; i < l; i++ {
@@ -86,9 +71,9 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask, *tr
 			}
 		}
 	case <-c.HasBeenClosed():
-		return nil, nil, nil
+		return nil, nil
 	}
-	return writeTasks, splitTask, truncateTask
+	return writeTasks, splitTask
 }
 
 func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64) {
@@ -102,9 +87,7 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64) {
 		oldMemTbls := shard.loadMemTables()
 		newMemTbls := &shardingMemTables{}
 		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
-		if oldMemTbls != nil {
-			newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
-		}
+		newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
 		if atomic.CompareAndSwapPointer(shard.memTbls, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
 			break
 		}
@@ -128,9 +111,7 @@ func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize in
 		oldMemTbls := shard.loadSplittingMemTables(idx)
 		newMemTbls := &shardingMemTables{}
 		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
-		if oldMemTbls != nil {
-			newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
-		}
+		newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
 		if atomic.CompareAndSwapPointer(shard.splittingMemTbls[idx], unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
 			break
 		}
@@ -225,44 +206,4 @@ func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
 		}
 	}
 	task.notify <- nil
-}
-
-func (sdb *ShardingDB) removeShardTables(s *Shard, guard *epoch.Guard) {
-	// Lock the shard so compaction will not add new tables after truncate.
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	var toBeDelete []epoch.Resource
-	for _, scf := range s.cfs {
-		for i := 1; i <= shardMaxLevel; i++ {
-			l := scf.getLevelHandler(i)
-			if len(l.tables) == 0 {
-				continue
-			}
-			scf.casLevelHandler(i, l, newLevelHandler(sdb.opt.NumLevelZeroTablesStall, l.level, sdb.metrics))
-			for _, t := range l.tables {
-				toBeDelete = append(toBeDelete, t)
-			}
-		}
-	}
-	guard.Delete(toBeDelete)
-}
-
-func (sdb *ShardingDB) removeRangeInMemTable(memTbl *memtable.CFTable, start, end []byte) {
-	var keys [][]byte
-	for cf := 0; cf < sdb.numCFs; cf++ {
-		keys = keys[:0]
-		itr := memTbl.NewIterator(cf, false)
-		if itr == nil {
-			continue
-		}
-		for itr.Seek(start); itr.Valid(); itr.Next() {
-			if bytes.Compare(itr.Key().UserKey, end) >= 0 {
-				break
-			}
-			keys = append(keys, y.SafeCopy(nil, itr.Key().UserKey))
-		}
-		for _, key := range keys {
-			memTbl.DeleteKey(byte(cf), key)
-		}
-	}
 }

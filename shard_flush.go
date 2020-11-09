@@ -66,7 +66,7 @@ func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 
 func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) error {
 	shard := task.shard
-	change := sdb.newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
+	change := newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
 	err := sdb.manifest.addChanges(change)
 	if err != nil {
 		if err != errShardNotFound {
@@ -79,21 +79,19 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 			shardStartKey = task.shard.splitKeys[task.splittingIdx-1]
 		}
 		shardID := sdb.loadShardTree().get(shardStartKey).ID
-		change = sdb.newManifestChange(l0.fid, shardID, -1, 0, protos.ManifestChange_CREATE)
+		change = newManifestChange(l0.fid, shardID, -1, 0, protos.ManifestChange_CREATE)
 	}
-	oldL0Ptr := shard.l0s
+	oldL0sPtr := shard.l0s
 	oldMemTblsPtr := shard.memTbls
 	if task.splitting {
-		oldL0Ptr = shard.splittingL0s[task.splittingIdx]
+		oldL0sPtr = shard.splittingL0s[task.splittingIdx]
 		oldMemTblsPtr = shard.splittingMemTbls[task.splittingIdx]
 	}
-	oldL0Tbls := (*shardL0Tables)(atomic.LoadPointer(oldL0Ptr))
-	newL0Tbls := &shardL0Tables{}
+	oldL0Tbls := (*shardL0Tables)(atomic.LoadPointer(oldL0sPtr))
+	newL0Tbls := &shardL0Tables{make([]*shardL0Table, 0, len(oldL0Tbls.tables)+1)}
 	newL0Tbls.tables = append(newL0Tbls.tables, l0)
-	if oldL0Tbls != nil {
-		newL0Tbls.tables = append(newL0Tbls.tables, oldL0Tbls.tables...)
-	}
-	y.Assert(atomic.CompareAndSwapPointer(oldL0Ptr, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)))
+	newL0Tbls.tables = append(newL0Tbls.tables, oldL0Tbls.tables...)
+	y.Assert(atomic.CompareAndSwapPointer(oldL0sPtr, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)))
 	for {
 		oldMemTbls := (*shardingMemTables)(atomic.LoadPointer(oldMemTblsPtr))
 		newMemTbls := &shardingMemTables{tables: make([]*memtable.CFTable, len(oldMemTbls.tables)-1)}

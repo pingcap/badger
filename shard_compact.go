@@ -19,7 +19,7 @@ import (
 	"unsafe"
 )
 
-func (sdb *ShardingDB) newManifestChange(fid, shardID uint32, cf int, level int, op protos.ManifestChange_Operation) *protos.ManifestChange {
+func newManifestChange(fid, shardID uint32, cf int, level int, op protos.ManifestChange_Operation) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		ShardID: shardID,
 		Id:      uint64(fid),
@@ -76,11 +76,13 @@ func newBuildHelper(db *ShardingDB, shard *Shard, l0Tbls *shardL0Tables, cf int)
 		helper.filter = db.opt.CompactionFilterFactory(1, nil, globalShardEndKey)
 	}
 	helper.safeTS = db.getCFSafeTS(cf)
-	iters := make([]y.Iterator, 0, len(l0Tbls.tables))
-	for _, tbl := range l0Tbls.tables {
-		it := tbl.newIterator(cf, false)
-		if it != nil {
-			iters = append(iters, tbl.newIterator(cf, false))
+	var iters []y.Iterator
+	if l0Tbls != nil {
+		for _, tbl := range l0Tbls.tables {
+			it := tbl.newIterator(cf, false)
+			if it != nil {
+				iters = append(iters, tbl.newIterator(cf, false))
+			}
 		}
 	}
 	helper.oldHandler = shard.cfs[cf].getLevelHandler(1)
@@ -186,22 +188,20 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		log.S().Infof("cf %d new tables %d", cf, len(newTables))
 		newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, 1, sdb.metrics)
 		newHandler.tables = newTables
-
-		if !shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler) {
-			log.S().Infof("failed to cas level handler old %v helper old %v", shard.cfs[cf].getLevelHandler(1) == nil, helper.oldHandler == nil)
-		}
-		//y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
+		y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
 		for _, newTbl := range newTables {
-			changes = append(changes, sdb.newManifestChange(uint32(newTbl.ID()), shard.ID, cf, 1, protos.ManifestChange_CREATE))
+			changes = append(changes, newManifestChange(uint32(newTbl.ID()), shard.ID, cf, 1, protos.ManifestChange_CREATE))
 		}
 		for _, oldTbl := range helper.oldHandler.tables {
-			changes = append(changes, sdb.newManifestChange(uint32(oldTbl.ID()), shard.ID, cf, 1, protos.ManifestChange_DELETE))
+			changes = append(changes, newManifestChange(uint32(oldTbl.ID()), shard.ID, cf, 1, protos.ManifestChange_DELETE))
 			toBeDelete = append(toBeDelete, oldTbl)
 		}
 	}
-	for _, tbl := range l0Tbls.tables {
-		changes = append(changes, sdb.newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
-		toBeDelete = append(toBeDelete, tbl)
+	if l0Tbls != nil {
+		for _, tbl := range l0Tbls.tables {
+			changes = append(changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+			toBeDelete = append(toBeDelete, tbl)
+		}
 	}
 	err := sdb.manifest.addChanges(changes...)
 	if err != nil {
@@ -263,7 +263,7 @@ func (sdb *ShardingDB) runShardInternalCompactionLoop(c *y.Closer) {
 func (sdb *ShardingDB) getCompactionPriority(shard *Shard) compactionPriority {
 	maxPri := compactionPriority{shard: shard}
 	l0 := shard.loadL0Tables()
-	if len(l0.tables) > sdb.opt.NumLevelZeroTables {
+	if l0 != nil && len(l0.tables) > sdb.opt.NumLevelZeroTables {
 		sizeScore := float64(l0.totalSize()) * 10 / float64(sdb.opt.LevelOneSize)
 		numTblsScore := float64(len(l0.tables)) / float64(sdb.opt.NumLevelZeroTables)
 		maxPri.score = sizeScore*0.6 + numTblsScore*0.4

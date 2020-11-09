@@ -189,10 +189,8 @@ func (s *Shard) tableIDs() []uint32 {
 	if s.isSplitting() {
 		for i := range s.splittingL0s {
 			splittingL0s := s.loadSplittingL0Tables(i)
-			if splittingL0s != nil {
-				for _, tbl := range splittingL0s.tables {
-					ids = append(ids, tbl.fid)
-				}
+			for _, tbl := range splittingL0s.tables {
+				ids = append(ids, tbl.fid)
 			}
 		}
 	}
@@ -215,8 +213,12 @@ func (s *Shard) setSplitKeys(keys [][]byte) bool {
 		s.splittingMemTbls = make([]*unsafe.Pointer, len(keys)+1)
 		s.splittingL0s = make([]*unsafe.Pointer, len(keys)+1)
 		for i := range s.splittingMemTbls {
-			s.splittingMemTbls[i] = new(unsafe.Pointer)
-			s.splittingL0s[i] = new(unsafe.Pointer)
+			memPtr := new(unsafe.Pointer)
+			*memPtr = unsafe.Pointer(&shardingMemTables{})
+			s.splittingMemTbls[i] = memPtr
+			l0Ptr := new(unsafe.Pointer)
+			*l0Ptr = unsafe.Pointer(&shardL0Tables{})
+			s.splittingL0s[i] = l0Ptr
 		}
 		y.Assert(atomic.CompareAndSwapUint32(&s.splitState, splitStateSetKeys, splitStateSplitting))
 		return true
@@ -244,40 +246,32 @@ func (s *Shard) Get(cf int, key y.Key) y.ValueStruct {
 	if s.isSplitting() {
 		idx := s.getSplittingIndex(key.UserKey)
 		memTbls := s.loadSplittingMemTables(idx)
-		if memTbls != nil {
-			for _, tbl := range memTbls.tables {
-				v := tbl.Get(cf, key.UserKey, key.Version)
-				if v.Valid() {
-					return v
-				}
-			}
-		}
-		l0Tbls := s.loadSplittingL0Tables(idx)
-		if l0Tbls != nil {
-			for _, tbl := range l0Tbls.tables {
-				v := tbl.Get(cf, key, keyHash)
-				if v.Valid() {
-					return v
-				}
-			}
-		}
-	}
-	memTbls := s.loadMemTables()
-	if memTbls != nil {
 		for _, tbl := range memTbls.tables {
 			v := tbl.Get(cf, key.UserKey, key.Version)
 			if v.Valid() {
 				return v
 			}
 		}
-	}
-	l0Tbls := s.loadL0Tables()
-	if l0Tbls != nil {
+		l0Tbls := s.loadSplittingL0Tables(idx)
 		for _, tbl := range l0Tbls.tables {
 			v := tbl.Get(cf, key, keyHash)
 			if v.Valid() {
 				return v
 			}
+		}
+	}
+	memTbls := s.loadMemTables()
+	for _, tbl := range memTbls.tables {
+		v := tbl.Get(cf, key.UserKey, key.Version)
+		if v.Valid() {
+			return v
+		}
+	}
+	l0Tbls := s.loadL0Tables()
+	for _, tbl := range l0Tbls.tables {
+		v := tbl.Get(cf, key, keyHash)
+		if v.Valid() {
+			return v
 		}
 	}
 	scf := s.cfs[cf]
@@ -330,7 +324,7 @@ func (s *Shard) loadMemTables() *shardingMemTables {
 
 func (s *Shard) loadWritableMemTable() *memtable.CFTable {
 	tbls := s.loadMemTables()
-	if tbls != nil && len(tbls.tables) > 0 {
+	if len(tbls.tables) > 0 {
 		return tbls.tables[0]
 	}
 	return nil
@@ -468,7 +462,6 @@ func (sdb *ShardingDB) Split(keys [][]byte) error {
 	if err != nil {
 		return err
 	}
-	// Now the split keys are set, we need to wait for all mem tables get flushed to l0.
 	d := new(deletions)
 	for _, shardTask := range task.shards {
 		err = sdb.splitShard(shardTask, d)
@@ -517,6 +510,8 @@ func (d *deletions) Append(res epoch.Resource) {
 func (sdb *ShardingDB) splitShard(task *shardSplitTask, d *deletions) error {
 	change := &protos.ManifestChangeSet{}
 	shard := task.shard
+	shard.lock.Lock()
+	defer shard.lock.Unlock()
 	keys := task.keys
 	sdb.waitForAllMemTablesFlushed(shard)
 	err := sdb.splitShardL0Tables(task, d, change)
@@ -581,19 +576,17 @@ func (sdb *ShardingDB) splitShardL0Tables(task *shardSplitTask, d *deletions, ch
 			return err
 		}
 		for _, newL0 := range newL0s {
-			change.Changes = append(change.Changes, sdb.newManifestChange(newL0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE))
+			change.Changes = append(change.Changes, newManifestChange(newL0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE))
 		}
 		allNewL0s = append(allNewL0s, newL0s)
 		d.Append(l0Tbl)
-		change.Changes = append(change.Changes, sdb.newManifestChange(l0Tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+		change.Changes = append(change.Changes, newManifestChange(l0Tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
 	}
 	for i := 0; i <= len(keys); i++ {
 		for {
 			splitingL0s := shard.loadSplittingL0Tables(i)
 			newSplitingL0s := &shardL0Tables{}
-			if splitingL0s != nil {
-				newSplitingL0s.tables = append(newSplitingL0s.tables, splitingL0s.tables...)
-			}
+			newSplitingL0s.tables = append(newSplitingL0s.tables, splitingL0s.tables...)
 			for j := 0; j < len(allNewL0s); j++ {
 				newSplitingL0s.tables = append(newSplitingL0s.tables, allNewL0s[j][i])
 			}

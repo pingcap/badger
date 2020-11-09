@@ -36,7 +36,6 @@ func TestShardingDB(t *testing.T) {
 		time.Sleep(time.Millisecond * 500)
 		begin := time.Now()
 		for i := 1000; i < 20000; i += 4000 {
-			// TODO: uncomment this line
 			sc.split(db, sc.iToKey(i), sc.iToKey(i+2000))
 		}
 		ch <- time.Since(begin)
@@ -89,21 +88,16 @@ func TestShardingDeleteRange(t *testing.T) {
 		require.Equal(t, cnt, 14000)
 	}
 	require.NoError(t, db.Close())
-	// TODO:
-	// Currently we compact global L0 by CF, the truncated shard can not ignore l0 tables.
-	// need to change the global l0 compaction to compact by shard, so we can use minL0ID to ignore l0 tables.
-	/*
-		snap = db.NewSnapshot(nil, nil)
-		defer snap.Discard()
-		for cf := 0; cf < 3; cf++ {
-			it := snap.NewIterator(0, false, true)
-			cnt := 0
-			for it.Rewind(); it.Valid(); it.Next() {
-				cnt++
-			}
-			require.Equal(t, cnt, 14000)
+	snap = db.NewSnapshot(nil, nil)
+	defer snap.Discard()
+	for cf := 0; cf < 3; cf++ {
+		it := snap.NewIterator(0, false, true)
+		cnt := 0
+		for it.Rewind(); it.Valid(); it.Next() {
+			cnt++
 		}
-	*/
+		require.Equal(t, cnt, 14000)
+	}
 }
 
 type shardingCase struct {

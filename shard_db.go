@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
+	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
@@ -133,10 +134,8 @@ func (sdb *ShardingDB) printStructure() {
 			var l0IDs []uint32
 			for i := 0; i < len(shard.splittingL0s); i++ {
 				splittingL0s := shard.loadSplittingL0Tables(i)
-				if splittingL0s != nil {
-					for _, tbl := range splittingL0s.tables {
-						l0IDs = append(l0IDs, tbl.fid)
-					}
+				for _, tbl := range splittingL0s.tables {
+					l0IDs = append(l0IDs, tbl.fid)
 				}
 			}
 			log.S().Infof("shard %d splitting l0 tables %v", l0IDs)
@@ -311,19 +310,60 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 	if err != nil {
 		return err
 	}
-	tree := sdb.loadShardTree()
-	shards := tree.getShards(start, end)
-	log.S().Infof("shard Start %s start %s", shards[0].Start, start)
-	y.Assert(bytes.Equal(shards[0].Start, start))
-	log.S().Infof("shard end %s end %s", shards[0].End, end)
-	y.Assert(bytes.Equal(shards[len(shards)-1].End, end))
 	guard := sdb.resourceMgr.Acquire()
 	defer guard.Done()
-	task := &truncateTask{
-		guard:  guard,
-		shards: shards,
-		notify: make(chan error, 1),
+	tree := sdb.loadShardTree()
+	shards := tree.getShards(start, end)
+	y.Assert(bytes.Equal(shards[0].Start, start))
+	y.Assert(bytes.Equal(shards[len(shards)-1].End, end))
+	for _, shard := range shards {
+		shard.lock.Lock()
 	}
-	sdb.writeCh <- engineTask{truncates: task}
-	return <-task.notify
+	defer func() {
+		for _, shard := range shards {
+			shard.lock.Unlock()
+		}
+	}()
+	d := new(deletions)
+	change := &protos.ManifestChangeSet{}
+	for _, shard := range shards {
+		l0s := shard.loadL0Tables()
+		for _, tbl := range l0s.tables {
+			d.Append(tbl)
+			change.Changes = append(change.Changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+		}
+		if shard.isSplitting() {
+			for i := range shard.splittingL0s {
+				sl0s := shard.loadSplittingL0Tables(i)
+				for _, tbl := range sl0s.tables {
+					d.Append(tbl)
+					change.Changes = append(change.Changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+				}
+			}
+		}
+		shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+			for _, tbl := range level.tables {
+				d.Append(tbl)
+				change.Changes = append(change.Changes, newManifestChange(uint32(tbl.ID()), shard.ID, cf, level.level, protos.ManifestChange_DELETE))
+			}
+			return false
+		})
+	}
+	err = sdb.manifest.writeChangeSet(change)
+	if err != nil {
+		return err
+	}
+	for _, shard := range shards {
+		y.Assert(!shard.isSplitting())
+		atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
+		atomic.StorePointer(shard.l0s, unsafe.Pointer(&shardL0Tables{}))
+		shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+			if len(level.tables) > 0 {
+				shard.cfs[cf].casLevelHandler(level.level, level, newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level.level, sdb.metrics))
+			}
+			return false
+		})
+	}
+    guard.Delete(d.resourses)
+	return nil
 }

@@ -49,24 +49,20 @@ func (s *Snapshot) newIteratorForShard(cf int, reverse bool, shard *Shard) y.Ite
 }
 
 func (s *Snapshot) appendMemTblIters(iters []y.Iterator, memTbls *shardingMemTables, cf int, reverse bool) []y.Iterator {
-	if memTbls != nil {
-		for _, tbl := range memTbls.tables {
-			it := tbl.NewIterator(cf, reverse)
-			if it != nil {
-				iters = append(iters, it)
-			}
+	for _, tbl := range memTbls.tables {
+		it := tbl.NewIterator(cf, reverse)
+		if it != nil {
+			iters = append(iters, it)
 		}
 	}
 	return iters
 }
 
 func (s *Snapshot) appendL0Iters(iters []y.Iterator, l0s *shardL0Tables, cf int, reverse bool) []y.Iterator {
-	if l0s != nil {
-		for _, tbl := range l0s.tables {
-			it := tbl.newIterator(cf, reverse)
-			if it != nil {
-				iters = append(iters, it)
-			}
+	for _, tbl := range l0s.tables {
+		it := tbl.newIterator(cf, reverse)
+		if it != nil {
+			iters = append(iters, it)
 		}
 	}
 	return iters
