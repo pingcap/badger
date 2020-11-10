@@ -13,7 +13,7 @@ import (
 
 type shardL0Table struct {
 	cfs      []*sstable.Table
-	fid      uint32
+	fid      uint64
 	filename string
 	size     int64
 }
@@ -22,7 +22,7 @@ func (st *shardL0Table) Delete() error {
 	return os.Remove(st.filename)
 }
 
-func openShardL0Table(filename string, fid uint32) (*shardL0Table, error) {
+func openShardL0Table(filename string, fid uint64) (*shardL0Table, error) {
 	shardData, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return nil, err

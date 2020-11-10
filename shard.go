@@ -114,10 +114,6 @@ func (st *shardTree) getShards(start, end []byte) []*Shard {
 	return st.shards[left:right]
 }
 
-func (sdb *ShardingDB) allocShardID() uint32 {
-	return atomic.AddUint32(&sdb.lastShardID, 1)
-}
-
 // Shard split can be performed by the following steps:
 // 1. set the splitKeys and mark the state to splitting.
 // 2. a splitting Shard will separate all the files by the SplitKeys.
@@ -125,7 +121,7 @@ func (sdb *ShardingDB) allocShardID() uint32 {
 // 4. After all existing files are split by the split keys, the state is changed to SplitDone.
 // 5. After SplitDone, the shard map replace the old shard two new shardsByID.
 type Shard struct {
-	ID    uint32
+	ID    uint64
 	Start []byte
 	End   []byte
 	cfs   []*shardCF
@@ -149,7 +145,7 @@ const (
 	splitStateSplitDone uint32 = 3
 )
 
-func newShard(id uint32, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
+func newShard(id uint64, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
 	shard := &Shard{
 		ID:    id,
 		Start: start,
@@ -172,8 +168,8 @@ func newShard(id uint32, start, end []byte, opt Options, metrics *y.MetricsSet) 
 	return shard
 }
 
-func (s *Shard) tableIDs() []uint32 {
-	var ids []uint32
+func (s *Shard) tableIDs() []uint64 {
+	var ids []uint64
 	l0s := s.loadL0Tables()
 	for _, tbl := range l0s.tables {
 		ids = append(ids, tbl.fid)
@@ -188,7 +184,7 @@ func (s *Shard) tableIDs() []uint32 {
 	}
 	s.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
 		for _, tbl := range level.tables {
-			ids = append(ids, uint32(tbl.ID()))
+			ids = append(ids, tbl.ID())
 		}
 		return false
 	})

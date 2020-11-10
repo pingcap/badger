@@ -25,13 +25,12 @@ type ShardingDB struct {
 	resourceMgr   *epoch.ResourceManager
 	safeTsTracker safeTsTracker
 	closers       closers
-	lastFID       uint32
-	lastShardID   uint32
 	writeCh       chan engineTask
 	flushCh       chan *shardFlushTask
 	metrics       *y.MetricsSet
 	manifest      *ShardingManifest
 	mangedSafeTS  uint64
+	idAlloc       IDAllocator
 }
 
 func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
@@ -85,10 +84,13 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		flushCh:     make(chan *shardFlushTask, opt.NumMemtables),
 		writeCh:     make(chan engineTask, kvWriteChCapacity),
 		manifest:    manifest,
-		lastFID:     manifest.lastFileID,
-		lastShardID: manifest.lastShardID,
 	}
-	memTbls.tables = append(memTbls.tables, memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs), db.allocFid("l0")))
+	if opt.IDAllocator != nil {
+		db.idAlloc = opt.IDAllocator
+	} else {
+		db.idAlloc = &localIDAllocator{latest: manifest.lastID}
+	}
+	memTbls.tables = append(memTbls.tables, memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs), db.idAlloc.AllocID()))
 	db.closers.resourceManager = y.NewCloser(0)
 	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
 	db.closers.memtable = y.NewCloser(1)
@@ -100,6 +102,14 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		go db.runShardInternalCompactionLoop(db.closers.compactors)
 	}
 	return db, nil
+}
+
+type localIDAllocator struct {
+	latest uint64
+}
+
+func (l *localIDAllocator) AllocID() uint64 {
+	return atomic.AddUint64(&l.latest, 1)
 }
 
 func (sdb *ShardingDB) Close() error {
@@ -131,7 +141,7 @@ func (sdb *ShardingDB) printStructure() {
 	tree := sdb.loadShardTree()
 	for _, shard := range tree.shards {
 		if shard.isSplitting() {
-			var l0IDs []uint32
+			var l0IDs []uint64
 			for i := 0; i < len(shard.splittingL0s); i++ {
 				splittingL0s := shard.loadSplittingL0Tables(i)
 				for _, tbl := range splittingL0s.tables {
@@ -141,7 +151,7 @@ func (sdb *ShardingDB) printStructure() {
 			log.S().Infof("shard %d splitting l0 tables %v", l0IDs)
 		}
 		l0s := shard.loadL0Tables()
-		var l0IDs []uint32
+		var l0IDs []uint64
 		for _, tbl := range l0s.tables {
 			l0IDs = append(l0IDs, tbl.fid)
 		}
@@ -155,8 +165,8 @@ func (sdb *ShardingDB) printStructure() {
 		}
 	}
 	for id, fi := range sdb.manifest.shards {
-		cfs := make([][]uint32, sdb.numCFs)
-		l0s := make([]uint32, 0, 10)
+		cfs := make([][]uint64, sdb.numCFs)
+		l0s := make([]uint64, 0, 10)
 		for fid := range fi.files {
 			cfLevel, ok := sdb.manifest.globalFiles[fid]
 			if !ok {
@@ -179,7 +189,7 @@ type WriteBatch struct {
 	tree         *shardTree
 	cfConfs      []CFConfig
 	notify       chan error
-	shardBatches map[uint32]*shardBatch
+	shardBatches map[uint64]*shardBatch
 	currentBatch *shardBatch
 }
 
@@ -192,7 +202,7 @@ type shardBatch struct {
 func (sdb *ShardingDB) NewWriteBatch() *WriteBatch {
 	return &WriteBatch{
 		tree:         sdb.loadShardTree(),
-		shardBatches: map[uint32]*shardBatch{},
+		shardBatches: map[uint64]*shardBatch{},
 		cfConfs:      sdb.opt.CFs,
 		notify:       make(chan error, 1),
 	}
@@ -338,7 +348,7 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 		shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
 			for _, tbl := range level.tables {
 				d.Append(tbl)
-				change.Changes = append(change.Changes, newManifestChange(uint32(tbl.ID()), shard.ID, cf, level.level, protos.ManifestChange_DELETE))
+				change.Changes = append(change.Changes, newManifestChange(tbl.ID(), shard.ID, cf, level.level, protos.ManifestChange_DELETE))
 			}
 			return false
 		})

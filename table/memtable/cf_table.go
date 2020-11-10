@@ -5,12 +5,12 @@ import (
 )
 
 type CFTable struct {
-	id    uint32
+	id    uint64
 	skls  []*skiplist
 	arena *arena
 }
 
-func NewCFTable(arenaSize int64, numCFs int, id uint32) *CFTable {
+func NewCFTable(arenaSize int64, numCFs int, id uint64) *CFTable {
 	t := &CFTable{
 		skls:  make([]*skiplist, numCFs),
 		arena: newArena(arenaSize),
@@ -67,6 +67,6 @@ func (cft *CFTable) Empty() bool {
 	return true
 }
 
-func (cft *CFTable) ID() uint32 {
+func (cft *CFTable) ID() uint64 {
 	return cft.id
 }

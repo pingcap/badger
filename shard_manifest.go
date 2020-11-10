@@ -19,10 +19,9 @@ import (
 // The manifest file is used to restore the tree
 type ShardingManifest struct {
 	dir         string
-	shards      map[uint32]*ShardInfo
-	globalFiles map[uint32]cfLevel
-	lastFileID  uint32
-	lastShardID uint32
+	shards      map[uint64]*ShardInfo
+	globalFiles map[uint64]cfLevel
+	lastID      uint64
 	version     uint64
 	fd          *os.File
 	deletions   int
@@ -36,11 +35,11 @@ type ShardingManifest struct {
 }
 
 type ShardInfo struct {
-	ID    uint32
+	ID    uint64
 	Start []byte
 	End   []byte
 	// fid -> level
-	files map[uint32]struct{}
+	files map[uint64]struct{}
 }
 
 // ShardLevel is the struct that contains shard id and level id,
@@ -60,14 +59,14 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 		}
 		m := &ShardingManifest{
 			dir:         dir,
-			shards:      map[uint32]*ShardInfo{},
-			lastShardID: 1,
-			globalFiles: map[uint32]cfLevel{},
+			shards:      map[uint64]*ShardInfo{},
+			lastID:      1,
+			globalFiles: map[uint64]cfLevel{},
 		}
 		initShard := &ShardInfo{
 			ID:    1,
 			End:   globalShardEndKey,
-			files: map[uint32]struct{}{},
+			files: map[uint64]struct{}{},
 		}
 		m.shards[initShard.ID] = initShard
 		err = m.rewrite()
@@ -103,13 +102,13 @@ func (m *ShardingManifest) toChangeSet() *protos.ManifestChangeSet {
 			cfLevel := m.globalFiles[fid]
 			cs.Changes = append(cs.Changes, &protos.ManifestChange{
 				ShardID: shardID,
-				Id:      uint64(fid),
+				Id:      fid,
 				Op:      protos.ManifestChange_CREATE,
 				Level:   cfLevel.level,
 				CF:      cfLevel.cf,
 			})
 		}
-		tblIDs := make([]uint32, 0, len(shard.files))
+		tblIDs := make([]uint64, 0, len(shard.files))
 		for fid := range shard.files {
 			tblIDs = append(tblIDs, fid)
 		}
@@ -153,21 +152,21 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 			ID:    change.ShardID,
 			Start: change.StartKey,
 			End:   change.EndKey,
-			files: map[uint32]struct{}{},
+			files: map[uint64]struct{}{},
 		}
 		for _, tID := range change.TableIDs {
 			shard.files[tID] = struct{}{}
 		}
 		m.shards[change.ShardID] = shard
-		if m.lastShardID < change.ShardID {
-			m.lastShardID = change.ShardID
+		if m.lastID < change.ShardID {
+			m.lastID = change.ShardID
 		}
 	}
 	for _, change := range cs.Changes {
 		shardID := change.ShardID
-		fid := uint32(change.Id)
-		if fid > m.lastFileID {
-			m.lastFileID = fid
+		fid := change.Id
+		if fid > m.lastID {
+			m.lastID = fid
 		}
 		shardInfo := m.shards[shardID]
 		if shardInfo == nil {
@@ -247,8 +246,8 @@ func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset
 		return nil, 0, err
 	}
 	ret = &ShardingManifest{
-		shards:      map[uint32]*ShardInfo{},
-		globalFiles: map[uint32]cfLevel{},
+		shards:      map[uint64]*ShardInfo{},
+		globalFiles: map[uint64]cfLevel{},
 		fd:          fp,
 	}
 	var offset int64

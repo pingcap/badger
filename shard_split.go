@@ -41,7 +41,7 @@ func (sdb *ShardingDB) Split(keys [][]byte) error {
 
 func (sdb *ShardingDB) buildSplitTask(keys [][]byte) *splitTask {
 	tree := sdb.loadShardTree()
-	shardTasks := map[uint32]*shardSplitTask{}
+	shardTasks := map[uint64]*shardSplitTask{}
 	for _, key := range keys {
 		shard := tree.get(key)
 		if bytes.Equal(shard.Start, key) {
@@ -270,7 +270,7 @@ func (sdb *ShardingDB) splitTables(shard *Shard, cf int, level int, keys [][]byt
 }
 
 func (sdb *ShardingDB) buildTableBeforeKey(itr y.Iterator, key []byte, level int, opt options.TableBuilderOptions) (table.Table, error) {
-	filename := sstable.NewFilename(uint64(sdb.allocFid("splitTable")), sdb.opt.Dir)
+	filename := sstable.NewFilename(sdb.idAlloc.AllocID(), sdb.opt.Dir)
 	fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		return nil, err
@@ -308,7 +308,7 @@ func builderToTable(b *sstable.Builder) (table.Table, error) {
 // This is done after preSplit is done, so we don't need to acquire any lock, just atomic CAS will do.
 func (sdb *ShardingDB) finishSplit(s *Shard, splitKeys [][]byte) []*Shard {
 	newShards := make([]*Shard, 0, len(splitKeys)+1)
-	firstShard := newShard(sdb.allocShardID(), s.Start, splitKeys[0], sdb.opt, sdb.metrics)
+	firstShard := newShard(sdb.idAlloc.AllocID(), s.Start, splitKeys[0], sdb.opt, sdb.metrics)
 	newShards = append(newShards, firstShard)
 	for i, splitKey := range splitKeys {
 		var endKey []byte
@@ -317,7 +317,7 @@ func (sdb *ShardingDB) finishSplit(s *Shard, splitKeys [][]byte) []*Shard {
 		} else {
 			endKey = splitKeys[i+1]
 		}
-		newShards = append(newShards, newShard(sdb.allocShardID(), splitKey, endKey, sdb.opt, sdb.metrics))
+		newShards = append(newShards, newShard(sdb.idAlloc.AllocID(), splitKey, endKey, sdb.opt, sdb.metrics))
 	}
 	for i := range s.splittingMemTbls {
 		newShards[i].memTbls = s.splittingMemTbls[i]

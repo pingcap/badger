@@ -114,6 +114,8 @@ type Options struct {
 	S3Options s3util.Options
 
 	CFs []CFConfig
+
+	IDAllocator IDAllocator
 }
 
 type CFConfig struct {
@@ -151,6 +153,11 @@ const (
 	// DecisionDrop simply drops the entry, doesn't leave a delete tombstone.
 	DecisionDrop Decision = 2
 )
+
+// IDAllocator is a function that allocated file ID.
+type IDAllocator interface {
+	AllocID() uint64
+}
 
 // DefaultOptions sets a list of recommended options for good performance.
 // Feel free to modify these to suit your needs.

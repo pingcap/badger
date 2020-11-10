@@ -23,7 +23,7 @@ type engineTask struct {
 }
 
 type splitTask struct {
-	shards map[uint32]*shardSplitTask
+	shards map[uint64]*shardSplitTask
 	notify chan error
 }
 
@@ -31,7 +31,7 @@ type shardSplitTask struct {
 	shard *Shard
 	keys  [][]byte
 	// reservedIDs is used to get smaller file IDs to use for split old l0 files.
-	reservedIDs []uint32
+	reservedIDs []uint64
 }
 
 func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
@@ -82,7 +82,7 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64) {
 	if newTableSize < minSize {
 		newTableSize = minSize
 	}
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.allocFid("l0"))
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.idAlloc.AllocID())
 	for {
 		oldMemTbls := shard.loadMemTables()
 		newMemTbls := &shardingMemTables{}
@@ -106,7 +106,7 @@ func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize in
 	if newTableSize < minSize {
 		newTableSize = minSize
 	}
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.allocFid("splittingL0"))
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.idAlloc.AllocID())
 	for {
 		oldMemTbls := shard.loadSplittingMemTables(idx)
 		newMemTbls := &shardingMemTables{}
@@ -176,19 +176,9 @@ func (sdb *ShardingDB) writeSplitting(batch *shardBatch, commitTS uint64) {
 	}
 }
 
-func (sdb *ShardingDB) createL0File(fid uint32) (fd *os.File, err error) {
-	filename := sstable.NewFilename(uint64(fid), sdb.opt.Dir)
+func (sdb *ShardingDB) createL0File(fid uint64) (fd *os.File, err error) {
+	filename := sstable.NewFilename(fid, sdb.opt.Dir)
 	return directio.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
-}
-
-func (sdb *ShardingDB) allocFid(allocFor string) uint32 {
-	fid := atomic.AddUint32(&sdb.lastFID, 1)
-	log.S().Debugf("alloc fid %d for %s", fid, allocFor)
-	return fid
-}
-
-func (sdb *ShardingDB) allocFidForCompaction() uint64 {
-	return uint64(sdb.allocFid("compaction"))
 }
 
 func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
@@ -200,9 +190,9 @@ func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
 		}
 		sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize)
 		idCnt := (len(shard.loadL0Tables().tables) + len(shard.loadMemTables().tables)) * (len(shardTask.keys) + 1)
-		shardTask.reservedIDs = make([]uint32, 0, idCnt)
+		shardTask.reservedIDs = make([]uint64, 0, idCnt)
 		for i := 0; i < idCnt; i++ {
-			shardTask.reservedIDs = append(shardTask.reservedIDs, sdb.allocFid("reserveSplit"))
+			shardTask.reservedIDs = append(shardTask.reservedIDs, sdb.idAlloc.AllocID())
 		}
 	}
 	task.notify <- nil

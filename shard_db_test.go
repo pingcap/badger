@@ -167,12 +167,12 @@ func (sc *shardingCase) checkData(db *ShardingDB) {
 }
 
 func TestShardingTree(t *testing.T) {
-	shardID := new(uint32)
+	shardID := new(uint64)
 	shardKeys := [][]byte{nil, []byte("a"), []byte("b"), []byte("c"), globalShardEndKey}
 	var shards []*Shard
 	for i := 0; i < 4; i++ {
 		shards = append(shards, &Shard{
-			ID:    atomic.AddUint32(shardID, 1),
+			ID:    atomic.AddUint64(shardID, 1),
 			Start: shardKeys[i],
 			End:   shardKeys[i+1],
 		})
@@ -195,7 +195,7 @@ func TestShardingTree(t *testing.T) {
 
 	shards = []*Shard{
 		{
-			ID:    atomic.AddUint32(shardID, 1),
+			ID:    atomic.AddUint64(shardID, 1),
 			Start: nil,
 			End:   globalShardEndKey,
 		},
@@ -204,11 +204,11 @@ func TestShardingTree(t *testing.T) {
 	old := shards[0]
 	newShards := []*Shard{
 		{
-			ID:  atomic.AddUint32(shardID, 1),
+			ID:  atomic.AddUint64(shardID, 1),
 			End: []byte("a"),
 		},
 		{
-			ID:    atomic.AddUint32(shardID, 1),
+			ID:    atomic.AddUint64(shardID, 1),
 			Start: []byte("a"),
 			End:   globalShardEndKey,
 		},
