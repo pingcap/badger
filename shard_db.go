@@ -175,12 +175,6 @@ func (sdb *ShardingDB) printStructure() {
 	}
 }
 
-type wbEntry struct {
-	cf  byte
-	key []byte
-	val y.ValueStruct
-}
-
 type WriteBatch struct {
 	tree         *shardTree
 	cfConfs      []CFConfig
@@ -364,6 +358,6 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 			return false
 		})
 	}
-    guard.Delete(d.resourses)
+	guard.Delete(d.resources)
 	return nil
 }

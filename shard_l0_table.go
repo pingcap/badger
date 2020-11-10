@@ -2,13 +2,13 @@ package badger
 
 import (
 	"encoding/binary"
-	"io/ioutil"
-	"os"
-
+	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
+	"io/ioutil"
+	"os"
 )
 
 type shardL0Table struct {
@@ -90,4 +90,49 @@ func (sl0s *shardL0Tables) totalSize() int64 {
 		size += tbl.size
 	}
 	return size
+}
+
+type shardL0Builder struct {
+	builders []*sstable.Builder
+}
+
+func newShardL0Builder(numCFs int, opt options.TableBuilderOptions) *shardL0Builder {
+	sdb := &shardL0Builder{
+		builders: make([]*sstable.Builder, numCFs),
+	}
+	for i := 0; i < numCFs; i++ {
+		sdb.builders[i] = sstable.NewTableBuilder(nil, nil, 0, opt)
+	}
+	return sdb
+}
+
+func (e *shardL0Builder) Add(cf int, key y.Key, value y.ValueStruct) {
+	e.builders[cf].Add(key, value)
+}
+
+/*
+shard Data format:
+ | CF0 Data | CF0 index | CF1 Data | CF1 index | cfs index
+*/
+func (e *shardL0Builder) Finish() []byte {
+	cfDatas := make([][]byte, 0, len(e.builders)*2)
+	cfsIndex := make([]byte, len(e.builders)*8)
+	var fileSize int
+	for i, builder := range e.builders {
+		result, _ := builder.Finish()
+		cfDatas = append(cfDatas, result.FileData)
+		fileSize += len(result.FileData)
+		binary.LittleEndian.PutUint32(cfsIndex[i*8:], uint32(fileSize))
+		cfDatas = append(cfDatas, result.IndexData)
+		fileSize += len(result.IndexData)
+		binary.LittleEndian.PutUint32(cfsIndex[i*8+4:], uint32(fileSize))
+	}
+	result := make([]byte, 0, fileSize+len(cfsIndex)+1)
+	result = append(result)
+	for _, cfData := range cfDatas {
+		result = append(result, cfData...)
+	}
+	result = append(result, cfsIndex...)
+	result = append(result, byte(len(e.builders))) // number of CF
+	return result
 }
