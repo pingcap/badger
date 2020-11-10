@@ -26,11 +26,12 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 			y.Assert(ok)
 			cf := cfLevel.cf
 			if cf == -1 {
-				filename := sstable.NewFilename(uint64(fid), opt.Dir)
+				filename := sstable.NewFilename(fid, opt.Dir)
 				sl0Tbl, err := openShardL0Table(filename, fid)
 				if err != nil {
 					return nil, err
 				}
+				atomic.AddInt64(&shard.estimatedSize, sl0Tbl.size)
 				l0Tbls := shard.loadL0Tables()
 				l0Tbls.tables = append(l0Tbls.tables, sl0Tbl)
 				continue
@@ -38,7 +39,7 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 			level := cfLevel.level
 			scf := shard.cfs[cf]
 			handler := scf.getLevelHandler(int(level))
-			filename := sstable.NewFilename(uint64(fid), opt.Dir)
+			filename := sstable.NewFilename(fid, opt.Dir)
 			reader, err := sstable.NewMMapFile(filename)
 			if err != nil {
 				return nil, err
@@ -47,6 +48,7 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 			if err != nil {
 				return nil, err
 			}
+			atomic.AddInt64(&shard.estimatedSize, tbl.Size())
 			handler.tables = append(handler.tables, tbl)
 		}
 		l0Tbls := shard.loadL0Tables()
@@ -136,6 +138,7 @@ type Shard struct {
 	splitKeys        [][]byte
 	splittingMemTbls []*unsafe.Pointer
 	splittingL0s     []*unsafe.Pointer
+	estimatedSize    int64
 }
 
 const (
@@ -320,6 +323,33 @@ func (s *Shard) loadWritableMemTable() *memtable.CFTable {
 
 func (s *Shard) loadL0Tables() *shardL0Tables {
 	return (*shardL0Tables)(atomic.LoadPointer(s.l0s))
+}
+
+func (s *Shard) getSplitKeys(targetSize int64) [][]byte {
+	if atomic.LoadInt64(&s.estimatedSize) < targetSize {
+		return nil
+	}
+	var maxLevel *levelHandler
+	s.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		if maxLevel == nil {
+			maxLevel = level
+		}
+		if maxLevel.totalSize < level.totalSize {
+			maxLevel = level
+		}
+		return false
+	})
+	levelTargetSize := int64(float64(targetSize) * (float64(maxLevel.totalSize) / float64(atomic.LoadInt64(&s.estimatedSize))))
+	var keys [][]byte
+	var currentSize int64
+	for i, tbl := range maxLevel.tables {
+		currentSize += tbl.Size()
+		if i != 0 && currentSize > levelTargetSize {
+			keys = append(keys, tbl.Smallest().UserKey)
+			currentSize = 0
+		}
+	}
+	return keys
 }
 
 type shardCF struct {

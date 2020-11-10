@@ -168,6 +168,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 	l0Tbls := shard.loadL0Tables()
 	var changes []*protos.ManifestChange
 	var toBeDelete []epoch.Resource
+	var shardSizeChange int64
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		helper := newBuildHelper(sdb, shard, l0Tbls, cf)
 		var results []*sstable.BuildResult
@@ -188,6 +189,11 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		log.S().Infof("cf %d new tables %d", cf, len(newTables))
 		newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, 1, sdb.metrics)
 		newHandler.tables = newTables
+		for _, tbl := range newTables {
+			newHandler.totalSize += tbl.Size()
+		}
+		newHandler.totalSize -= helper.oldHandler.totalSize
+		shardSizeChange += newHandler.totalSize - helper.oldHandler.totalSize
 		y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
 		for _, newTbl := range newTables {
 			changes = append(changes, newManifestChange(newTbl.ID(), shard.ID, cf, 1, protos.ManifestChange_CREATE))
@@ -201,8 +207,10 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		for _, tbl := range l0Tbls.tables {
 			changes = append(changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
 			toBeDelete = append(toBeDelete, tbl)
+			shardSizeChange -= tbl.size
 		}
 	}
+	atomic.AddInt64(&shard.estimatedSize, shardSizeChange)
 	err := sdb.manifest.addChanges(changes...)
 	if err != nil {
 		return err
@@ -369,6 +377,7 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 	// we access levels when reading.
 	newNextLevel := sdb.replaceTables(nextLevel, newTables, cd, guard)
 	y.Assert(scf.casLevelHandler(newNextLevel.level, nextLevel, newNextLevel))
+	atomic.AddInt64(&shard.estimatedSize, newNextLevel.totalSize-nextLevel.totalSize)
 	// level 0 may have newly added tables, we need to CAS it.
 	for {
 		thisLevel = scf.getLevelHandler(thisLevel.level)

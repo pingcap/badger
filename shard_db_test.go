@@ -277,6 +277,30 @@ func TestIngestTree(t *testing.T) {
 	sc2.checkData(db2)
 }
 
+func TestSplitSuggestion(t *testing.T) {
+	dir, err := ioutil.TempDir("", "sharding")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	alloc := new(localIDAllocator)
+	opts := getTestOptions(dir)
+	opts.NumCompactors = 2
+	opts.NumLevelZeroTables = 1
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
+	opts.IDAllocator = alloc
+	db, err := OpenShardingDB(opts)
+	require.NoError(t, err)
+	sc := &shardingCase{
+		t: t,
+		n: 20000,
+	}
+	sc.loadData(db)
+	time.Sleep(time.Second * 2)
+	keys := db.GetSplitSuggestion(opts.MaxMemTableSize)
+	log.S().Infof("split keys %s", keys)
+	require.Greater(t, len(keys), 2)
+	require.NoError(t, db.Close())
+}
+
 func runPprof() {
 	go func() {
 		http.ListenAndServe(":9291", nil)
