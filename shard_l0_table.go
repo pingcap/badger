@@ -5,6 +5,7 @@ import (
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 	"io/ioutil"
@@ -25,7 +26,7 @@ func (st *shardL0Table) Delete() error {
 func openShardL0Table(filename string, fid uint64) (*shardL0Table, error) {
 	shardData, err := ioutil.ReadFile(filename)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	l0 := &shardL0Table{
 		fid:      fid,

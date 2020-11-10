@@ -3,17 +3,16 @@ package badger
 import (
 	"bufio"
 	"encoding/binary"
-	"errors"
 	"fmt"
+	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/y"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
-
-	"github.com/pingcap/badger/protos"
-	"github.com/pingcap/badger/y"
 )
 
 // The manifest file is used to restore the tree
@@ -170,7 +169,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 		}
 		shardInfo := m.shards[shardID]
 		if shardInfo == nil {
-			return errShardNotFound
+			return errors.WithStack(errShardNotFound)
 		}
 		switch change.Op {
 		case protos.ManifestChange_CREATE:

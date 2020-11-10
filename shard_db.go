@@ -7,9 +7,11 @@ import (
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
+	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"sort"
 	"sync/atomic"
 	"unsafe"
 )
@@ -73,17 +75,17 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	}
 	memTbls := &shardingMemTables{}
 	db = &ShardingDB{
-		opt:         opt,
-		numCFs:      len(opt.CFs),
-		orc:         orc,
-		dirLock:     dirLockGuard,
-		metrics:     metrics,
-		shardTree:   unsafe.Pointer(shardTree),
-		blkCache:    blkCache,
-		idxCache:    idxCache,
-		flushCh:     make(chan *shardFlushTask, opt.NumMemtables),
-		writeCh:     make(chan engineTask, kvWriteChCapacity),
-		manifest:    manifest,
+		opt:       opt,
+		numCFs:    len(opt.CFs),
+		orc:       orc,
+		dirLock:   dirLockGuard,
+		metrics:   metrics,
+		shardTree: unsafe.Pointer(shardTree),
+		blkCache:  blkCache,
+		idxCache:  idxCache,
+		flushCh:   make(chan *shardFlushTask, opt.NumMemtables),
+		writeCh:   make(chan engineTask, kvWriteChCapacity),
+		manifest:  manifest,
 	}
 	if opt.IDAllocator != nil {
 		db.idAlloc = opt.IDAllocator
@@ -370,4 +372,183 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 	}
 	guard.Delete(d.resources)
 	return nil
+}
+
+type IngestTree struct {
+	Start []byte
+	End   []byte
+	MaxTS uint64
+	L0    []uint64
+	CFs   []*IngestTreeCF
+}
+
+type IngestTreeCF struct {
+	Levels []*IngestTreeCFLevel
+}
+
+type IngestTreeCFLevel struct {
+	TableIDs []uint64
+}
+
+func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
+	start, end := ingestTree.Start, ingestTree.End
+	if len(end) == 0 {
+		end = globalShardEndKey
+	}
+	sdb.orc.Lock()
+	if sdb.orc.nextCommit < ingestTree.MaxTS {
+		sdb.orc.nextCommit = ingestTree.MaxTS
+	}
+	sdb.orc.Unlock()
+	defer sdb.orc.doneCommit(ingestTree.MaxTS)
+	if err := sdb.Split([][]byte{start, end}); err != nil {
+		return err
+	}
+	// TODO: support merge multiple shards. now assert single shard.
+	guard := sdb.resourceMgr.Acquire()
+	defer guard.Done()
+	tree := sdb.loadShardTree()
+	shards := tree.getShards(start, end)
+	y.Assert(len(shards) == 1)
+	shard := shards[0]
+	shard.lock.Lock()
+	defer shard.lock.Unlock()
+	y.Assert(bytes.Equal(shard.Start, start))
+	y.Assert(bytes.Equal(shard.End, end))
+	y.Assert(!shard.isSplitting())
+	change, d := sdb.createIngestTreeManifestChange(ingestTree, shard)
+	l0s, err := sdb.openIngestTreeL0Tables(ingestTree)
+	if err != nil {
+		return err
+	}
+	levelHandlers, err := sdb.createIngestTreeLevelHandlers(ingestTree)
+	if err != nil {
+		return err
+	}
+	if err = sdb.manifest.writeChangeSet(change); err != nil {
+		return err
+	}
+	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
+	atomic.StorePointer(shard.l0s, unsafe.Pointer(l0s))
+	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		scf := shard.cfs[cf]
+		y.Assert(scf.casLevelHandler(level.level, level, levelHandlers[cf][level.level-1]))
+		return false
+	})
+	guard.Delete(d.resources)
+	return nil
+}
+
+func (sdb *ShardingDB) createIngestTreeManifestChange(ingestTree *IngestTree, shard *Shard) (change *protos.ManifestChangeSet, d *deletions) {
+	d = new(deletions)
+	change = &protos.ManifestChangeSet{}
+	l0s := shard.loadL0Tables()
+	for _, tbl := range l0s.tables {
+		d.Append(tbl)
+		change.Changes = append(change.Changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+	}
+	if shard.isSplitting() {
+		for i := range shard.splittingL0s {
+			sl0s := shard.loadSplittingL0Tables(i)
+			for _, tbl := range sl0s.tables {
+				d.Append(tbl)
+				change.Changes = append(change.Changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+			}
+		}
+	}
+	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		for _, tbl := range level.tables {
+			d.Append(tbl)
+			change.Changes = append(change.Changes, newManifestChange(tbl.ID(), shard.ID, cf, level.level, protos.ManifestChange_DELETE))
+		}
+		return false
+	})
+	for _, id := range ingestTree.L0 {
+		change.Changes = append(change.Changes, newManifestChange(id, shard.ID, -1, 0, protos.ManifestChange_CREATE))
+	}
+	for cf, ingestCF := range ingestTree.CFs {
+		for l, level := range ingestCF.Levels {
+			for _, id := range level.TableIDs {
+				change.Changes = append(change.Changes, newManifestChange(id, shard.ID, cf, l+1, protos.ManifestChange_CREATE))
+			}
+		}
+	}
+	return
+}
+
+func (sdb *ShardingDB) openIngestTreeL0Tables(ingestTree *IngestTree) (*shardL0Tables, error) {
+	l0s := &shardL0Tables{}
+	for _, l0ID := range ingestTree.L0 {
+		l0Tbl, err := openShardL0Table(sstable.NewFilename(l0ID, sdb.opt.Dir), l0ID)
+		if err != nil {
+			return nil, err
+		}
+		l0s.tables = append(l0s.tables, l0Tbl)
+	}
+	sort.Slice(l0s.tables, func(i, j int) bool {
+		return l0s.tables[i].fid < l0s.tables[j].fid
+	})
+	return l0s, nil
+}
+
+func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) ([][]*levelHandler, error) {
+	newHandlers := make([][]*levelHandler, len(ingestTree.CFs))
+	for cf, ingestCF := range ingestTree.CFs {
+		for level := 1; level <= shardMaxLevel; level++ {
+			ingestLevel := ingestCF.Levels[level-1]
+			newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level, sdb.metrics)
+			for _, id := range ingestLevel.TableIDs {
+				filename := sstable.NewFilename(id, sdb.opt.Dir)
+				file, err := sstable.NewMMapFile(filename)
+				if err != nil {
+					return nil, err
+				}
+				tbl, err := sstable.OpenTable(filename, file)
+				if err != nil {
+					return nil, err
+				}
+				newHandler.tables = append(newHandler.tables, tbl)
+				newHandler.totalSize += tbl.Size()
+			}
+			sort.Slice(newHandler.tables, func(i, j int) bool {
+				return newHandler.tables[i].Smallest().Compare(newHandler.tables[j].Smallest()) < 0
+			})
+			newHandlers[cf] = append(newHandlers[cf], newHandler)
+		}
+	}
+	return newHandlers, nil
+}
+
+func (sdb *ShardingDB) GetShardTree(key []byte) *IngestTree {
+	guard := sdb.resourceMgr.Acquire()
+	defer guard.Done()
+	tree := sdb.loadShardTree()
+	shard := tree.get(key)
+	shard.lock.Lock()
+	defer shard.lock.Unlock()
+	ingestTree := &IngestTree{
+		Start: shard.Start,
+		End:   shard.End,
+		MaxTS: sdb.orc.commitTs(),
+		CFs:   make([]*IngestTreeCF, sdb.numCFs),
+	}
+	for _, tbl := range shard.loadL0Tables().tables {
+		ingestTree.L0 = append(ingestTree.L0, tbl.fid)
+	}
+	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		ingestLevel := &IngestTreeCFLevel{
+			TableIDs: make([]uint64, 0, len(level.tables)),
+		}
+		for _, tbl := range level.tables {
+			ingestLevel.TableIDs = append(ingestLevel.TableIDs, tbl.ID())
+		}
+		ingestCF := ingestTree.CFs[cf]
+		if ingestCF == nil {
+			ingestCF = new(IngestTreeCF)
+			ingestTree.CFs[cf] = ingestCF
+		}
+		ingestCF.Levels = append(ingestCF.Levels, ingestLevel)
+		return false
+	})
+	return ingestTree
 }

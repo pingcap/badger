@@ -3,6 +3,7 @@ package badger
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
@@ -24,7 +25,7 @@ func TestShardingDB(t *testing.T) {
 	opts := getTestOptions(dir)
 	opts.NumCompactors = 2
 	opts.NumLevelZeroTables = 1
-	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}, {Managed: false}}
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
 	db, err := OpenShardingDB(opts)
 	require.NoError(t, err)
 	sc := &shardingCase{
@@ -62,7 +63,7 @@ func TestShardingDeleteRange(t *testing.T) {
 	opts := getTestOptions(dir)
 	opts.NumCompactors = 2
 	opts.NumLevelZeroTables = 1
-	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}, {Managed: false}}
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
 	db, err := OpenShardingDB(opts)
 	require.NoError(t, err)
 	sc := &shardingCase{
@@ -115,7 +116,6 @@ func (sc *shardingCase) loadData(db *ShardingDB) {
 		key := sc.iToKey(i)
 		require.NoError(sc.t, wb.Put(0, key, y.ValueStruct{Value: key, Version: 1}))
 		require.NoError(sc.t, wb.Put(1, key, y.ValueStruct{Value: bytes.Repeat(key, 2)}))
-		require.NoError(sc.t, wb.Put(2, key, y.ValueStruct{Value: bytes.Repeat(key, 3)}))
 		if i%100 == 99 {
 			err := db.Write(wb)
 			require.NoError(sc.t, err)
@@ -131,13 +131,11 @@ func (sc *shardingCase) checkGet(snap *Snapshot) {
 		require.Equal(sc.t, string(val.Value), string(key))
 		val2 := snap.Get(1, y.KeyWithTs(key, 0))
 		require.Equal(sc.t, string(val2.Value), strings.Repeat(string(key), 2))
-		val3 := snap.Get(2, y.KeyWithTs(key, 0))
-		require.Equal(sc.t, string(val3.Value), strings.Repeat(string(key), 3))
 	}
 }
 
 func (sc *shardingCase) checkIterator(snap *Snapshot) {
-	for cf := 0; cf < 3; cf++ {
+	for cf := 0; cf < 2; cf++ {
 		iter := snap.NewIterator(cf, false, false)
 		i := 0
 		for iter.Rewind(); iter.Valid(); iter.Next() {
@@ -215,6 +213,68 @@ func TestShardingTree(t *testing.T) {
 	}
 	tree = tree.replace([]*Shard{old}, newShards)
 	require.Equal(t, len(tree.shards), 2)
+}
+
+func TestIngestTree(t *testing.T) {
+	dir, err := ioutil.TempDir("", "sharding")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	alloc := new(localIDAllocator)
+	opts := getTestOptions(dir)
+	opts.NumCompactors = 2
+	opts.NumLevelZeroTables = 1
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
+	opts.IDAllocator = alloc
+	db, err := OpenShardingDB(opts)
+	require.NoError(t, err)
+	sc := &shardingCase{
+		t: t,
+		n: 20000,
+	}
+	sc.loadData(db)
+	sc.split(db, sc.iToKey(5000), sc.iToKey(10000))
+	require.NoError(t, db.Close())
+	opts.DoNotCompact = true
+	db, err = OpenShardingDB(opts)
+	require.NoError(t, err)
+	ingestTree := db.GetShardTree(sc.iToKey(5000))
+	require.NoError(t, db.Close())
+	dir2, err := ioutil.TempDir("", "sharding")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir2)
+	for _, id := range ingestTree.L0 {
+		oldName := sstable.NewFilename(id, dir)
+		newName := sstable.NewFilename(id, dir2)
+		err = os.Link(oldName, newName)
+		require.NoError(t, err)
+	}
+	for _, cf := range ingestTree.CFs {
+		for _, level := range cf.Levels {
+			for _, id := range level.TableIDs {
+				oldName := sstable.NewFilename(id, dir)
+				newName := sstable.NewFilename(id, dir2)
+				err = os.Link(oldName, newName)
+				require.NoError(t, err)
+				err = os.Link(sstable.IndexFilename(oldName), sstable.IndexFilename(newName))
+				require.NoError(t, err)
+			}
+		}
+	}
+	opts2 := getTestOptions(dir2)
+	opts2.NumCompactors = 2
+	opts2.NumLevelZeroTables = 1
+	opts2.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
+	opts2.IDAllocator = alloc
+	db2, err := OpenShardingDB(opts2)
+	require.NoError(t, err)
+	sc2 := &shardingCase{
+		t: t,
+		n: 5000,
+	}
+	sc2.loadData(db2)
+	require.NoError(t, db2.Ingest(ingestTree))
+	sc2.n = 10000
+	sc2.checkData(db2)
 }
 
 func runPprof() {
