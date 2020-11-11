@@ -383,6 +383,7 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 		thisLevel = scf.getLevelHandler(thisLevel.level)
 		newThisLevel := sdb.deleteTables(thisLevel, cd.Top)
 		if scf.casLevelHandler(thisLevel.level, thisLevel, newThisLevel) {
+			atomic.AddInt64(&shard.estimatedSize, newThisLevel.totalSize-thisLevel.totalSize)
 			if !cd.moveDown() {
 				del := make([]epoch.Resource, len(cd.Top))
 				for i := range cd.Top {

@@ -5,16 +5,49 @@ import (
 	"fmt"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
+	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"math"
 	"sort"
 	"sync/atomic"
 	"unsafe"
 )
+
+var ShardingDBDefaultOpt = Options{
+	DoNotCompact:            false,
+	LevelOneSize:            16 << 20,
+	MaxMemTableSize:         16 << 20,
+	NumCompactors:           3,
+	NumLevelZeroTables:      5,
+	NumLevelZeroTablesStall: 10,
+	NumMemtables:            16,
+	SyncWrites:              false,
+	ValueThreshold:          0,
+	ValueLogFileSize:        100 << 20,
+	ValueLogMaxNumFiles:     2,
+	TableBuilderOptions: options.TableBuilderOptions{
+		LevelSizeMultiplier: 10,
+		MaxTableSize:        8 << 20,
+		SuRFStartLevel:      8,
+		HashUtilRatio:       0.75,
+		WriteBufferSize:     2 * 1024 * 1024,
+		BytesPerSecond:      -1,
+		BlockSize:           64 * 1024,
+		LogicalBloomFPR:     0.01,
+		MaxLevels:           5,
+		SuRFOptions: options.SuRFOptions{
+			HashSuffixLen:  8,
+			RealSuffixLen:  8,
+			BitsPerKeyHint: 40,
+		},
+	},
+	CFs: []CFConfig{{Managed: false}},
+}
 
 type ShardingDB struct {
 	opt           Options
@@ -139,7 +172,11 @@ func (sdb *ShardingDB) Close() error {
 	return sdb.dirLock.release()
 }
 
-func (sdb *ShardingDB) printStructure() {
+func (sdb *ShardingDB) GetSafeTS() (uint64, uint64, uint64) {
+	return sdb.orc.readTs(), sdb.orc.commitTs(), atomic.LoadUint64(&sdb.safeTsTracker.safeTs)
+}
+
+func (sdb *ShardingDB) PrintStructure() {
 	tree := sdb.loadShardTree()
 	for _, shard := range tree.shards {
 		if shard.isSplitting() {
@@ -278,18 +315,53 @@ type Snapshot struct {
 	cfs      []CFConfig
 	startKey []byte
 	endKey   []byte
+
+	managedReadTS uint64
 }
 
 func (s *Snapshot) Get(cf int, key y.Key) y.ValueStruct {
-	if !s.cfs[cf].Managed && key.Version == 0 {
-		key.Version = s.readTS
+	if key.Version == 0 {
+		key.Version = s.getDefaultVersion(cf)
 	}
 	shard := getShard(s.shards, key.UserKey)
 	return shard.Get(cf, key)
 }
 
+func (s *Snapshot) getDefaultVersion(cf int) uint64 {
+	if s.cfs[cf].Managed {
+		return math.MaxUint64
+	}
+	return s.readTS
+}
+
+func (s *Snapshot) MultiGet(cf int, keys [][]byte, version uint64) ([]*Item, error) {
+	if version == 0 {
+		version = s.getDefaultVersion(cf)
+	}
+	items := make([]*Item, len(keys))
+	for i, key := range keys {
+		v := s.Get(cf, y.KeyWithTs(key, version))
+		if v.Valid() {
+			items[i] = &Item{
+				key: y.Key{
+					UserKey: keys[i],
+					Version: v.Version,
+				},
+				meta:     v.Meta,
+				userMeta: v.UserMeta,
+				vptr:     v.Value,
+			}
+		}
+	}
+	return items, nil
+}
+
 func (s *Snapshot) Discard() {
 	s.guard.Done()
+}
+
+func (s *Snapshot) SetManagedReadTS(ts uint64) {
+	s.managedReadTS = ts
 }
 
 func (sdb *ShardingDB) NewSnapshot(startKey, endKey []byte) *Snapshot {
@@ -557,8 +629,8 @@ func (sdb *ShardingDB) GetSplitSuggestion(splitSize int64) [][]byte {
 	tree := sdb.loadShardTree()
 	var keys [][]byte
 	for _, shard := range tree.shards {
-		log.S().Infof("shard size %d", shard.estimatedSize)
 		if atomic.LoadInt64(&shard.estimatedSize) > splitSize {
+			log.S().Infof("shard(%x, %x) size %d", shard.Start, shard.End, shard.estimatedSize)
 			keys = append(keys, shard.getSplitKeys(splitSize)...)
 		}
 	}

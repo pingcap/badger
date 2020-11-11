@@ -14,7 +14,11 @@ func (s *Snapshot) NewIterator(cf int, reversed, allVersions bool) *Iterator {
 		opt:  IteratorOptions{Reverse: reversed, AllVersions: allVersions},
 	}
 	if s.cfs[cf].Managed {
-		iter.readTs = math.MaxUint64
+		if s.managedReadTS != 0 {
+			iter.readTs = s.managedReadTS
+		} else {
+			iter.readTs = math.MaxUint64
+		}
 	} else {
 		iter.readTs = s.readTS
 	}

@@ -245,6 +245,7 @@ type Iterator struct {
 	item  *Item
 	itBuf Item
 	vs    y.ValueStruct
+	bound []byte
 }
 
 // NewIterator returns a new iterator. Depending upon the options, either only keys, or both
@@ -291,6 +292,11 @@ func (it *Iterator) Item() *Item {
 		tx.reads = append(tx.reads, farm.Fingerprint64(it.item.Key()))
 	}
 	return it.item
+}
+
+// SetBound sets the boundary for Seek to avoid read too many tombstones.
+func (it *Iterator) SetBound(boundKey []byte) {
+	it.bound = boundKey
 }
 
 // Valid returns false when iteration is done.
@@ -347,6 +353,15 @@ func (it *Iterator) parseItem() {
 		}
 		it.updateItem()
 		if !it.opt.AllVersions && isDeleted(it.vs.Meta) {
+			if it.opt.Reverse {
+				if bytes.Compare(key.UserKey, it.bound) < 0 {
+					break
+				}
+			} else {
+				if bytes.Compare(key.UserKey, it.bound) >= 0 {
+					break
+				}
+			}
 			iitr.Next()
 			continue
 		}

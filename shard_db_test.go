@@ -45,13 +45,13 @@ func TestShardingDB(t *testing.T) {
 	sc.loadData(db)
 	log.S().Infof("time split %v; load %v", <-ch, time.Since(begin))
 	time.Sleep(time.Second * 3)
-	db.printStructure()
+	db.PrintStructure()
 	sc.checkData(db)
 	err = db.Close()
 	require.NoError(t, err)
 	db, err = OpenShardingDB(opts)
 	require.NoError(t, err)
-	db.printStructure()
+	db.PrintStructure()
 	sc.checkData(db)
 }
 

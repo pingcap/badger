@@ -5,6 +5,7 @@ import (
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/y"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"os"
 	"sync/atomic"
@@ -69,7 +70,7 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 	change := newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
 	err := sdb.manifest.addChanges(change)
 	if err != nil {
-		if err != errShardNotFound {
+		if errors.Cause(err) != errShardNotFound {
 			return err
 		}
 		var shardStartKey []byte
