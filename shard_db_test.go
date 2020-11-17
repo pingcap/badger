@@ -127,10 +127,12 @@ func (sc *shardingCase) loadData(db *ShardingDB) {
 func (sc *shardingCase) checkGet(snap *Snapshot) {
 	for i := 0; i < sc.n; i++ {
 		key := sc.iToKey(i)
-		val := snap.Get(0, y.KeyWithTs(key, 2))
-		require.Equal(sc.t, string(val.Value), string(key))
-		val2 := snap.Get(1, y.KeyWithTs(key, 0))
-		require.Equal(sc.t, string(val2.Value), strings.Repeat(string(key), 2))
+		item, err := snap.Get(0, y.KeyWithTs(key, 2))
+		require.Nil(sc.t, err)
+		require.Equal(sc.t, string(item.vptr), string(key))
+		item2, err := snap.Get(1, y.KeyWithTs(key, 0))
+		require.Nil(sc.t, err)
+		require.Equal(sc.t, string(item2.vptr), strings.Repeat(string(key), 2))
 	}
 }
 
@@ -142,9 +144,7 @@ func (sc *shardingCase) checkIterator(snap *Snapshot) {
 			key := sc.iToKey(i)
 			item := iter.Item()
 			require.EqualValues(sc.t, key, item.key.UserKey)
-			val, err1 := item.Value()
-			require.NoError(sc.t, err1)
-			require.EqualValues(sc.t, bytes.Repeat(key, int(cf)+1), val)
+			require.EqualValues(sc.t, bytes.Repeat(key, int(cf)+1), item.vptr)
 			i++
 		}
 		require.Equal(sc.t, sc.n, i)
@@ -177,19 +177,26 @@ func TestShardingTree(t *testing.T) {
 	}
 	tree := &shardTree{shards: shards}
 	shard := tree.get([]byte(""))
-	require.Equal(t, shard.ID, uint32(1))
+	require.Equal(t, shard.ID, uint64(1))
 	shard = tree.get([]byte("a"))
-	require.Equal(t, shard.ID, uint32(2))
+	require.Equal(t, shard.ID, uint64(2))
 	shard = tree.get([]byte("abc"))
-	require.Equal(t, shard.ID, uint32(2))
+	require.Equal(t, shard.ID, uint64(2))
 	shard = tree.get([]byte("b"))
-	require.Equal(t, shard.ID, uint32(3))
+	require.Equal(t, shard.ID, uint64(3))
 	shard = tree.get([]byte("bcd"))
-	require.Equal(t, shard.ID, uint32(3))
+	require.Equal(t, shard.ID, uint64(3))
 	shard = tree.get([]byte("cde"))
-	require.Equal(t, shard.ID, uint32(4))
+	require.Equal(t, shard.ID, uint64(4))
 	shard = tree.get([]byte("fsd"))
-	require.Equal(t, shard.ID, uint32(4))
+	require.Equal(t, shard.ID, uint64(4))
+
+	gotShards := tree.getShards([]byte("abc"), []byte("abc"))
+	require.Equal(t, len(gotShards), 1)
+	require.Equal(t, gotShards[0].ID, uint64(2))
+	gotShards = tree.getShards([]byte("b"), []byte("b"))
+	require.Equal(t, len(gotShards), 1)
+	require.Equal(t, gotShards[0].ID, uint64(3))
 
 	shards = []*Shard{
 		{

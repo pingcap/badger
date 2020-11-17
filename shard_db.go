@@ -319,12 +319,25 @@ type Snapshot struct {
 	managedReadTS uint64
 }
 
-func (s *Snapshot) Get(cf int, key y.Key) y.ValueStruct {
+func (s *Snapshot) Get(cf int, key y.Key) (*Item, error) {
 	if key.Version == 0 {
 		key.Version = s.getDefaultVersion(cf)
 	}
 	shard := getShard(s.shards, key.UserKey)
-	return shard.Get(cf, key)
+	vs := shard.Get(cf, key)
+	if !vs.Valid() {
+		return nil, ErrKeyNotFound
+	}
+	if isDeleted(vs.Meta) {
+		return nil, ErrKeyNotFound
+	}
+	item := new(Item)
+	item.key.UserKey = key.UserKey
+	item.key.Version = vs.Version
+	item.meta = vs.Meta
+	item.userMeta = vs.UserMeta
+	item.vptr = vs.Value
+	return item, nil
 }
 
 func (s *Snapshot) getDefaultVersion(cf int) uint64 {
@@ -340,18 +353,11 @@ func (s *Snapshot) MultiGet(cf int, keys [][]byte, version uint64) ([]*Item, err
 	}
 	items := make([]*Item, len(keys))
 	for i, key := range keys {
-		v := s.Get(cf, y.KeyWithTs(key, version))
-		if v.Valid() {
-			items[i] = &Item{
-				key: y.Key{
-					UserKey: keys[i],
-					Version: v.Version,
-				},
-				meta:     v.Meta,
-				userMeta: v.UserMeta,
-				vptr:     v.Value,
-			}
+		item, err := s.Get(cf, y.KeyWithTs(key, version))
+		if err != nil && err != ErrKeyNotFound {
+			return nil, err
 		}
+		items[i] = item
 	}
 	return items, nil
 }
@@ -380,6 +386,7 @@ func (sdb *ShardingDB) NewSnapshot(startKey, endKey []byte) *Snapshot {
 	}
 }
 
+// DeleteRange operation deletes the range between start and end, the existing Snapshot is still consistent.
 func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 	if len(end) == 0 {
 		end = globalShardEndKey
@@ -431,16 +438,16 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 	if err != nil {
 		return err
 	}
+	newShards := make([]*Shard, 0, len(shards))
 	for _, shard := range shards {
-		y.Assert(!shard.isSplitting())
-		atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
-		atomic.StorePointer(shard.l0s, unsafe.Pointer(&shardL0Tables{}))
-		shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
-			if len(level.tables) > 0 {
-				shard.cfs[cf].casLevelHandler(level.level, level, newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level.level, sdb.metrics))
-			}
-			return false
-		})
+		newShards = append(newShards, newShard(shard.ID, shard.Start, shard.End, sdb.opt, sdb.metrics))
+	}
+	for {
+		oldTree := sdb.loadShardTree()
+		newTree := oldTree.replace(shards, newShards)
+		if atomic.CompareAndSwapPointer(&sdb.shardTree, unsafe.Pointer(oldTree), unsafe.Pointer(newTree)) {
+			break
+		}
 	}
 	guard.Delete(d.resources)
 	return nil
@@ -635,4 +642,13 @@ func (sdb *ShardingDB) GetSplitSuggestion(splitSize int64) [][]byte {
 		}
 	}
 	return keys
+}
+
+func (sdb *ShardingDB) Size() int64 {
+	tree := sdb.loadShardTree()
+	var size int64
+	for _, shard := range tree.shards {
+		size += atomic.LoadInt64(&shard.estimatedSize)
+	}
+	return size
 }

@@ -105,6 +105,9 @@ func getShardRange(shards []*Shard, start, end []byte) (left, right int) {
 	left = sort.Search(len(shards), func(i int) bool {
 		return bytes.Compare(start, shards[i].End) < 0
 	})
+	if bytes.Equal(start, end) {
+		return left, left + 1
+	}
 	right = sort.Search(len(shards), func(i int) bool {
 		return bytes.Compare(end, shards[i].Start) <= 0
 	})
