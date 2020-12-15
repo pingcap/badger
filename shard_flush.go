@@ -93,7 +93,7 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 	newL0Tbls.tables = append(newL0Tbls.tables, l0)
 	newL0Tbls.tables = append(newL0Tbls.tables, oldL0Tbls.tables...)
 	y.Assert(atomic.CompareAndSwapPointer(oldL0sPtr, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)))
-	atomic.AddInt64(&shard.estimatedSize, l0.size)
+	shard.addEstimatedSize(l0.size)
 	for {
 		oldMemTbls := (*shardingMemTables)(atomic.LoadPointer(oldMemTblsPtr))
 		newMemTbls := &shardingMemTables{tables: make([]*memtable.CFTable, len(oldMemTbls.tables)-1)}

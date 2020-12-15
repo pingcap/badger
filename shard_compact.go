@@ -210,7 +210,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 			shardSizeChange -= tbl.size
 		}
 	}
-	atomic.AddInt64(&shard.estimatedSize, shardSizeChange)
+	shard.addEstimatedSize(shardSizeChange)
 	err := sdb.manifest.addChanges(changes...)
 	if err != nil {
 		return err
@@ -231,33 +231,20 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 
 func (sdb *ShardingDB) runShardInternalCompactionLoop(c *y.Closer) {
 	defer c.Done()
-	var priorities []compactionPriority
+	var priorities []CompactionPriority
 	for {
-		priorities = priorities[:0]
-		tree := sdb.loadShardTree()
-		var shardIDs []uint64
-		for _, shard := range tree.shards {
-			shardIDs = append(shardIDs, shard.ID)
-			priorities = append(priorities, sdb.getCompactionPriority(shard))
-		}
-		sort.Slice(priorities, func(i, j int) bool {
-			return priorities[i].score > priorities[j].score
-		})
+		priorities = sdb.GetCompactionPriorities(priorities)
 		wg := new(sync.WaitGroup)
 		for i := 0; i < sdb.opt.NumCompactors && i < len(priorities); i++ {
 			pri := priorities[i]
-			if pri.score > 1 {
-				wg.Add(1)
-				go func() {
-					guard := sdb.resourceMgr.Acquire()
-					err := sdb.compactShard(pri, guard)
-					if err != nil {
-						log.Error("compact shard failed", zap.Uint64("shard", pri.shard.ID), zap.Error(err))
-					}
-					guard.Done()
-					wg.Done()
-				}()
-			}
+			wg.Add(1)
+			go func() {
+				err := sdb.CompactShard(pri)
+				if err != nil {
+					log.Error("compact shard failed", zap.Uint64("shard", pri.Shard.ID), zap.Error(err))
+				}
+				wg.Done()
+			}()
 		}
 		wg.Wait()
 		select {
@@ -268,55 +255,79 @@ func (sdb *ShardingDB) runShardInternalCompactionLoop(c *y.Closer) {
 	}
 }
 
-func (sdb *ShardingDB) getCompactionPriority(shard *Shard) compactionPriority {
-	maxPri := compactionPriority{shard: shard}
+type CompactionPriority struct {
+	CF    int
+	Level int
+	Score float64
+	Shard *Shard
+}
+
+func (sdb *ShardingDB) getCompactionPriority(shard *Shard) CompactionPriority {
+	maxPri := CompactionPriority{Shard: shard}
 	l0 := shard.loadL0Tables()
 	if l0 != nil && len(l0.tables) > sdb.opt.NumLevelZeroTables {
 		sizeScore := float64(l0.totalSize()) * 10 / float64(sdb.opt.LevelOneSize)
 		numTblsScore := float64(len(l0.tables)) / float64(sdb.opt.NumLevelZeroTables)
-		maxPri.score = sizeScore*0.6 + numTblsScore*0.4
-		maxPri.cf = -1
+		maxPri.Score = sizeScore*0.6 + numTblsScore*0.4
+		maxPri.CF = -1
 		return maxPri
 	}
 	for i, scf := range shard.cfs {
 		for level := 1; level <= shardMaxLevel; level++ {
 			h := scf.getLevelHandler(level)
 			score := float64(h.getTotalSize()) / (float64(sdb.opt.LevelOneSize) * math.Pow(10, float64(level-1)))
-			if score > maxPri.score {
-				maxPri.score = score
-				maxPri.cf = i
-				maxPri.level = level
+			if score > maxPri.Score {
+				maxPri.Score = score
+				maxPri.CF = i
+				maxPri.Level = level
 			}
 		}
 	}
 	return maxPri
 }
 
-func (sdb *ShardingDB) compactShard(pri compactionPriority, guard *epoch.Guard) error {
-	shard := pri.shard
+func (sdb *ShardingDB) GetCompactionPriorities(buf []CompactionPriority) []CompactionPriority {
+	results := buf[:0]
+	tree := sdb.loadShardTree()
+	for _, shard := range tree.shards {
+		pri := sdb.getCompactionPriority(shard)
+		if pri.Score > 1 {
+			results = append(results, pri)
+		}
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	return results
+}
+
+func (sdb *ShardingDB) CompactShard(pri CompactionPriority) error {
+	guard := sdb.resourceMgr.Acquire()
+	defer guard.Done()
+	shard := pri.Shard
 	shard.lock.Lock()
 	defer shard.lock.Unlock()
 	if shard.isSplitting() {
 		log.S().Infof("avoid compaction for splitting shard.")
 		return nil
 	}
-	if pri.cf == -1 {
-		log.Info("compact shard multi cf", zap.Uint64("shard", shard.ID), zap.Float64("score", pri.score))
+	if pri.CF == -1 {
+		log.Info("compact shard multi cf", zap.Uint64("shard", shard.ID), zap.Float64("score", pri.Score))
 		err := sdb.compactShardMultiCFL0(shard, guard)
 		log.Info("compact shard multi cf done", zap.Uint64("shard", shard.ID), zap.Error(err))
 		return err
 	}
-	log.Info("start compaction", zap.Uint64("shard", shard.ID), zap.Int("cf", pri.cf), zap.Int("level", pri.level), zap.Float64("score", pri.score))
-	scf := shard.cfs[pri.cf]
-	thisLevel := scf.getLevelHandler(pri.level)
+	log.Info("start compaction", zap.Uint64("shard", shard.ID), zap.Int("cf", pri.CF), zap.Int("level", pri.Level), zap.Float64("score", pri.Score))
+	scf := shard.cfs[pri.CF]
+	thisLevel := scf.getLevelHandler(pri.Level)
 	if len(thisLevel.tables) == 0 {
 		// The shard must have been truncated.
 		log.Info("stop compaction due to shard truncated", zap.Uint64("shard", shard.ID))
 		return nil
 	}
-	nextLevel := scf.getLevelHandler(pri.level + 1)
+	nextLevel := scf.getLevelHandler(pri.Level + 1)
 	cd := &CompactDef{
-		Level: pri.level,
+		Level: pri.Level,
 	}
 	if thisLevel.level == 0 {
 		ok := cd.fillTablesL0(nil, thisLevel, nextLevel)
@@ -327,7 +338,7 @@ func (sdb *ShardingDB) compactShard(pri compactionPriority, guard *epoch.Guard) 
 	}
 	scf.setHasOverlapping(cd)
 	log.Info("running compaction", zap.Stringer("def", cd))
-	if err := sdb.runCompactionDef(shard, pri.cf, cd, guard); err != nil {
+	if err := sdb.runCompactionDef(shard, pri.CF, cd, guard); err != nil {
 		// This compaction couldn't be done successfully.
 		log.Error("compact failed", zap.Stringer("def", cd), zap.Error(err))
 		return err
@@ -377,13 +388,13 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 	// we access levels when reading.
 	newNextLevel := sdb.replaceTables(nextLevel, newTables, cd, guard)
 	y.Assert(scf.casLevelHandler(newNextLevel.level, nextLevel, newNextLevel))
-	atomic.AddInt64(&shard.estimatedSize, newNextLevel.totalSize-nextLevel.totalSize)
+	shard.addEstimatedSize(newNextLevel.totalSize - nextLevel.totalSize)
 	// level 0 may have newly added tables, we need to CAS it.
 	for {
 		thisLevel = scf.getLevelHandler(thisLevel.level)
 		newThisLevel := sdb.deleteTables(thisLevel, cd.Top)
 		if scf.casLevelHandler(thisLevel.level, thisLevel, newThisLevel) {
-			atomic.AddInt64(&shard.estimatedSize, newThisLevel.totalSize-thisLevel.totalSize)
+			shard.addEstimatedSize(newThisLevel.totalSize - thisLevel.totalSize)
 			if !cd.moveDown() {
 				del := make([]epoch.Resource, len(cd.Top))
 				for i := range cd.Top {

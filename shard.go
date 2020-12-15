@@ -31,7 +31,7 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 				if err != nil {
 					return nil, err
 				}
-				atomic.AddInt64(&shard.estimatedSize, sl0Tbl.size)
+				shard.addEstimatedSize(sl0Tbl.size)
 				l0Tbls := shard.loadL0Tables()
 				l0Tbls.tables = append(l0Tbls.tables, sl0Tbl)
 				continue
@@ -48,7 +48,7 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 			if err != nil {
 				return nil, err
 			}
-			atomic.AddInt64(&shard.estimatedSize, tbl.Size())
+			shard.addEstimatedSize(tbl.Size())
 			handler.tables = append(handler.tables, tbl)
 		}
 		l0Tbls := shard.loadL0Tables()
@@ -201,6 +201,14 @@ func (s *Shard) isSplitting() bool {
 	return atomic.LoadUint32(&s.splitState) >= splitStateSplitting
 }
 
+func (s *Shard) GetEstimatedSize() int64 {
+	return atomic.LoadInt64(&s.estimatedSize)
+}
+
+func (s *Shard) addEstimatedSize(size int64) int64 {
+	return atomic.AddInt64(&s.estimatedSize, size)
+}
+
 func (s *Shard) setSplitKeys(keys [][]byte) bool {
 	if atomic.CompareAndSwapUint32(&s.splitState, splitStateInitial, splitStateSetKeys) {
 		s.splitKeys = keys
@@ -329,7 +337,7 @@ func (s *Shard) loadL0Tables() *shardL0Tables {
 }
 
 func (s *Shard) getSplitKeys(targetSize int64) [][]byte {
-	if atomic.LoadInt64(&s.estimatedSize) < targetSize {
+	if s.GetEstimatedSize() < targetSize {
 		return nil
 	}
 	var maxLevel *levelHandler
@@ -342,7 +350,7 @@ func (s *Shard) getSplitKeys(targetSize int64) [][]byte {
 		}
 		return false
 	})
-	levelTargetSize := int64(float64(targetSize) * (float64(maxLevel.totalSize) / float64(atomic.LoadInt64(&s.estimatedSize))))
+	levelTargetSize := int64(float64(targetSize) * (float64(maxLevel.totalSize) / float64(s.GetEstimatedSize())))
 	var keys [][]byte
 	var currentSize int64
 	for i, tbl := range maxLevel.tables {

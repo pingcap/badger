@@ -632,18 +632,6 @@ func (sdb *ShardingDB) GetShardTree(key []byte) *IngestTree {
 	return ingestTree
 }
 
-func (sdb *ShardingDB) GetSplitSuggestion(splitSize int64) [][]byte {
-	tree := sdb.loadShardTree()
-	var keys [][]byte
-	for _, shard := range tree.shards {
-		if atomic.LoadInt64(&shard.estimatedSize) > splitSize {
-			log.S().Infof("shard(%x, %x) size %d", shard.Start, shard.End, shard.estimatedSize)
-			keys = append(keys, shard.getSplitKeys(splitSize)...)
-		}
-	}
-	return keys
-}
-
 func (sdb *ShardingDB) Size() int64 {
 	tree := sdb.loadShardTree()
 	var size int64

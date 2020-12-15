@@ -3,7 +3,6 @@ module github.com/pingcap/badger
 go 1.13
 
 require (
-	github.com/BurntSushi/toml v0.3.1
 	github.com/aws/aws-sdk-go v1.34.22
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash v1.1.0
@@ -13,9 +12,6 @@ require (
 	github.com/dustin/go-humanize v1.0.0
 	github.com/gogo/protobuf v1.2.1 // indirect
 	github.com/golang/protobuf v1.3.1
-	github.com/golang/snappy v0.0.1
-	github.com/google/go-cmp v0.3.1 // indirect
-	github.com/klauspost/compress v1.9.5
 	github.com/klauspost/cpuid v1.2.1
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
@@ -32,7 +28,6 @@ require (
 	golang.org/x/sys v0.0.0-20190626221950-04f50cda93cb
 	golang.org/x/time v0.0.0-20181108054448-85acf8d2951c
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
-	github.com/google/btree v1.0.0
 )
 
 // this fork has some performance tweak (e.g. surf package's test time, 600s -> 100s)
