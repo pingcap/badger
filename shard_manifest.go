@@ -31,6 +31,7 @@ type ShardingManifest struct {
 	// We make this configurable so that unit tests can hit rewrite() code quickly
 	deletionsRewriteThreshold int
 	orc                       *oracle
+	metaListener              MetaChangeListener
 }
 
 type ShardInfo struct {
@@ -213,13 +214,23 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ManifestChangeSet) e
 	if err != nil {
 		return err
 	}
-	if err := m.ApplyChangeSet(changeSet); err != nil {
+	var metaChanges map[uint64]*MetaChangeEvent
+	if m.metaListener != nil {
+		// We create MetaChangeEvent before apply in case a shard is deleted.
+		metaChanges = m.createMetaChangeEvents(changeSet)
+	}
+	if err = m.ApplyChangeSet(changeSet); err != nil {
 		return err
+	}
+	if m.metaListener != nil {
+		for _, e := range metaChanges {
+			m.metaListener.OnChange(e)
+		}
 	}
 	// Rewrite manifest if it'd shrink by 1/10 and it's big enough to care
 	if m.deletions > m.deletionsRewriteThreshold &&
 		m.deletions > manifestDeletionsRatio*(m.creations-m.deletions) {
-		if err := m.rewrite(); err != nil {
+		if err = m.rewrite(); err != nil {
 			return err
 		}
 	} else {
@@ -227,11 +238,42 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ManifestChangeSet) e
 		binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(buf)))
 		binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(buf, y.CastagnoliCrcTable))
 		buf = append(lenCrcBuf[:], buf...)
-		if _, err := m.fd.Write(buf); err != nil {
+		if _, err = m.fd.Write(buf); err != nil {
 			return err
 		}
 	}
 	return m.fd.Sync()
+}
+
+func (m *ShardingManifest) createMetaChangeEvents(changeSet *protos.ManifestChangeSet) map[uint64]*MetaChangeEvent {
+	metaChanges := map[uint64]*MetaChangeEvent{}
+	for _, change := range changeSet.Changes {
+		e := metaChanges[change.ShardID]
+		if e == nil {
+			shardInfo := m.shards[change.ShardID]
+			e = &MetaChangeEvent{
+				StartKey: shardInfo.Start,
+				EndKey:   shardInfo.End,
+			}
+			metaChanges[change.ShardID] = e
+		}
+		if change.Op == protos.ManifestChange_CREATE {
+			e.AddedFiles = append(e.AddedFiles, FileWithCFLevel{
+				ID:    change.Id,
+				CF:    change.CF,
+				Level: change.Level,
+			})
+		} else if change.Op == protos.ManifestChange_DELETE {
+			e.RemovedFiles = append(e.AddedFiles, FileWithCFLevel{
+				ID:    change.Id,
+				CF:    change.CF,
+				Level: change.Level,
+			})
+		} else {
+			panic("unexpected op " + change.Op.String())
+		}
+	}
+	return metaChanges
 }
 
 type cfLevel struct {

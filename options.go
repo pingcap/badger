@@ -116,6 +116,8 @@ type Options struct {
 	CFs []CFConfig
 
 	IDAllocator IDAllocator
+
+	MetaChangeListener MetaChangeListener
 }
 
 type CFConfig struct {
@@ -157,6 +159,26 @@ const (
 // IDAllocator is a function that allocated file ID.
 type IDAllocator interface {
 	AllocID() uint64
+}
+
+// MetaChangeListener is used to notify the engine user that engine meta has changed.
+type MetaChangeListener interface {
+	OnChange(e *MetaChangeEvent)
+}
+
+// MetaChangeEvent is sent to the MetaChangeListener.
+type MetaChangeEvent struct {
+	StartKey     []byte
+	EndKey       []byte
+	RemovedFiles []FileWithCFLevel
+	AddedFiles   []FileWithCFLevel
+}
+
+// FileWithCFLevel is used to associate the fileID with CF and Level.
+type FileWithCFLevel struct {
+	ID    uint64
+	CF    int32
+	Level uint32
 }
 
 // DefaultOptions sets a list of recommended options for good performance.

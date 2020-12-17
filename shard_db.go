@@ -96,6 +96,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 	manifest.orc = orc
+	manifest.metaListener = opt.MetaChangeListener
 
 	blkCache, idxCache, err := createCache(opt)
 	if err != nil {

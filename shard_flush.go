@@ -79,8 +79,12 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 		} else {
 			shardStartKey = task.shard.splitKeys[task.splittingIdx-1]
 		}
-		shardID := sdb.loadShardTree().get(shardStartKey).ID
-		change = newManifestChange(l0.fid, shardID, -1, 0, protos.ManifestChange_CREATE)
+		shard = sdb.loadShardTree().get(shardStartKey)
+		change = newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
+		err = sdb.manifest.addChanges(change)
+		if err != nil {
+			return err
+		}
 	}
 	oldL0sPtr := shard.l0s
 	oldMemTblsPtr := shard.memTbls
