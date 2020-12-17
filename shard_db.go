@@ -7,6 +7,7 @@ import (
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/s3util"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -66,6 +67,7 @@ type ShardingDB struct {
 	manifest      *ShardingManifest
 	mangedSafeTS  uint64
 	idAlloc       IDAllocator
+	s3c           *s3util.S3Client
 }
 
 func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
@@ -125,6 +127,9 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		db.idAlloc = opt.IDAllocator
 	} else {
 		db.idAlloc = &localIDAllocator{latest: manifest.lastID}
+	}
+	if opt.S3Options.EndPoint != "" {
+		db.s3c = s3util.NewS3Client(opt.S3Options)
 	}
 	memTbls.tables = append(memTbls.tables, memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs), db.idAlloc.AllocID()))
 	db.closers.resourceManager = y.NewCloser(0)

@@ -2,14 +2,12 @@ package badger
 
 import (
 	"bytes"
-	"github.com/ncw/directio"
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
-	"os"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -205,7 +203,7 @@ func (sdb *ShardingDB) buildShardL0BeforeKey(iters []y.Iterator, key []byte, tas
 	if err != nil {
 		panic(err)
 	}
-	writer := fileutil.NewDirectWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
+	writer := fileutil.NewBufferedWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
 	_, err = writer.Write(shardL0Data)
 	if err != nil {
 		return nil, err
@@ -271,7 +269,7 @@ func (sdb *ShardingDB) splitTables(shard *Shard, cf int, level int, keys [][]byt
 
 func (sdb *ShardingDB) buildTableBeforeKey(itr y.Iterator, key []byte, level int, opt options.TableBuilderOptions) (table.Table, error) {
 	filename := sstable.NewFilename(sdb.idAlloc.AllocID(), sdb.opt.Dir)
-	fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+	fd, err := y.OpenSyncedFile(filename, false)
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +283,12 @@ func (sdb *ShardingDB) buildTableBeforeKey(itr y.Iterator, key []byte, level int
 			return nil, err
 		}
 		y.NextAllVersion(itr)
+	}
+	if sdb.s3c != nil && !b.Empty() {
+		err = putSSTBuildResultToS3(sdb.s3c, &sstable.BuildResult{FileName: filename})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return builderToTable(b)
 }

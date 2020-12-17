@@ -19,11 +19,11 @@ package badger
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"sort"
 	"time"
 
-	"github.com/ncw/directio"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
@@ -71,10 +71,6 @@ func revertToManifest(kv *DB, mf *Manifest, idMap map[uint64]struct{}) error {
 			log.Info("table file not referenced in MANIFEST", zap.Uint64("id", id))
 			filename := sstable.NewFilename(id, kv.opt.Dir)
 			os.Remove(filename)
-			if kv.s3client != nil {
-				kv.s3client.Delete(kv.s3client.BlockKey(uint32(id)))
-				kv.s3client.Delete(kv.s3client.IndexKey(uint32(id)))
-			}
 		}
 	}
 
@@ -170,9 +166,7 @@ func newLevelsController(kv *DB, mf *Manifest, mgr *epoch.ResourceManager, opt o
 func newTableFile(filename string, kv *DB) (sstable.TableFile, error) {
 	var reader sstable.TableFile
 	var err error
-	if kv.s3client != nil {
-		reader, err = sstable.NewS3File(filename, kv.blockCache, kv.indexCache, kv.s3client)
-	} else if kv.blockCache != nil {
+	if kv.blockCache != nil {
 		reader, err = sstable.NewLocalFile(filename, kv.blockCache, kv.indexCache)
 	} else {
 		reader, err = sstable.NewMMapFile(filename)
@@ -466,15 +460,13 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 	var builder *sstable.Builder
 	for it.Valid() {
 		var fd *os.File
-		var fileID uint64
 		var filename string
 		if cd.AllocIDFunc != nil {
-			fileID = cd.AllocIDFunc()
-			filename = sstable.NewFilename(fileID, cd.Dir)
+			filename = sstable.NewFilename(cd.AllocIDFunc(), cd.Dir)
 		}
 		if !cd.InMemory {
 			var err error
-			fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+			fd, err = y.OpenSyncedFile(filename, false)
 			if err != nil {
 				return nil, err
 			}
@@ -567,11 +559,7 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 		}
 		result.FileName = filename
 		if s3c != nil {
-			err = s3c.Put(s3c.BlockKey(uint32(fileID)), result.FileData)
-			if err != nil {
-				return nil, err
-			}
-			err = s3c.Put(s3c.IndexKey(uint32(fileID)), result.IndexData)
+			err = putSSTBuildResultToS3(s3c, result)
 			if err != nil {
 				return nil, err
 			}
@@ -580,6 +568,33 @@ func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *Disca
 		buildResults = append(buildResults, result)
 	}
 	return buildResults, nil
+}
+
+func putSSTBuildResultToS3(s3c *s3util.S3Client, result *sstable.BuildResult) (err error) {
+	fileID, _ := sstable.ParseFileID(result.FileName)
+	if len(result.FileData) == 0 {
+		result.FileData, err = ioutil.ReadFile(result.FileName)
+		if err != nil {
+			return
+		}
+		indexFileName := sstable.IndexFilename(result.FileName)
+		if _, err = os.Stat(indexFileName); err == nil {
+			result.IndexData, err = ioutil.ReadFile(indexFileName)
+			if err != nil {
+				return
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	err = s3c.Put(s3c.BlockKey(fileID), result.FileData)
+	if err != nil {
+		return
+	}
+	if len(result.IndexData) > 0 {
+		err = s3c.Put(s3c.IndexKey(fileID), result.IndexData)
+	}
+	return
 }
 
 func (lc *levelsController) openTables(buildResults []*sstable.BuildResult) (newTables []table.Table, err error) {

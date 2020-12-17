@@ -155,7 +155,7 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		oldBlock: []byte{0},
 	}
 	if f != nil {
-		b.w = fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter)
+		b.w = fileutil.NewBufferedWriter(f, opt.WriteBufferSize, limiter)
 	} else {
 		b.w = &inMemWriter{Buffer: bytes.NewBuffer(make([]byte, 0, opt.MaxTableSize))}
 	}
@@ -165,7 +165,7 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 func NewExternalTableBuilder(f *os.File, limiter *rate.Limiter, opt options.TableBuilderOptions) *Builder {
 	return &Builder{
 		file:        f,
-		w:           fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter),
+		w:           fileutil.NewBufferedWriter(f, opt.WriteBufferSize, limiter),
 		buf:         make([]byte, 0, 4*1024),
 		hashEntries: make([]hashEntry, 0, 4*1024),
 		bloomFpr:    opt.LogicalBloomFPR,

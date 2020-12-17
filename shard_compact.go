@@ -1,7 +1,6 @@
 package badger
 
 import (
-	"github.com/ncw/directio"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table"
@@ -104,7 +103,7 @@ func (h *shardL0BuildHelper) setFD(fd *os.File) {
 
 func (h *shardL0BuildHelper) buildOne() (*sstable.BuildResult, error) {
 	filename := sstable.NewFilename(h.db.idAlloc.AllocID(), h.db.opt.Dir)
-	fd, err := directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+	fd, err := y.OpenSyncedFile(filename, false)
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +178,12 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 			}
 			if result == nil {
 				break
+			}
+			if sdb.s3c != nil {
+				err = putSSTBuildResultToS3(sdb.s3c, result)
+				if err != nil {
+					return err
+				}
 			}
 			results = append(results, result)
 		}
@@ -525,7 +530,7 @@ func (sdb *ShardingDB) compactBuildTables(cf int, cd *CompactDef) (newTables []t
 	}
 	stats := &y.CompactionStats{}
 	discardStats := &DiscardStats{}
-	comp := &localCompactor{}
+	comp := &localCompactor{s3c: sdb.s3c}
 	buildResults, err := comp.compact(cd, stats, discardStats)
 	if err != nil {
 		return nil, err

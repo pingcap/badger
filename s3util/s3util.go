@@ -127,10 +127,10 @@ func (c *S3Client) ListFiles() (map[uint64]struct{}, error) {
 	return fileIDs, nil
 }
 
-func (c *S3Client) BlockKey(fid uint32) string {
-	return fmt.Sprintf("bg%08x%08x.sst", c.InstanceID, fid)
+func (c *S3Client) BlockKey(fid uint64) string {
+	return fmt.Sprintf("bg%08x%16x.sst", c.InstanceID, fid)
 }
 
-func (c *S3Client) IndexKey(fid uint32) string {
-	return fmt.Sprintf("bg%08x%08x.idx", c.InstanceID, fid)
+func (c *S3Client) IndexKey(fid uint64) string {
+	return fmt.Sprintf("bg%08x%16x.idx", c.InstanceID, fid)
 }

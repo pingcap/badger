@@ -4,6 +4,7 @@ import (
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
+	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -32,6 +33,13 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 		}
 		filename := fd.Name()
 		fd.Close()
+		if sdb.s3c != nil {
+			err = putSSTBuildResultToS3(sdb.s3c, &sstable.BuildResult{FileName: filename})
+			if err != nil {
+				// TODO: handle this error by queue the failed operation and retry.
+				panic(err)
+			}
+		}
 		l0Table, err := openShardL0Table(filename, task.tbl.ID())
 		if err != nil {
 			panic(err)
@@ -46,7 +54,7 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 	m := task.tbl
 	log.S().Info("flush memtable")
-	writer := fileutil.NewDirectWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
+	writer := fileutil.NewBufferedWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
 	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		it := m.NewIterator(cf, false)

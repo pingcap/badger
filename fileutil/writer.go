@@ -107,6 +107,14 @@ func (l *BufferedWriter) Sync() error {
 	return Fdatasync(l.fd)
 }
 
+func (l *BufferedWriter) Finish() error {
+	err := l.flush()
+	if err != nil {
+		return err
+	}
+	return l.Sync()
+}
+
 func (l *DirectWriter) Finish() error {
 	if l.bufOff == 0 {
 		return nil

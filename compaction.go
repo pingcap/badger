@@ -508,9 +508,6 @@ type localCompactor struct {
 }
 
 func (c *localCompactor) compact(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
-	if c.s3c != nil {
-		cd.InMemory = true
-	}
 	return CompactTables(cd, stats, discardStats, c.s3c)
 }
 

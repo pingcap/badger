@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/dgryski/go-farm"
-	"github.com/ncw/directio"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
@@ -913,7 +912,7 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		var fd *os.File
 		var err error
 		if db.s3client == nil {
-			fd, err = directio.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+			fd, err = y.OpenSyncedFile(filename, false)
 			if err != nil {
 				log.Error("error while writing to level 0", zap.Error(err))
 				return y.Wrap(err)
@@ -936,18 +935,14 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 		}
 		atomic.StoreUint32(&db.syncedFid, ft.off.fid)
 		fd.Close()
-		var tf sstable.TableFile
 		if db.s3client != nil {
-			err = db.s3client.Put(db.s3client.BlockKey(uint32(fileID)), result.FileData)
+			err = putSSTBuildResultToS3(db.s3client, result)
 			if err != nil {
 				return err
 			}
-			err = db.s3client.Put(db.s3client.IndexKey(uint32(fileID)), result.IndexData)
-			if err != nil {
-				return err
-			}
-			tf, _ = sstable.NewS3File(filename, db.blockCache, db.indexCache, db.s3client)
-		} else if db.blockCache != nil {
+		}
+		var tf sstable.TableFile
+		if db.blockCache != nil {
 			tf, err = sstable.NewLocalFile(filename, db.blockCache, db.indexCache)
 			if err != nil {
 				log.Info("error while mmap table", zap.Error(err))

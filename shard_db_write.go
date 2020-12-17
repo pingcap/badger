@@ -2,7 +2,6 @@ package badger
 
 import (
 	"errors"
-	"github.com/ncw/directio"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -178,7 +177,7 @@ func (sdb *ShardingDB) writeSplitting(batch *shardBatch, commitTS uint64) {
 
 func (sdb *ShardingDB) createL0File(fid uint64) (fd *os.File, err error) {
 	filename := sstable.NewFilename(fid, sdb.opt.Dir)
-	return directio.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
+	return y.OpenSyncedFile(filename, false)
 }
 
 func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
