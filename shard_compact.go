@@ -168,6 +168,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 	var changes []*protos.ManifestChange
 	var toBeDelete []epoch.Resource
 	var shardSizeChange int64
+	keysMap := newFileMetaKeysMap()
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		helper := newBuildHelper(sdb, shard, l0Tbls, cf)
 		var results []*sstable.BuildResult
@@ -200,15 +201,18 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		newHandler.totalSize -= helper.oldHandler.totalSize
 		shardSizeChange += newHandler.totalSize - helper.oldHandler.totalSize
 		y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
+		keysMap.addFromTables(newTables)
 		for _, newTbl := range newTables {
 			changes = append(changes, newManifestChange(newTbl.ID(), shard.ID, cf, 1, protos.ManifestChange_CREATE))
 		}
+		keysMap.addFromTables(helper.oldHandler.tables)
 		for _, oldTbl := range helper.oldHandler.tables {
 			changes = append(changes, newManifestChange(oldTbl.ID(), shard.ID, cf, 1, protos.ManifestChange_DELETE))
 			toBeDelete = append(toBeDelete, oldTbl)
 		}
 	}
 	if l0Tbls != nil {
+		keysMap.addFromShardL0Tables(l0Tbls.tables)
 		for _, tbl := range l0Tbls.tables {
 			changes = append(changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
 			toBeDelete = append(toBeDelete, tbl)
@@ -216,7 +220,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		}
 	}
 	shard.addEstimatedSize(shardSizeChange)
-	err := sdb.manifest.addChanges(changes...)
+	err := sdb.manifest.addChanges(keysMap, changes...)
 	if err != nil {
 		return err
 	}
@@ -369,7 +373,9 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 			tbl.MarkCompacting(false)
 		}
 	}()
-
+	keysMap := newFileMetaKeysMap()
+	keysMap.addFromTables(cd.Top)
+	keysMap.addFromTables(cd.Bot)
 	if cd.moveDown() {
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.Top
@@ -382,10 +388,11 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 		if err != nil {
 			return errors.WithStack(err)
 		}
+		keysMap.addFromTables(newTables)
 		changes = buildShardChangeSet(shard.ID, cf, cd, newTables)
 	}
 	// We write to the manifest _before_ we delete files (and after we created files)
-	if err := sdb.manifest.addChanges(changes...); err != nil {
+	if err := sdb.manifest.addChanges(keysMap, changes...); err != nil {
 		return err
 	}
 

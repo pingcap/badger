@@ -95,7 +95,7 @@ func (sdb *ShardingDB) splitShard(task *shardSplitTask, d *deletions) error {
 		ShardID: shard.ID,
 		Op:      protos.ShardChange_DELETE,
 	})
-	err = sdb.manifest.writeChangeSet(change)
+	err = sdb.manifest.writeChangeSet(nil, change, false)
 	if err != nil {
 		return err
 	}

@@ -76,7 +76,9 @@ func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) error {
 	shard := task.shard
 	change := newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
-	err := sdb.manifest.addChanges(change)
+	keysMap := newFileMetaKeysMap()
+	keysMap.addFromShardL0Tables([]*shardL0Table{l0})
+	err := sdb.manifest.addChanges(keysMap, change)
 	if err != nil {
 		if errors.Cause(err) != errShardNotFound {
 			return err
@@ -89,7 +91,7 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 		}
 		shard = sdb.loadShardTree().get(shardStartKey)
 		change = newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
-		err = sdb.manifest.addChanges(change)
+		err = sdb.manifest.addChanges(keysMap, change)
 		if err != nil {
 			return err
 		}

@@ -249,22 +249,14 @@ func TestIngestTree(t *testing.T) {
 	dir2, err := ioutil.TempDir("", "sharding")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir2)
-	for _, id := range ingestTree.L0 {
-		oldName := sstable.NewFilename(id, dir)
-		newName := sstable.NewFilename(id, dir2)
+	for _, fm := range ingestTree.Meta.AddedFiles {
+		oldName := sstable.NewFilename(fm.ID, dir)
+		newName := sstable.NewFilename(fm.ID, dir2)
 		err = os.Link(oldName, newName)
 		require.NoError(t, err)
-	}
-	for _, cf := range ingestTree.CFs {
-		for _, level := range cf.Levels {
-			for _, id := range level.TableIDs {
-				oldName := sstable.NewFilename(id, dir)
-				newName := sstable.NewFilename(id, dir2)
-				err = os.Link(oldName, newName)
-				require.NoError(t, err)
-				err = os.Link(sstable.IndexFilename(oldName), sstable.IndexFilename(newName))
-				require.NoError(t, err)
-			}
+		if fm.Level > 0 {
+			err = os.Link(sstable.IndexFilename(oldName), sstable.IndexFilename(newName))
+			require.NoError(t, err)
 		}
 	}
 	opts2 := getTestOptions(dir2)
@@ -282,6 +274,30 @@ func TestIngestTree(t *testing.T) {
 	require.NoError(t, db2.Ingest(ingestTree))
 	sc2.n = 10000
 	sc2.checkData(db2)
+}
+
+func TestSplitSuggestion(t *testing.T) {
+	dir, err := ioutil.TempDir("", "sharding")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	alloc := new(localIDAllocator)
+	opts := getTestOptions(dir)
+	opts.NumCompactors = 2
+	opts.NumLevelZeroTables = 1
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
+	opts.IDAllocator = alloc
+	db, err := OpenShardingDB(opts)
+	require.NoError(t, err)
+	sc := &shardingCase{
+		t: t,
+		n: 20000,
+	}
+	sc.loadData(db)
+	time.Sleep(time.Second * 2)
+	keys := db.GetSplitSuggestion(opts.MaxMemTableSize)
+	log.S().Infof("split keys %s", keys)
+	require.Greater(t, len(keys), 2)
+	require.NoError(t, db.Close())
 }
 
 func runPprof() {

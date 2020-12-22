@@ -440,7 +440,8 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 			return false
 		})
 	}
-	err = sdb.manifest.writeChangeSet(change)
+	// Don't need to notify meta change listener for manually triggered operation.
+	err = sdb.manifest.writeChangeSet(nil, change, false)
 	if err != nil {
 		return err
 	}
@@ -460,15 +461,8 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 }
 
 type IngestTree struct {
-	Start []byte
-	End   []byte
 	MaxTS uint64
-	L0    []uint64
-	CFs   []*IngestTreeCF
-}
-
-type IngestTreeCF struct {
-	Levels []*IngestTreeCFLevel
+	Meta  *protos.MetaChangeEvent
 }
 
 type IngestTreeCFLevel struct {
@@ -476,7 +470,7 @@ type IngestTreeCFLevel struct {
 }
 
 func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
-	start, end := ingestTree.Start, ingestTree.End
+	start, end := ingestTree.Meta.StartKey, ingestTree.Meta.EndKey
 	if len(end) == 0 {
 		end = globalShardEndKey
 	}
@@ -502,15 +496,12 @@ func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
 	y.Assert(bytes.Equal(shard.End, end))
 	y.Assert(!shard.isSplitting())
 	change, d := sdb.createIngestTreeManifestChange(ingestTree, shard)
-	l0s, err := sdb.openIngestTreeL0Tables(ingestTree)
+	l0s, levelHandlers, err := sdb.createIngestTreeLevelHandlers(ingestTree)
 	if err != nil {
 		return err
 	}
-	levelHandlers, err := sdb.createIngestTreeLevelHandlers(ingestTree)
-	if err != nil {
-		return err
-	}
-	if err = sdb.manifest.writeChangeSet(change); err != nil {
+	// Ingest is manually triggered with meta change, so we don't need to notify meta listener.
+	if err = sdb.manifest.writeChangeSet(nil, change, false); err != nil {
 		return err
 	}
 	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
@@ -548,60 +539,54 @@ func (sdb *ShardingDB) createIngestTreeManifestChange(ingestTree *IngestTree, sh
 		}
 		return false
 	})
-	for _, id := range ingestTree.L0 {
-		change.Changes = append(change.Changes, newManifestChange(id, shard.ID, -1, 0, protos.ManifestChange_CREATE))
-	}
-	for cf, ingestCF := range ingestTree.CFs {
-		for l, level := range ingestCF.Levels {
-			for _, id := range level.TableIDs {
-				change.Changes = append(change.Changes, newManifestChange(id, shard.ID, cf, l+1, protos.ManifestChange_CREATE))
-			}
-		}
+	for _, fm := range ingestTree.Meta.AddedFiles {
+		change.Changes = append(change.Changes, newManifestChange(fm.ID, shard.ID, int(fm.CF), int(fm.Level), protos.ManifestChange_CREATE))
 	}
 	return
 }
 
-func (sdb *ShardingDB) openIngestTreeL0Tables(ingestTree *IngestTree) (*shardL0Tables, error) {
+func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*shardL0Tables, [][]*levelHandler, error) {
 	l0s := &shardL0Tables{}
-	for _, l0ID := range ingestTree.L0 {
-		l0Tbl, err := openShardL0Table(sstable.NewFilename(l0ID, sdb.opt.Dir), l0ID)
-		if err != nil {
-			return nil, err
-		}
-		l0s.tables = append(l0s.tables, l0Tbl)
-	}
-	sort.Slice(l0s.tables, func(i, j int) bool {
-		return l0s.tables[i].fid < l0s.tables[j].fid
-	})
-	return l0s, nil
-}
-
-func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) ([][]*levelHandler, error) {
-	newHandlers := make([][]*levelHandler, len(ingestTree.CFs))
-	for cf, ingestCF := range ingestTree.CFs {
-		for level := 1; level <= shardMaxLevel; level++ {
-			ingestLevel := ingestCF.Levels[level-1]
-			newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level, sdb.metrics)
-			for _, id := range ingestLevel.TableIDs {
-				filename := sstable.NewFilename(id, sdb.opt.Dir)
-				file, err := sstable.NewMMapFile(filename)
-				if err != nil {
-					return nil, err
-				}
-				tbl, err := sstable.OpenTable(filename, file)
-				if err != nil {
-					return nil, err
-				}
-				newHandler.tables = append(newHandler.tables, tbl)
-				newHandler.totalSize += tbl.Size()
-			}
-			sort.Slice(newHandler.tables, func(i, j int) bool {
-				return newHandler.tables[i].Smallest().Compare(newHandler.tables[j].Smallest()) < 0
-			})
+	newHandlers := make([][]*levelHandler, sdb.numCFs)
+	for cf := 0; cf < sdb.numCFs; cf++ {
+		for l := 1; l <= shardMaxLevel; l++ {
+			newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, l, sdb.metrics)
 			newHandlers[cf] = append(newHandlers[cf], newHandler)
 		}
 	}
-	return newHandlers, nil
+	for _, fm := range ingestTree.Meta.AddedFiles {
+		if fm.Level == 0 {
+			l0Tbl, err := openShardL0Table(sstable.NewFilename(fm.ID, sdb.opt.Dir), fm.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			l0s.tables = append(l0s.tables, l0Tbl)
+		} else {
+			handler := newHandlers[fm.CF][fm.Level-1]
+			filename := sstable.NewFilename(fm.ID, sdb.opt.Dir)
+			file, err := sstable.NewMMapFile(filename)
+			if err != nil {
+				return nil, nil, err
+			}
+			tbl, err := sstable.OpenTable(filename, file)
+			if err != nil {
+				return nil, nil, err
+			}
+			handler.tables = append(handler.tables, tbl)
+		}
+	}
+	sort.Slice(l0s.tables, func(i, j int) bool {
+		return l0s.tables[i].fid > l0s.tables[j].fid
+	})
+	for cf := 0; cf < sdb.numCFs; cf++ {
+		for l := 1; l <= shardMaxLevel; l++ {
+			handler := newHandlers[cf][l-1]
+			sort.Slice(handler.tables, func(i, j int) bool {
+				return handler.tables[i].Smallest().Compare(handler.tables[j].Smallest()) < 0
+			})
+		}
+	}
+	return l0s, newHandlers, nil
 }
 
 func (sdb *ShardingDB) GetShardTree(key []byte) *IngestTree {
@@ -612,30 +597,53 @@ func (sdb *ShardingDB) GetShardTree(key []byte) *IngestTree {
 	shard.lock.Lock()
 	defer shard.lock.Unlock()
 	ingestTree := &IngestTree{
-		Start: shard.Start,
-		End:   shard.End,
 		MaxTS: sdb.orc.commitTs(),
-		CFs:   make([]*IngestTreeCF, sdb.numCFs),
+		Meta: &protos.MetaChangeEvent{
+			StartKey: shard.Start,
+			EndKey:   shard.End,
+		},
 	}
 	for _, tbl := range shard.loadL0Tables().tables {
-		ingestTree.L0 = append(ingestTree.L0, tbl.fid)
+		fileMeta := &protos.FileMeta{
+			ID:    tbl.fid,
+			CF:    -1,
+			Level: 0,
+		}
+		for _, tbl := range tbl.cfs {
+			fileMeta.MultiCFSmallest = append(fileMeta.MultiCFSmallest, tbl.Smallest().UserKey)
+			fileMeta.MultiCFBiggest = append(fileMeta.MultiCFBiggest, tbl.Biggest().UserKey)
+		}
+		ingestTree.Meta.AddedFiles = append(ingestTree.Meta.AddedFiles, fileMeta)
 	}
 	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
 		ingestLevel := &IngestTreeCFLevel{
 			TableIDs: make([]uint64, 0, len(level.tables)),
 		}
 		for _, tbl := range level.tables {
+			ingestTree.Meta.AddedFiles = append(ingestTree.Meta.AddedFiles, &protos.FileMeta{
+				ID:       tbl.ID(),
+				CF:       int32(cf),
+				Level:    uint32(level.level),
+				Smallest: tbl.Smallest().UserKey,
+				Biggest:  tbl.Biggest().UserKey,
+			})
 			ingestLevel.TableIDs = append(ingestLevel.TableIDs, tbl.ID())
 		}
-		ingestCF := ingestTree.CFs[cf]
-		if ingestCF == nil {
-			ingestCF = new(IngestTreeCF)
-			ingestTree.CFs[cf] = ingestCF
-		}
-		ingestCF.Levels = append(ingestCF.Levels, ingestLevel)
 		return false
 	})
 	return ingestTree
+}
+
+func (sdb *ShardingDB) GetSplitSuggestion(splitSize int64) [][]byte {
+	tree := sdb.loadShardTree()
+	var keys [][]byte
+	for _, shard := range tree.shards {
+		if atomic.LoadInt64(&shard.estimatedSize) > splitSize {
+			log.S().Infof("shard(%x, %x) size %d", shard.Start, shard.End, shard.estimatedSize)
+			keys = append(keys, shard.getSplitKeys(splitSize)...)
+		}
+	}
+	return keys
 }
 
 func (sdb *ShardingDB) Size() int64 {

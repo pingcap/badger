@@ -18,6 +18,7 @@ package badger
 
 import (
 	"github.com/pingcap/badger/options"
+	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/s3util"
 )
 
@@ -163,22 +164,7 @@ type IDAllocator interface {
 
 // MetaChangeListener is used to notify the engine user that engine meta has changed.
 type MetaChangeListener interface {
-	OnChange(e *MetaChangeEvent)
-}
-
-// MetaChangeEvent is sent to the MetaChangeListener.
-type MetaChangeEvent struct {
-	StartKey     []byte
-	EndKey       []byte
-	RemovedFiles []FileWithCFLevel
-	AddedFiles   []FileWithCFLevel
-}
-
-// FileWithCFLevel is used to associate the fileID with CF and Level.
-type FileWithCFLevel struct {
-	ID    uint64
-	CF    int32
-	Level uint32
+	OnChange(e *protos.MetaChangeEvent)
 }
 
 // DefaultOptions sets a list of recommended options for good performance.

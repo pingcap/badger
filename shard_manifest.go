@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -200,12 +201,12 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 	return nil
 }
 
-func (m *ShardingManifest) addChanges(changes ...*protos.ManifestChange) error {
+func (m *ShardingManifest) addChanges(keysMap *fileMetaKeysMap, changes ...*protos.ManifestChange) error {
 	changeSet := &protos.ManifestChangeSet{Changes: changes}
-	return m.writeChangeSet(changeSet)
+	return m.writeChangeSet(keysMap, changeSet, true)
 }
 
-func (m *ShardingManifest) writeChangeSet(changeSet *protos.ManifestChangeSet) error {
+func (m *ShardingManifest) writeChangeSet(keysMap *fileMetaKeysMap, changeSet *protos.ManifestChangeSet, notifyMetaListener bool) error {
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
@@ -214,15 +215,15 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ManifestChangeSet) e
 	if err != nil {
 		return err
 	}
-	var metaChanges map[uint64]*MetaChangeEvent
-	if m.metaListener != nil {
+	var metaChanges map[uint64]*protos.MetaChangeEvent
+	if m.metaListener != nil && notifyMetaListener {
 		// We create MetaChangeEvent before apply in case a shard is deleted.
-		metaChanges = m.createMetaChangeEvents(changeSet)
+		metaChanges = m.createMetaChangeEvents(keysMap, changeSet)
 	}
 	if err = m.ApplyChangeSet(changeSet); err != nil {
 		return err
 	}
-	if m.metaListener != nil {
+	if m.metaListener != nil && notifyMetaListener {
 		for _, e := range metaChanges {
 			m.metaListener.OnChange(e)
 		}
@@ -245,30 +246,69 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ManifestChangeSet) e
 	return m.fd.Sync()
 }
 
-func (m *ShardingManifest) createMetaChangeEvents(changeSet *protos.ManifestChangeSet) map[uint64]*MetaChangeEvent {
-	metaChanges := map[uint64]*MetaChangeEvent{}
+type fileMetaKeysMap struct {
+	m map[uint64]*fileMetaKeys
+}
+
+func newFileMetaKeysMap() *fileMetaKeysMap {
+	return &fileMetaKeysMap{m: map[uint64]*fileMetaKeys{}}
+}
+
+func (m *fileMetaKeysMap) addFromTables(tbls []table.Table) {
+	for _, t := range tbls {
+		m.m[t.ID()] = &fileMetaKeys{smallest: t.Smallest().UserKey, biggest: t.Biggest().UserKey}
+	}
+}
+
+func (m *fileMetaKeysMap) addFromShardL0Tables(tbls []*shardL0Table) {
+	for _, t := range tbls {
+		metaKeys := &fileMetaKeys{}
+		for _, cfTbl := range t.cfs {
+			if cfTbl == nil {
+				metaKeys.multiCFSmallest = append(metaKeys.multiCFSmallest, nil)
+				metaKeys.multiCFBiggest = append(metaKeys.multiCFBiggest, nil)
+			} else {
+				metaKeys.multiCFSmallest = append(metaKeys.multiCFSmallest, cfTbl.Smallest().UserKey)
+				metaKeys.multiCFBiggest = append(metaKeys.multiCFBiggest, cfTbl.Biggest().UserKey)
+			}
+		}
+		m.m[t.fid] = metaKeys
+	}
+}
+
+type fileMetaKeys struct {
+	smallest        []byte
+	biggest         []byte
+	multiCFSmallest [][]byte
+	multiCFBiggest  [][]byte
+}
+
+func (m *ShardingManifest) createMetaChangeEvents(keysMap *fileMetaKeysMap, changeSet *protos.ManifestChangeSet) map[uint64]*protos.MetaChangeEvent {
+	metaChanges := map[uint64]*protos.MetaChangeEvent{}
 	for _, change := range changeSet.Changes {
 		e := metaChanges[change.ShardID]
 		if e == nil {
 			shardInfo := m.shards[change.ShardID]
-			e = &MetaChangeEvent{
+			e = &protos.MetaChangeEvent{
 				StartKey: shardInfo.Start,
 				EndKey:   shardInfo.End,
 			}
 			metaChanges[change.ShardID] = e
 		}
+		fileKeys := keysMap.m[change.Id]
+		fileMeta := &protos.FileMeta{
+			ID:              change.Id,
+			CF:              change.CF,
+			Level:           change.Level,
+			Smallest:        fileKeys.smallest,
+			Biggest:         fileKeys.biggest,
+			MultiCFSmallest: fileKeys.multiCFSmallest,
+			MultiCFBiggest:  fileKeys.multiCFBiggest,
+		}
 		if change.Op == protos.ManifestChange_CREATE {
-			e.AddedFiles = append(e.AddedFiles, FileWithCFLevel{
-				ID:    change.Id,
-				CF:    change.CF,
-				Level: change.Level,
-			})
+			e.AddedFiles = append(e.AddedFiles, fileMeta)
 		} else if change.Op == protos.ManifestChange_DELETE {
-			e.RemovedFiles = append(e.AddedFiles, FileWithCFLevel{
-				ID:    change.Id,
-				CF:    change.CF,
-				Level: change.Level,
-			})
+			e.RemovedFiles = append(e.RemovedFiles, fileMeta)
 		} else {
 			panic("unexpected op " + change.Op.String())
 		}

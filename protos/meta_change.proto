@@ -1,0 +1,21 @@
+// Use protos/gen.sh to generate .pb.go files.
+syntax = "proto3";
+
+package protos;
+
+message MetaChangeEvent {
+  bytes startKey = 1;
+  bytes endKey = 2;
+  repeated FileMeta addedFiles = 3;
+  repeated FileMeta removedFiles = 4;
+}
+
+message FileMeta {
+  uint64 ID = 1;
+  int32 CF = 2;
+  uint32 level = 3;
+  bytes smallest = 4;
+  bytes biggest = 5;
+  repeated bytes multiCFSmallest = 6;
+  repeated bytes multiCFBiggest = 7;
+}

@@ -10,7 +10,7 @@ require (
 	github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2
 	github.com/dgryski/go-farm v0.0.0-20190423205320-6a90982ecee2
 	github.com/dustin/go-humanize v1.0.0
-	github.com/gogo/protobuf v1.2.1 // indirect
+	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/golang/protobuf v1.3.1
 	github.com/klauspost/cpuid v1.2.1
 	github.com/kr/pretty v0.1.0 // indirect
