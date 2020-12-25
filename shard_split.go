@@ -168,13 +168,13 @@ func (sdb *ShardingDB) splitShardL0Table(task *shardSplitTask, l0 *shardL0Table)
 	}
 	var newL0s []*shardL0Table
 	for _, key := range task.keys {
-		newL0, err := sdb.buildShardL0BeforeKey(iters, key, task)
+		newL0, err := sdb.buildShardL0BeforeKey(iters, key, task, l0.commitTS)
 		if err != nil {
 			return nil, err
 		}
 		newL0s = append(newL0s, newL0)
 	}
-	lastL0, err := sdb.buildShardL0BeforeKey(iters, globalShardEndKey, task)
+	lastL0, err := sdb.buildShardL0BeforeKey(iters, globalShardEndKey, task, l0.commitTS)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +182,8 @@ func (sdb *ShardingDB) splitShardL0Table(task *shardSplitTask, l0 *shardL0Table)
 	return newL0s, nil
 }
 
-func (sdb *ShardingDB) buildShardL0BeforeKey(iters []y.Iterator, key []byte, task *shardSplitTask) (*shardL0Table, error) {
-	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
+func (sdb *ShardingDB) buildShardL0BeforeKey(iters []y.Iterator, key []byte, task *shardSplitTask, commitTS uint64) (*shardL0Table, error) {
+	builder := newShardL0Builder(sdb.numCFs, commitTS, sdb.opt.TableBuilderOptions)
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		iter := iters[cf]
 		if iter == nil {

@@ -6,8 +6,17 @@ package protos;
 message MetaChangeEvent {
   bytes startKey = 1;
   bytes endKey = 2;
-  repeated FileMeta addedFiles = 3;
-  repeated FileMeta removedFiles = 4;
+  repeated L0FileMeta addedL0Files = 3;
+  repeated uint64 removedL0Files = 4;
+  repeated FileMeta addedFiles = 5;
+  repeated FileMeta removedFiles = 6;
+}
+
+message L0FileMeta {
+  uint64 ID = 1;
+  uint64 CommitTS = 2;
+  repeated bytes multiCFSmallest = 3;
+  repeated bytes multiCFBiggest = 4;
 }
 
 message FileMeta {
@@ -16,6 +25,4 @@ message FileMeta {
   uint32 level = 3;
   bytes smallest = 4;
   bytes biggest = 5;
-  repeated bytes multiCFSmallest = 6;
-  repeated bytes multiCFBiggest = 7;
 }

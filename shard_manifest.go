@@ -201,12 +201,12 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 	return nil
 }
 
-func (m *ShardingManifest) addChanges(keysMap *fileMetaKeysMap, changes ...*protos.ManifestChange) error {
+func (m *ShardingManifest) addChanges(keysMap *fileMetaPropertiesMap, changes ...*protos.ManifestChange) error {
 	changeSet := &protos.ManifestChangeSet{Changes: changes}
 	return m.writeChangeSet(keysMap, changeSet, true)
 }
 
-func (m *ShardingManifest) writeChangeSet(keysMap *fileMetaKeysMap, changeSet *protos.ManifestChangeSet, notifyMetaListener bool) error {
+func (m *ShardingManifest) writeChangeSet(keysMap *fileMetaPropertiesMap, changeSet *protos.ManifestChangeSet, notifyMetaListener bool) error {
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
@@ -246,23 +246,25 @@ func (m *ShardingManifest) writeChangeSet(keysMap *fileMetaKeysMap, changeSet *p
 	return m.fd.Sync()
 }
 
-type fileMetaKeysMap struct {
-	m map[uint64]*fileMetaKeys
+type fileMetaPropertiesMap struct {
+	m map[uint64]*fileMetaProperties
 }
 
-func newFileMetaKeysMap() *fileMetaKeysMap {
-	return &fileMetaKeysMap{m: map[uint64]*fileMetaKeys{}}
+func newFileMetaKeysMap() *fileMetaPropertiesMap {
+	return &fileMetaPropertiesMap{m: map[uint64]*fileMetaProperties{}}
 }
 
-func (m *fileMetaKeysMap) addFromTables(tbls []table.Table) {
+func (m *fileMetaPropertiesMap) addFromTables(tbls []table.Table) {
 	for _, t := range tbls {
-		m.m[t.ID()] = &fileMetaKeys{smallest: t.Smallest().UserKey, biggest: t.Biggest().UserKey}
+		m.m[t.ID()] = &fileMetaProperties{smallest: t.Smallest().UserKey, biggest: t.Biggest().UserKey}
 	}
 }
 
-func (m *fileMetaKeysMap) addFromShardL0Tables(tbls []*shardL0Table) {
+func (m *fileMetaPropertiesMap) addFromShardL0Tables(tbls []*shardL0Table) {
 	for _, t := range tbls {
-		metaKeys := &fileMetaKeys{}
+		metaKeys := &fileMetaProperties{
+			commitTS: t.commitTS,
+		}
 		for _, cfTbl := range t.cfs {
 			if cfTbl == nil {
 				metaKeys.multiCFSmallest = append(metaKeys.multiCFSmallest, nil)
@@ -276,14 +278,15 @@ func (m *fileMetaKeysMap) addFromShardL0Tables(tbls []*shardL0Table) {
 	}
 }
 
-type fileMetaKeys struct {
+type fileMetaProperties struct {
 	smallest        []byte
 	biggest         []byte
 	multiCFSmallest [][]byte
 	multiCFBiggest  [][]byte
+	commitTS        uint64
 }
 
-func (m *ShardingManifest) createMetaChangeEvents(keysMap *fileMetaKeysMap, changeSet *protos.ManifestChangeSet) map[uint64]*protos.MetaChangeEvent {
+func (m *ShardingManifest) createMetaChangeEvents(propsMap *fileMetaPropertiesMap, changeSet *protos.ManifestChangeSet) map[uint64]*protos.MetaChangeEvent {
 	metaChanges := map[uint64]*protos.MetaChangeEvent{}
 	for _, change := range changeSet.Changes {
 		e := metaChanges[change.ShardID]
@@ -295,22 +298,35 @@ func (m *ShardingManifest) createMetaChangeEvents(keysMap *fileMetaKeysMap, chan
 			}
 			metaChanges[change.ShardID] = e
 		}
-		fileKeys := keysMap.m[change.Id]
-		fileMeta := &protos.FileMeta{
-			ID:              change.Id,
-			CF:              change.CF,
-			Level:           change.Level,
-			Smallest:        fileKeys.smallest,
-			Biggest:         fileKeys.biggest,
-			MultiCFSmallest: fileKeys.multiCFSmallest,
-			MultiCFBiggest:  fileKeys.multiCFBiggest,
-		}
-		if change.Op == protos.ManifestChange_CREATE {
-			e.AddedFiles = append(e.AddedFiles, fileMeta)
-		} else if change.Op == protos.ManifestChange_DELETE {
-			e.RemovedFiles = append(e.RemovedFiles, fileMeta)
+		fileKeys := propsMap.m[change.Id]
+		if change.Level == 0 {
+			if change.Op == protos.ManifestChange_CREATE {
+				e.AddedL0Files = append(e.AddedL0Files, &protos.L0FileMeta{
+					ID:              0,
+					CommitTS:        fileKeys.commitTS,
+					MultiCFSmallest: fileKeys.multiCFSmallest,
+					MultiCFBiggest:  fileKeys.multiCFBiggest,
+				})
+			} else if change.Op == protos.ManifestChange_DELETE {
+				e.RemovedL0Files = append(e.RemovedL0Files, change.Id)
+			} else {
+				panic("unexpected op " + change.Op.String())
+			}
 		} else {
-			panic("unexpected op " + change.Op.String())
+			fileMeta := &protos.FileMeta{
+				ID:       change.Id,
+				CF:       change.CF,
+				Level:    change.Level,
+				Smallest: fileKeys.smallest,
+				Biggest:  fileKeys.biggest,
+			}
+			if change.Op == protos.ManifestChange_CREATE {
+				e.AddedFiles = append(e.AddedFiles, fileMeta)
+			} else if change.Op == protos.ManifestChange_DELETE {
+				e.RemovedFiles = append(e.RemovedFiles, fileMeta)
+			} else {
+				panic("unexpected op " + change.Op.String())
+			}
 		}
 	}
 	return metaChanges

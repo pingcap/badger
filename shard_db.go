@@ -164,8 +164,9 @@ func (sdb *ShardingDB) Close() error {
 			continue
 		}
 		task := &shardFlushTask{
-			shard: shard,
-			tbl:   writableMemTbl,
+			shard:    shard,
+			tbl:      writableMemTbl,
+			commitTS: sdb.orc.readTs(),
 		}
 		sdb.flushCh <- task
 	}
@@ -604,21 +605,17 @@ func (sdb *ShardingDB) GetShardTree(key []byte) *IngestTree {
 		},
 	}
 	for _, tbl := range shard.loadL0Tables().tables {
-		fileMeta := &protos.FileMeta{
-			ID:    tbl.fid,
-			CF:    -1,
-			Level: 0,
+		l0Meta := &protos.L0FileMeta{
+			ID:       tbl.fid,
+			CommitTS: tbl.commitTS,
 		}
 		for _, tbl := range tbl.cfs {
-			fileMeta.MultiCFSmallest = append(fileMeta.MultiCFSmallest, tbl.Smallest().UserKey)
-			fileMeta.MultiCFBiggest = append(fileMeta.MultiCFBiggest, tbl.Biggest().UserKey)
+			l0Meta.MultiCFSmallest = append(l0Meta.MultiCFSmallest, tbl.Smallest().UserKey)
+			l0Meta.MultiCFBiggest = append(l0Meta.MultiCFBiggest, tbl.Biggest().UserKey)
 		}
-		ingestTree.Meta.AddedFiles = append(ingestTree.Meta.AddedFiles, fileMeta)
+		ingestTree.Meta.AddedL0Files = append(ingestTree.Meta.AddedL0Files, l0Meta)
 	}
 	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
-		ingestLevel := &IngestTreeCFLevel{
-			TableIDs: make([]uint64, 0, len(level.tables)),
-		}
 		for _, tbl := range level.tables {
 			ingestTree.Meta.AddedFiles = append(ingestTree.Meta.AddedFiles, &protos.FileMeta{
 				ID:       tbl.ID(),
@@ -627,7 +624,6 @@ func (sdb *ShardingDB) GetShardTree(key []byte) *IngestTree {
 				Smallest: tbl.Smallest().UserKey,
 				Biggest:  tbl.Biggest().UserKey,
 			})
-			ingestLevel.TableIDs = append(ingestLevel.TableIDs, tbl.ID())
 		}
 		return false
 	})

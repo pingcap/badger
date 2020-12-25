@@ -498,7 +498,7 @@ func u32ToBytes(v uint32) []byte {
 	return uBuf[:]
 }
 
-func u64ToBytes(v uint64) []byte {
+func U64ToBytes(v uint64) []byte {
 	var uBuf [8]byte
 	binary.LittleEndian.PutUint64(uBuf[:], v)
 	return uBuf[:]
@@ -541,7 +541,7 @@ type metaEncoder struct {
 }
 
 func newMetaEncoder(buf []byte, globalTS uint64) *metaEncoder {
-	buf = append(buf, u64ToBytes(globalTS)...)
+	buf = append(buf, U64ToBytes(globalTS)...)
 	return &metaEncoder{
 		buf: buf,
 	}

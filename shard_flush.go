@@ -16,6 +16,7 @@ import (
 type shardFlushTask struct {
 	shard        *Shard
 	tbl          *memtable.CFTable
+	commitTS     uint64
 	splittingIdx int
 	splitting    bool
 }
@@ -55,7 +56,7 @@ func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 	m := task.tbl
 	log.S().Info("flush memtable")
 	writer := fileutil.NewBufferedWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
-	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
+	builder := newShardL0Builder(sdb.numCFs, task.commitTS, sdb.opt.TableBuilderOptions)
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		it := m.NewIterator(cf, false)
 		if it == nil {

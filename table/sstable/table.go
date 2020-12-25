@@ -311,7 +311,7 @@ func (t *Table) SetGlobalTs(ts uint64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := idxFd.WriteAt(u64ToBytes(ts), 0); err != nil {
+	if _, err := idxFd.WriteAt(U64ToBytes(ts), 0); err != nil {
 		return err
 	}
 	if err := fileutil.Fsync(idxFd); err != nil {

@@ -17,6 +17,7 @@ type shardL0Table struct {
 	fid      uint64
 	filename string
 	size     int64
+	commitTS uint64
 }
 
 func (st *shardL0Table) Delete() error {
@@ -33,6 +34,8 @@ func openShardL0Table(filename string, fid uint64) (*shardL0Table, error) {
 		filename: filename,
 		size:     int64(len(shardData)),
 	}
+	l0.commitTS = binary.LittleEndian.Uint64(shardData[len(shardData)-8:])
+	shardData = shardData[:len(shardData)-8]
 	numCF := int(shardData[len(shardData)-1])
 	shardData = shardData[:len(shardData)-1]
 	l0.cfs = make([]*sstable.Table, 0, numCF)
@@ -95,11 +98,13 @@ func (sl0s *shardL0Tables) totalSize() int64 {
 
 type shardL0Builder struct {
 	builders []*sstable.Builder
+	commitTS uint64
 }
 
-func newShardL0Builder(numCFs int, opt options.TableBuilderOptions) *shardL0Builder {
+func newShardL0Builder(numCFs int, commitTS uint64, opt options.TableBuilderOptions) *shardL0Builder {
 	sdb := &shardL0Builder{
 		builders: make([]*sstable.Builder, numCFs),
+		commitTS: commitTS,
 	}
 	for i := 0; i < numCFs; i++ {
 		sdb.builders[i] = sstable.NewTableBuilder(nil, nil, 0, opt)
@@ -113,7 +118,7 @@ func (e *shardL0Builder) Add(cf int, key y.Key, value y.ValueStruct) {
 
 /*
 shard Data format:
- | CF0 Data | CF0 index | CF1 Data | CF1 index | cfs index
+ | CF0 Data | CF0 index | CF1 Data | CF1 index | cfs index | numCF | commitTS
 */
 func (e *shardL0Builder) Finish() []byte {
 	cfDatas := make([][]byte, 0, len(e.builders)*2)
@@ -128,12 +133,13 @@ func (e *shardL0Builder) Finish() []byte {
 		fileSize += len(result.IndexData)
 		binary.LittleEndian.PutUint32(cfsIndex[i*8+4:], uint32(fileSize))
 	}
-	result := make([]byte, 0, fileSize+len(cfsIndex)+1)
+	result := make([]byte, 0, fileSize+len(cfsIndex)+1+8)
 	result = append(result)
 	for _, cfData := range cfDatas {
 		result = append(result, cfData...)
 	}
 	result = append(result, cfsIndex...)
 	result = append(result, byte(len(e.builders))) // number of CF
+	result = append(result, sstable.U64ToBytes(e.commitTS)...)
 	return result
 }
