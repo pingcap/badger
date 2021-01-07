@@ -41,6 +41,9 @@ func (sdb *ShardingDB) buildSplitTask(keys [][]byte) *splitTask {
 	tree := sdb.loadShardTree()
 	shardTasks := map[uint64]*shardSplitTask{}
 	for _, key := range keys {
+		if bytes.Equal(key, globalShardEndKey) {
+			continue
+		}
 		shard := tree.get(key)
 		if bytes.Equal(shard.Start, key) {
 			continue
@@ -75,7 +78,7 @@ func (sdb *ShardingDB) splitShard(task *shardSplitTask, d *deletions) error {
 		return err
 	}
 	for cf := 0; cf < sdb.numCFs; cf++ {
-		for lvl := 1; lvl <= shardMaxLevel; lvl++ {
+		for lvl := 1; lvl <= ShardMaxLevel; lvl++ {
 			if err := sdb.splitTables(shard, cf, lvl, keys, d, change); err != nil {
 				return err
 			}
@@ -329,7 +332,7 @@ func (sdb *ShardingDB) finishSplit(s *Shard, splitKeys [][]byte) []*Shard {
 	}
 
 	for cf, scf := range s.cfs {
-		for l := 1; l <= shardMaxLevel; l++ {
+		for l := 1; l <= ShardMaxLevel; l++ {
 			level := scf.getLevelHandler(l)
 			for _, t := range level.tables {
 				sdb.insertTableToNewShard(t, cf, level.level, newShards)

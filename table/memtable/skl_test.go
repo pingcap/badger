@@ -502,6 +502,17 @@ func TestIterateMultiVersion(t *testing.T) {
 	}
 }
 
+func TestDeleteKey(t *testing.T) {
+	skl := newSkiplist(arenaSize)
+	for i := 0; i < 1000; i++ {
+		skl.Put(newKey(i), y.ValueStruct{Value: newKey(i)})
+	}
+	for i := 0; i < 1000; i++ {
+		r := rand.Intn(1000)
+		skl.DeleteKey(newKey(r))
+	}
+}
+
 func randomKey() []byte {
 	b := make([]byte, 8)
 	key := rand.Uint32()

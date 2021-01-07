@@ -548,11 +548,6 @@ func (s *skiplist) DeleteKey(key []byte) bool {
 			h.prev[i], h.next[i], match = s.findSpliceForLevel(key, h.prev[i+1], int(i))
 			if match {
 				n = h.next[i]
-				for j := i; j >= 0; j-- {
-					h.prev[j] = h.prev[i]
-					h.next[j] = s.getNext(n, int(j))
-				}
-				break
 			}
 		}
 	} else {

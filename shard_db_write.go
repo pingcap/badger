@@ -81,7 +81,7 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint
 	if newTableSize < minSize {
 		newTableSize = minSize
 	}
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.idAlloc.AllocID())
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
 	for {
 		oldMemTbls := shard.loadMemTables()
 		newMemTbls := &shardingMemTables{}
@@ -106,7 +106,7 @@ func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize in
 	if newTableSize < minSize {
 		newTableSize = minSize
 	}
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs, sdb.idAlloc.AllocID())
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
 	for {
 		oldMemTbls := shard.loadSplittingMemTables(idx)
 		newMemTbls := &shardingMemTables{}

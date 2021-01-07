@@ -5,16 +5,14 @@ import (
 )
 
 type CFTable struct {
-	id    uint64
 	skls  []*skiplist
 	arena *arena
 }
 
-func NewCFTable(arenaSize int64, numCFs int, id uint64) *CFTable {
+func NewCFTable(arenaSize int64, numCFs int) *CFTable {
 	t := &CFTable{
 		skls:  make([]*skiplist, numCFs),
 		arena: newArena(arenaSize),
-		id:    id,
 	}
 	for i := 0; i < numCFs; i++ {
 		head := newNode(t.arena, nil, y.ValueStruct{}, maxHeight)
@@ -65,8 +63,4 @@ func (cft *CFTable) Empty() bool {
 		}
 	}
 	return true
-}
-
-func (cft *CFTable) ID() uint64 {
-	return cft.id
 }

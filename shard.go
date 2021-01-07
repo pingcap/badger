@@ -13,7 +13,7 @@ import (
 	"unsafe"
 )
 
-const shardMaxLevel = 4
+const ShardMaxLevel = 4
 
 func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet) (*shardTree, error) {
 	tree := &shardTree{
@@ -58,7 +58,7 @@ func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet
 		})
 		for cf := 0; cf < len(opt.CFs); cf++ {
 			scf := shard.cfs[cf]
-			for level := 1; level <= shardMaxLevel; level++ {
+			for level := 1; level <= ShardMaxLevel; level++ {
 				handler := scf.getLevelHandler(level)
 				sortTables(handler.tables)
 			}
@@ -164,9 +164,9 @@ func newShard(id uint64, start, end []byte, opt Options, metrics *y.MetricsSet) 
 	atomic.StorePointer(shard.l0s, unsafe.Pointer(&shardingMemTables{}))
 	for i := 0; i < len(opt.CFs); i++ {
 		sCF := &shardCF{
-			levels: make([]unsafe.Pointer, shardMaxLevel),
+			levels: make([]unsafe.Pointer, ShardMaxLevel),
 		}
-		for j := 1; j <= shardMaxLevel; j++ {
+		for j := 1; j <= ShardMaxLevel; j++ {
 			sCF.casLevelHandler(j, nil, newLevelHandler(opt.NumLevelZeroTablesStall, j, metrics))
 		}
 		shard.cfs[i] = sCF
@@ -234,7 +234,7 @@ func (s *Shard) setSplitDone() {
 
 func (s *Shard) foreachLevel(f func(cf int, level *levelHandler) (stop bool)) {
 	for cf, scf := range s.cfs {
-		for i := 1; i <= shardMaxLevel; i++ {
+		for i := 1; i <= ShardMaxLevel; i++ {
 			l := scf.getLevelHandler(i)
 			if stop := f(cf, l); stop {
 				return
@@ -277,7 +277,7 @@ func (s *Shard) Get(cf int, key y.Key) y.ValueStruct {
 		}
 	}
 	scf := s.cfs[cf]
-	for i := 1; i <= shardMaxLevel; i++ {
+	for i := 1; i <= ShardMaxLevel; i++ {
 		level := scf.getLevelHandler(i)
 		if len(level.tables) == 0 {
 			continue

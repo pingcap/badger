@@ -22,6 +22,7 @@ type Options struct {
 	KeyID      string
 	SecretKey  string
 	Bucket     string
+	Region     string
 }
 
 type S3Client struct {
@@ -49,7 +50,13 @@ func NewS3Client(opts Options) *S3Client {
 	}
 	client := &http.Client{Transport: tr}
 	cred := credentials.NewStaticCredentials(opts.KeyID, opts.SecretKey, "")
-	sess := session.Must(session.NewSession(aws.NewConfig().WithEndpoint(opts.EndPoint).WithDisableSSL(true).WithS3ForcePathStyle(true).WithCredentials(cred).WithHTTPClient(client)))
+	sess := session.Must(session.NewSession(aws.NewConfig().
+		WithEndpoint(opts.EndPoint).
+		WithDisableSSL(true).
+		WithS3ForcePathStyle(true).
+		WithCredentials(cred).
+		WithHTTPClient(client).
+		WithRegion(opts.Region)))
 	s3c.cli = s3.New(sess)
 	return s3c
 }
@@ -79,6 +86,29 @@ func (c *S3Client) Get(key string, offset, length int64) ([]byte, error) {
 	y.NumBytesReadS3.Add(float64(len(result)))
 	y.NumGetsS3.Inc()
 	return result, nil
+}
+
+func (c *S3Client) GetToFile(key string, filePath string) error {
+	fd, err := y.OpenTruncFile(filePath, false)
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+	input := &s3.GetObjectInput{}
+	input.Bucket = &c.Bucket
+	input.Key = &key
+	out, err := c.cli.GetObject(input)
+	if err != nil {
+		return err
+	}
+	defer out.Body.Close()
+	written, err := io.Copy(fd, out.Body)
+	if err != nil {
+		return err
+	}
+	y.NumBytesReadS3.Add(float64(written))
+	y.NumGetsS3.Inc()
+	return nil
 }
 
 func (c *S3Client) Put(key string, data []byte) error {
@@ -128,9 +158,9 @@ func (c *S3Client) ListFiles() (map[uint64]struct{}, error) {
 }
 
 func (c *S3Client) BlockKey(fid uint64) string {
-	return fmt.Sprintf("bg%08x%16x.sst", c.InstanceID, fid)
+	return fmt.Sprintf("bg%08x%016x.sst", c.InstanceID, fid)
 }
 
 func (c *S3Client) IndexKey(fid uint64) string {
-	return fmt.Sprintf("bg%08x%16x.idx", c.InstanceID, fid)
+	return fmt.Sprintf("bg%08x%016x.idx", c.InstanceID, fid)
 }

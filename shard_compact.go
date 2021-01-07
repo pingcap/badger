@@ -282,7 +282,7 @@ func (sdb *ShardingDB) getCompactionPriority(shard *Shard) CompactionPriority {
 		return maxPri
 	}
 	for i, scf := range shard.cfs {
-		for level := 1; level <= shardMaxLevel; level++ {
+		for level := 1; level <= ShardMaxLevel; level++ {
 			h := scf.getLevelHandler(level)
 			score := float64(h.getTotalSize()) / (float64(sdb.opt.LevelOneSize) * math.Pow(10, float64(level-1)))
 			if score > maxPri.Score {

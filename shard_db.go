@@ -131,7 +131,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	if opt.S3Options.EndPoint != "" {
 		db.s3c = s3util.NewS3Client(opt.S3Options)
 	}
-	memTbls.tables = append(memTbls.tables, memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs), db.idAlloc.AllocID()))
+	memTbls.tables = append(memTbls.tables, memtable.NewCFTable(opt.MaxMemTableSize, len(opt.CFs)))
 	db.closers.resourceManager = y.NewCloser(0)
 	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
 	db.closers.memtable = y.NewCloser(1)
@@ -204,7 +204,7 @@ func (sdb *ShardingDB) PrintStructure() {
 		log.S().Infof("shard %d l0 tables %v", shard.ID, l0IDs)
 		for cf, scf := range shard.cfs {
 			var tableIDs [][]uint64
-			for l := 1; l <= shardMaxLevel; l++ {
+			for l := 1; l <= ShardMaxLevel; l++ {
 				tableIDs = append(tableIDs, getTblIDs(scf.getLevelHandler(l).tables))
 			}
 			log.S().Infof("shard %d cf %d tables %v", shard.ID, cf, tableIDs)
@@ -324,14 +324,22 @@ type Snapshot struct {
 	endKey   []byte
 
 	managedReadTS uint64
+
+	buffer *memtable.CFTable
 }
 
 func (s *Snapshot) Get(cf int, key y.Key) (*Item, error) {
 	if key.Version == 0 {
 		key.Version = s.getDefaultVersion(cf)
 	}
-	shard := getShard(s.shards, key.UserKey)
-	vs := shard.Get(cf, key)
+	var vs y.ValueStruct
+	if s.buffer != nil {
+		vs = s.buffer.Get(cf, key.UserKey, key.Version)
+	}
+	if !vs.Valid() {
+		shard := getShard(s.shards, key.UserKey)
+		vs = shard.Get(cf, key)
+	}
 	if !vs.Valid() {
 		return nil, ErrKeyNotFound
 	}
@@ -375,6 +383,14 @@ func (s *Snapshot) Discard() {
 
 func (s *Snapshot) SetManagedReadTS(ts uint64) {
 	s.managedReadTS = ts
+}
+
+func (s *Snapshot) GetReadTS() uint64 {
+	return s.readTS
+}
+
+func (s *Snapshot) SetBuffer(buf *memtable.CFTable) {
+	s.buffer = buf
 }
 
 func (sdb *ShardingDB) NewSnapshot(startKey, endKey []byte) *Snapshot {
@@ -461,61 +477,6 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 	return nil
 }
 
-type IngestTree struct {
-	MaxTS uint64
-	Meta  *protos.MetaChangeEvent
-}
-
-type IngestTreeCFLevel struct {
-	TableIDs []uint64
-}
-
-func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
-	start, end := ingestTree.Meta.StartKey, ingestTree.Meta.EndKey
-	if len(end) == 0 {
-		end = globalShardEndKey
-	}
-	sdb.orc.Lock()
-	if sdb.orc.nextCommit < ingestTree.MaxTS {
-		sdb.orc.nextCommit = ingestTree.MaxTS
-	}
-	sdb.orc.Unlock()
-	defer sdb.orc.doneCommit(ingestTree.MaxTS)
-	if err := sdb.Split([][]byte{start, end}); err != nil {
-		return err
-	}
-	// TODO: support merge multiple shards. now assert single shard.
-	guard := sdb.resourceMgr.Acquire()
-	defer guard.Done()
-	tree := sdb.loadShardTree()
-	shards := tree.getShards(start, end)
-	y.Assert(len(shards) == 1)
-	shard := shards[0]
-	shard.lock.Lock()
-	defer shard.lock.Unlock()
-	y.Assert(bytes.Equal(shard.Start, start))
-	y.Assert(bytes.Equal(shard.End, end))
-	y.Assert(!shard.isSplitting())
-	change, d := sdb.createIngestTreeManifestChange(ingestTree, shard)
-	l0s, levelHandlers, err := sdb.createIngestTreeLevelHandlers(ingestTree)
-	if err != nil {
-		return err
-	}
-	// Ingest is manually triggered with meta change, so we don't need to notify meta listener.
-	if err = sdb.manifest.writeChangeSet(nil, change, false); err != nil {
-		return err
-	}
-	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
-	atomic.StorePointer(shard.l0s, unsafe.Pointer(l0s))
-	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
-		scf := shard.cfs[cf]
-		y.Assert(scf.casLevelHandler(level.level, level, levelHandlers[cf][level.level-1]))
-		return false
-	})
-	guard.Delete(d.resources)
-	return nil
-}
-
 func (sdb *ShardingDB) createIngestTreeManifestChange(ingestTree *IngestTree, shard *Shard) (change *protos.ManifestChangeSet, d *deletions) {
 	d = new(deletions)
 	change = &protos.ManifestChangeSet{}
@@ -550,7 +511,7 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 	l0s := &shardL0Tables{}
 	newHandlers := make([][]*levelHandler, sdb.numCFs)
 	for cf := 0; cf < sdb.numCFs; cf++ {
-		for l := 1; l <= shardMaxLevel; l++ {
+		for l := 1; l <= ShardMaxLevel; l++ {
 			newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, l, sdb.metrics)
 			newHandlers[cf] = append(newHandlers[cf], newHandler)
 		}
@@ -580,7 +541,7 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 		return l0s.tables[i].fid > l0s.tables[j].fid
 	})
 	for cf := 0; cf < sdb.numCFs; cf++ {
-		for l := 1; l <= shardMaxLevel; l++ {
+		for l := 1; l <= ShardMaxLevel; l++ {
 			handler := newHandlers[cf][l-1]
 			sort.Slice(handler.tables, func(i, j int) bool {
 				return handler.tables[i].Smallest().Compare(handler.tables[j].Smallest()) < 0
@@ -649,4 +610,12 @@ func (sdb *ShardingDB) Size() int64 {
 		size += atomic.LoadInt64(&shard.estimatedSize)
 	}
 	return size
+}
+
+func (sdb *ShardingDB) NumCFs() int {
+	return sdb.numCFs
+}
+
+func (sdb *ShardingDB) GetOpt() Options {
+	return sdb.opt
 }

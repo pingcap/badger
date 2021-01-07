@@ -24,7 +24,8 @@ type shardFlushTask struct {
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 	defer c.Done()
 	for task := range sdb.flushCh {
-		fd, err := sdb.createL0File(task.tbl.ID())
+		id := sdb.idAlloc.AllocID()
+		fd, err := sdb.createL0File(id)
 		if err != nil {
 			panic(err)
 		}
@@ -41,7 +42,7 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 				panic(err)
 			}
 		}
-		l0Table, err := openShardL0Table(filename, task.tbl.ID())
+		l0Table, err := openShardL0Table(filename, id)
 		if err != nil {
 			panic(err)
 		}
