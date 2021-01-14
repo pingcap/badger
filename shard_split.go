@@ -8,6 +8,7 @@ import (
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
+	"github.com/pingcap/log"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -46,6 +47,9 @@ func (sdb *ShardingDB) buildSplitTask(keys [][]byte) *splitTask {
 		}
 		shard := tree.get(key)
 		if bytes.Equal(shard.Start, key) {
+			continue
+		}
+		if bytes.Equal(shard.End, key) {
 			continue
 		}
 		task, ok := shardTasks[shard.ID]
@@ -339,6 +343,11 @@ func (sdb *ShardingDB) finishSplit(s *Shard, splitKeys [][]byte) []*Shard {
 			}
 		}
 	}
+	var newIDs []uint64
+	for _, shd := range newShards {
+		newIDs = append(newIDs, shd.ID)
+	}
+	log.S().Infof("shard %d split to %v", s.ID, newIDs)
 	return newShards
 }
 

@@ -83,7 +83,7 @@ func (s *arena) putNode(height int) uint32 {
 func (s *arena) putVal(v y.ValueStruct) uint32 {
 	l := v.EncodedSize()
 	n := atomic.AddUint32(&s.n, l)
-	y.Assert(int(n) <= len(s.buf))
+	y.AssertTruef(int(n) <= len(s.buf), "n:%d, l:%d", n, len(s.buf))
 	m := n - l
 	v.Encode(s.buf[m:])
 	return m

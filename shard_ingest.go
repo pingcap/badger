@@ -6,6 +6,8 @@ import (
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 	"os"
 	"sync/atomic"
 	"unsafe"
@@ -36,7 +38,14 @@ func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
 	defer guard.Done()
 	tree := sdb.loadShardTree()
 	shards := tree.getShards(start, end)
-	y.Assert(len(shards) == 1)
+	if len(shards) != 1 {
+		log.Error("shard length is not 1", zap.Int("len", len(shards)))
+		log.S().Errorf("%v %v", start, end)
+		for _, shd := range shards {
+			log.S().Errorf("shard:%d %v %v", shd.ID, shd.Start, shd.End)
+		}
+		panic("not handled yet")
+	}
 	shard := shards[0]
 	shard.lock.Lock()
 	defer shard.lock.Unlock()

@@ -410,7 +410,7 @@ func (sdb *ShardingDB) NewSnapshot(startKey, endKey []byte) *Snapshot {
 }
 
 // DeleteRange operation deletes the range between start and end, the existing Snapshot is still consistent.
-func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
+func (sdb *ShardingDB) DeleteRange(start, end []byte, deleteFiles bool) error {
 	if len(end) == 0 {
 		end = globalShardEndKey
 	}
@@ -473,7 +473,9 @@ func (sdb *ShardingDB) DeleteRange(start, end []byte) error {
 			break
 		}
 	}
-	guard.Delete(d.resources)
+	if deleteFiles {
+		guard.Delete(d.resources)
+	}
 	return nil
 }
 
