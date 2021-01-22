@@ -5,8 +5,6 @@ import (
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
-	"github.com/pingcap/log"
-	"go.uber.org/zap"
 	"os"
 	"sync/atomic"
 	"unsafe"
@@ -17,20 +15,17 @@ type shardingMemTables struct {
 }
 
 type engineTask struct {
-	writeTask *WriteBatch
-	splitTask *splitTask
+	writeTask    *WriteBatch
+	preSplitTask *preSplitTask
 }
 
-type splitTask struct {
-	shards map[uint64]*shardSplitTask
-	notify chan error
-}
-
-type shardSplitTask struct {
+type preSplitTask struct {
 	shard *Shard
 	keys  [][]byte
-	// reservedIDs is used to get smaller file IDs to use for split old l0 files.
+	// L0 files is ordered by fileID, we need to make sure split old file's ID is smaller than the newly flushed file ID.
+	// So we pre-allocate the file IDs to be used for Split old L0 files.
 	reservedIDs []uint64
+	notify      chan error
 }
 
 func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
@@ -44,20 +39,20 @@ func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
 			sdb.executeWriteTasks(writeTasks)
 		}
 		if splitTask != nil {
-			sdb.executeSplitTask(splitTask)
+			sdb.executePreSplitTask(splitTask)
 		}
 	}
 }
 
-func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask) {
+func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *preSplitTask) {
 	var writeTasks []*WriteBatch
-	var splitTask *splitTask
+	var splitTask *preSplitTask
 	select {
 	case x := <-sdb.writeCh:
 		if x.writeTask != nil {
 			writeTasks = append(writeTasks, x.writeTask)
 		} else {
-			splitTask = x.splitTask
+			splitTask = x.preSplitTask
 		}
 		l := len(sdb.writeCh)
 		for i := 0; i < l; i++ {
@@ -66,7 +61,7 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask) {
 				writeTasks = append(writeTasks, x.writeTask)
 			} else {
 				// There is only one split tasks at a time.
-				splitTask = x.splitTask
+				splitTask = x.preSplitTask
 			}
 		}
 	case <-c.HasBeenClosed():
@@ -77,6 +72,9 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *splitTask) {
 
 func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint64) {
 	writableMemTbl := shard.loadWritableMemTable()
+	if writableMemTbl != nil && writableMemTbl.Empty() {
+		return
+	}
 	newTableSize := sdb.opt.MaxMemTableSize
 	if newTableSize < minSize {
 		newTableSize = minSize
@@ -91,12 +89,13 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint
 			break
 		}
 	}
-	if writableMemTbl != nil && !writableMemTbl.Empty() {
-		sdb.flushCh <- &shardFlushTask{
-			shard:    shard,
-			tbl:      writableMemTbl,
-			commitTS: commitTS,
-		}
+	if writableMemTbl == nil {
+		return
+	}
+	sdb.flushCh <- &shardFlushTask{
+		shard:    shard,
+		tbl:      writableMemTbl,
+		commitTS: commitTS,
 	}
 }
 
@@ -117,8 +116,6 @@ func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize in
 		}
 	}
 	if writableMemTbl != nil && !writableMemTbl.Empty() {
-		oldMemTbls := shard.loadSplittingMemTables(idx)
-		log.Warn("send flush splitting task", zap.Int("mem cnt", len(oldMemTbls.tables)), zap.Int("shard", int(shard.ID)), zap.Int("split index", idx))
 		sdb.flushCh <- &shardFlushTask{
 			shard:        shard,
 			tbl:          writableMemTbl,
@@ -132,37 +129,43 @@ func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize in
 func (sdb *ShardingDB) executeWriteTasks(tasks []*WriteBatch) {
 	commitTS := sdb.orc.allocTs()
 	for _, task := range tasks {
-		for _, batch := range task.shardBatches {
-			if batch.isSplitting() {
-				commitTS = sdb.writeSplitting(batch, commitTS)
-				continue
-			}
-			memTbl := batch.loadWritableMemTable()
-			if memTbl == nil || memTbl.Size()+int64(batch.estimatedSize) > sdb.opt.MaxMemTableSize {
-				sdb.switchMemTable(batch.Shard, int64(batch.estimatedSize), commitTS)
-				memTbl = batch.loadWritableMemTable()
-				// Update the commitTS so that the new memTable has a new commitTS, then
-				// the old commitTS can be used as a snapshot at the memTable-switching time.
-				sdb.orc.doneCommit(commitTS)
-				commitTS = sdb.orc.allocTs()
-			}
-			for cf, entries := range batch.entries {
-				if !sdb.opt.CFs[cf].Managed {
-					for _, entry := range entries {
-						entry.Value.Version = commitTS
-					}
+		shard := task.shard
+		latest := sdb.GetShard(shard.ID)
+		if latest.Ver != shard.Ver {
+			task.notify <- errShardNotMatch
+			continue
+		}
+		if shard.isSplitting() {
+			commitTS = sdb.writeSplitting(task, commitTS)
+			continue
+		}
+		memTbl := shard.loadWritableMemTable()
+		if memTbl == nil || memTbl.Size()+task.estimatedSize > sdb.opt.MaxMemTableSize {
+			sdb.switchMemTable(shard, task.estimatedSize, commitTS)
+			memTbl = shard.loadWritableMemTable()
+			// Update the commitTS so that the new memTable has a new commitTS, then
+			// the old commitTS can be used as a snapshot at the memTable-switching time.
+			sdb.orc.doneCommit(commitTS)
+			commitTS = sdb.orc.allocTs()
+		}
+		for cf, entries := range task.entries {
+			if !sdb.opt.CFs[cf].Managed {
+				for _, entry := range entries {
+					entry.Value.Version = commitTS
 				}
-				memTbl.PutEntries(cf, entries)
 			}
+			memTbl.PutEntries(cf, entries)
 		}
 	}
 	sdb.orc.doneCommit(commitTS)
 	for _, task := range tasks {
-		task.notify <- nil
+		if len(task.notify) == 0 {
+			task.notify <- nil
+		}
 	}
 }
 
-func (sdb *ShardingDB) writeSplitting(batch *shardBatch, commitTS uint64) uint64 {
+func (sdb *ShardingDB) writeSplitting(batch *WriteBatch, commitTS uint64) uint64 {
 	for cf, entries := range batch.entries {
 		if !sdb.opt.CFs[cf].Managed {
 			for _, entry := range entries {
@@ -170,13 +173,13 @@ func (sdb *ShardingDB) writeSplitting(batch *shardBatch, commitTS uint64) uint64
 			}
 		}
 		for _, entry := range entries {
-			idx := batch.getSplittingIndex(entry.Key)
-			memTbl := batch.loadSplittingWritableMemTable(idx)
+			idx := getSplitShardIndex(batch.shard.splitKeys, entry.Key)
+			memTbl := batch.shard.loadSplittingWritableMemTable(idx)
 			if memTbl == nil || memTbl.Size()+int64(batch.estimatedSize) > sdb.opt.MaxMemTableSize {
-				sdb.switchSplittingMemTable(batch.Shard, idx, int64(batch.estimatedSize), commitTS)
+				sdb.switchSplittingMemTable(batch.shard, idx, int64(batch.estimatedSize), commitTS)
 				sdb.orc.doneCommit(commitTS)
 				commitTS = sdb.orc.allocTs()
-				memTbl = batch.loadSplittingWritableMemTable(idx)
+				memTbl = batch.shard.loadSplittingWritableMemTable(idx)
 			}
 			memTbl.Put(cf, entry.Key, entry.Value)
 		}
@@ -189,19 +192,17 @@ func (sdb *ShardingDB) createL0File(fid uint64) (fd *os.File, err error) {
 	return y.OpenSyncedFile(filename, false)
 }
 
-func (sdb *ShardingDB) executeSplitTask(task *splitTask) {
-	for _, shardTask := range task.shards {
-		shard := shardTask.shard
-		if !shard.setSplitKeys(shardTask.keys) {
-			task.notify <- errors.New("failed to set split keys")
-			return
-		}
-		sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize, sdb.orc.readTs())
-		idCnt := (len(shard.loadL0Tables().tables) + len(shard.loadMemTables().tables)) * (len(shardTask.keys) + 1)
-		shardTask.reservedIDs = make([]uint64, 0, idCnt)
-		for i := 0; i < idCnt; i++ {
-			shardTask.reservedIDs = append(shardTask.reservedIDs, sdb.idAlloc.AllocID())
-		}
+func (sdb *ShardingDB) executePreSplitTask(task *preSplitTask) {
+	shard := task.shard
+	if !shard.setSplitKeys(task.keys) {
+		task.notify <- errors.New("failed to set split keys")
+		return
+	}
+	sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize, sdb.orc.readTs())
+	idCnt := (len(shard.loadL0Tables().tables) + len(shard.loadMemTables().tables)) * (len(task.keys) + 1)
+	task.reservedIDs = make([]uint64, 0, idCnt)
+	for i := 0; i < idCnt; i++ {
+		task.reservedIDs = append(task.reservedIDs, sdb.idAlloc.AllocID())
 	}
 	task.notify <- nil
 }

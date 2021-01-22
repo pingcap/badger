@@ -21,7 +21,7 @@ import (
 func newManifestChange(fid, shardID uint64, cf int, level int, op protos.ManifestChange_Operation) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		ShardID: shardID,
-		Id:      fid,
+		ID:      fid,
 		Op:      op,
 		Level:   uint32(level),
 		CF:      int32(cf),
@@ -297,13 +297,14 @@ func (sdb *ShardingDB) getCompactionPriority(shard *Shard) CompactionPriority {
 
 func (sdb *ShardingDB) GetCompactionPriorities(buf []CompactionPriority) []CompactionPriority {
 	results := buf[:0]
-	tree := sdb.loadShardTree()
-	for _, shard := range tree.shards {
+	sdb.shardMap.Range(func(key, value interface{}) bool {
+		shard := value.(*Shard)
 		pri := sdb.getCompactionPriority(shard)
 		if pri.Score > 1 {
 			results = append(results, pri)
 		}
-	}
+		return true
+	})
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score > results[j].Score
 	})
@@ -318,6 +319,11 @@ func (sdb *ShardingDB) CompactShard(pri CompactionPriority) error {
 	defer shard.lock.Unlock()
 	if shard.isSplitting() {
 		log.S().Infof("avoid compaction for splitting shard.")
+		return nil
+	}
+	latest := sdb.GetShard(shard.ID)
+	if latest.Ver != shard.Ver {
+		log.S().Infof("avoid compaction for shard version change.")
 		return nil
 	}
 	if pri.CF == -1 {
@@ -500,7 +506,7 @@ func newShardCreateChange(shardID, fid uint64, cf, level int) *protos.ManifestCh
 	return &protos.ManifestChange{
 		ShardID: shardID,
 		CF:      int32(cf),
-		Id:      fid,
+		ID:      fid,
 		Op:      protos.ManifestChange_CREATE,
 		Level:   uint32(level),
 	}
@@ -509,7 +515,7 @@ func newShardCreateChange(shardID, fid uint64, cf, level int) *protos.ManifestCh
 func newShardDeleteChange(shardID, id uint64, cf int) *protos.ManifestChange {
 	return &protos.ManifestChange{
 		ShardID: shardID,
-		Id:      id,
+		ID:      id,
 		Op:      protos.ManifestChange_DELETE,
 		CF:      int32(cf),
 	}

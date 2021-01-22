@@ -4,120 +4,15 @@ import (
 	"bytes"
 	"github.com/dgryski/go-farm"
 	"github.com/pingcap/badger/epoch"
+	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
-	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 )
 
 const ShardMaxLevel = 4
-
-func newShardTree(manifest *ShardingManifest, opt Options, metrics *y.MetricsSet) (*shardTree, error) {
-	tree := &shardTree{
-		shards: make([]*Shard, 0, len(manifest.shards)),
-	}
-	for _, mShard := range manifest.shards {
-		shard := newShard(mShard.ID, mShard.Start, mShard.End, opt, metrics)
-		for fid := range mShard.files {
-			cfLevel, ok := manifest.globalFiles[fid]
-			y.Assert(ok)
-			cf := cfLevel.cf
-			if cf == -1 {
-				filename := sstable.NewFilename(fid, opt.Dir)
-				sl0Tbl, err := openShardL0Table(filename, fid)
-				if err != nil {
-					return nil, err
-				}
-				shard.addEstimatedSize(sl0Tbl.size)
-				l0Tbls := shard.loadL0Tables()
-				l0Tbls.tables = append(l0Tbls.tables, sl0Tbl)
-				continue
-			}
-			level := cfLevel.level
-			scf := shard.cfs[cf]
-			handler := scf.getLevelHandler(int(level))
-			filename := sstable.NewFilename(fid, opt.Dir)
-			reader, err := sstable.NewMMapFile(filename)
-			if err != nil {
-				return nil, err
-			}
-			tbl, err := sstable.OpenTable(filename, reader)
-			if err != nil {
-				return nil, err
-			}
-			shard.addEstimatedSize(tbl.Size())
-			handler.tables = append(handler.tables, tbl)
-		}
-		l0Tbls := shard.loadL0Tables()
-		// Sort the l0 tables by age.
-		sort.Slice(l0Tbls.tables, func(i, j int) bool {
-			return l0Tbls.tables[i].fid > l0Tbls.tables[j].fid
-		})
-		for cf := 0; cf < len(opt.CFs); cf++ {
-			scf := shard.cfs[cf]
-			for level := 1; level <= ShardMaxLevel; level++ {
-				handler := scf.getLevelHandler(level)
-				sortTables(handler.tables)
-			}
-		}
-		tree.shards = append(tree.shards, shard)
-	}
-	sort.Slice(tree.shards, func(i, j int) bool {
-		return bytes.Compare(tree.shards[i].Start, tree.shards[j].Start) < 0
-	})
-	return tree, nil
-}
-
-// This data structure is rarely written, so we can make it immutable.
-type shardTree struct {
-	shards []*Shard
-}
-
-func (tree *shardTree) last() *Shard {
-	return tree.shards[len(tree.shards)-1]
-}
-
-// the removes and adds has the same total range, so we can append before and after.
-func (st *shardTree) replace(removes []*Shard, adds []*Shard) *shardTree {
-	newShards := make([]*Shard, 0, len(st.shards)+len(adds)-len(removes))
-	left, right := getShardRange(st.shards, removes[0].Start, removes[len(removes)-1].End)
-	newShards = append(newShards, st.shards[:left]...)
-	newShards = append(newShards, adds...)
-	newShards = append(newShards, st.shards[right:]...)
-	return &shardTree{shards: newShards}
-}
-
-func (st *shardTree) get(key []byte) *Shard {
-	return getShard(st.shards, key)
-}
-
-func getShard(shards []*Shard, key []byte) *Shard {
-	idx := sort.Search(len(shards), func(i int) bool {
-		return bytes.Compare(key, shards[i].End) < 0
-	})
-	return shards[idx]
-}
-
-func getShardRange(shards []*Shard, start, end []byte) (left, right int) {
-	left = sort.Search(len(shards), func(i int) bool {
-		return bytes.Compare(start, shards[i].End) < 0
-	})
-	if bytes.Equal(start, end) {
-		return left, left + 1
-	}
-	right = sort.Search(len(shards), func(i int) bool {
-		return bytes.Compare(end, shards[i].Start) <= 0
-	})
-	return
-}
-
-func (st *shardTree) getShards(start, end []byte) []*Shard {
-	left, right := getShardRange(st.shards, start, end)
-	return st.shards[left:right]
-}
 
 // Shard split can be performed by the following steps:
 // 1. set the splitKeys and mark the state to splitting.
@@ -127,6 +22,7 @@ func (st *shardTree) getShards(start, end []byte) []*Shard {
 // 5. After SplitDone, the shard map replace the old shard two new shardsByID.
 type Shard struct {
 	ID    uint64
+	Ver   uint64
 	Start []byte
 	End   []byte
 	cfs   []*shardCF
@@ -142,6 +38,10 @@ type Shard struct {
 	splittingMemTbls []*unsafe.Pointer
 	splittingL0s     []*unsafe.Pointer
 	estimatedSize    int64
+	removeFilesOnDel bool
+
+	// If the shard is not active, flush mem table and do compaction will ignore this shard.
+	active int32
 }
 
 const (
@@ -151,9 +51,10 @@ const (
 	splitStateSplitDone uint32 = 3
 )
 
-func newShard(id uint64, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
+func newShard(id, ver uint64, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
 	shard := &Shard{
 		ID:    id,
+		Ver:   ver,
 		Start: start,
 		End:   end,
 		cfs:   make([]*shardCF, len(opt.CFs)),
@@ -361,6 +262,83 @@ func (s *Shard) getSplitKeys(targetSize int64) [][]byte {
 		}
 	}
 	return keys
+}
+
+func (s *Shard) Delete() error {
+	s.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		for _, tbl := range level.tables {
+			tbl.Close()
+			if s.removeFilesOnDel {
+				tbl.Delete()
+			}
+		}
+		return false
+	})
+	return nil
+}
+
+func (s *Shard) GetFullMeta() *protos.MetaChangeEvent {
+	e := new(protos.MetaChangeEvent)
+	e.StartKey = s.Start
+	e.EndKey = s.End
+	if s.isSplitting() {
+		for i := 0; i < len(s.splittingMemTbls); i++ {
+			startKey, endKey := getSplittingStartEnd(s.Start, s.End, s.splitKeys, i)
+			l0Tbls := s.loadSplittingL0Tables(i)
+			for _, l0Tbl := range l0Tbls.tables {
+				e.AddedL0Files = append(e.AddedL0Files, &protos.L0FileMeta{
+					ID:       l0Tbl.fid,
+					CommitTS: l0Tbl.commitTS,
+					StartKey: startKey,
+					EndKey:   endKey,
+				})
+			}
+		}
+	}
+	l0s := s.loadL0Tables()
+	for _, tbl := range l0s.tables {
+		e.AddedL0Files = append(e.AddedL0Files, &protos.L0FileMeta{
+			ID:       tbl.fid,
+			CommitTS: tbl.commitTS,
+			StartKey: s.Start,
+			EndKey:   s.End,
+		})
+	}
+	s.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		for _, tbl := range level.tables {
+			e.AddedFiles = append(e.AddedFiles, &protos.FileMeta{
+				ID:       tbl.ID(),
+				CF:       int32(cf),
+				Level:    uint32(level.level),
+				Smallest: tbl.Smallest().UserKey,
+				Biggest:  tbl.Biggest().UserKey,
+			})
+		}
+		return false
+	})
+	return e
+}
+
+func getSplittingStartEnd(oldStart, oldEnd []byte, splitKeys [][]byte, i int) (startKey, endKey []byte) {
+	if i != 0 {
+		startKey = splitKeys[i-1]
+	} else {
+		startKey = oldStart
+	}
+	if i == len(splitKeys) {
+		endKey = oldEnd
+	} else {
+		endKey = splitKeys[i]
+	}
+	return
+}
+
+func (s *Shard) OverlapRange(startKey, endKey []byte) bool {
+	return bytes.Compare(s.Start, endKey) < 0 && bytes.Compare(startKey, s.End) < 0
+}
+
+func (s *Shard) OverlapKey(key []byte) bool {
+	return bytes.Compare(s.Start, key) <= 0 && bytes.Compare(key, s.End) < 0
 }
 
 type shardCF struct {

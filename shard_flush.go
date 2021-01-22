@@ -85,13 +85,6 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 		if errors.Cause(err) != errShardNotFound {
 			return err
 		}
-		var shardStartKey []byte
-		if task.splittingIdx == 0 {
-			shardStartKey = task.shard.Start
-		} else {
-			shardStartKey = task.shard.splitKeys[task.splittingIdx-1]
-		}
-		shard = sdb.loadShardTree().get(shardStartKey)
 		change = newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
 		err = sdb.manifest.addChanges(keysMap, change)
 		if err != nil {

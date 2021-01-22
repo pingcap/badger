@@ -15,8 +15,8 @@ message MetaChangeEvent {
 message L0FileMeta {
   uint64 ID = 1;
   uint64 CommitTS = 2;
-  repeated bytes multiCFSmallest = 3;
-  repeated bytes multiCFBiggest = 4;
+  bytes startKey = 3;
+  bytes endKey = 4;
 }
 
 message FileMeta {

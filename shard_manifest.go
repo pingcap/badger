@@ -20,7 +20,7 @@ import (
 type ShardingManifest struct {
 	dir         string
 	shards      map[uint64]*ShardInfo
-	globalFiles map[uint64]cfLevel
+	globalFiles map[uint64]fileMeta
 	lastID      uint64
 	version     uint64
 	fd          *os.File
@@ -37,6 +37,7 @@ type ShardingManifest struct {
 
 type ShardInfo struct {
 	ID    uint64
+	Ver   uint64
 	Start []byte
 	End   []byte
 	// fid -> level
@@ -62,14 +63,8 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 			dir:         dir,
 			shards:      map[uint64]*ShardInfo{},
 			lastID:      1,
-			globalFiles: map[uint64]cfLevel{},
+			globalFiles: map[uint64]fileMeta{},
 		}
-		initShard := &ShardInfo{
-			ID:    1,
-			End:   globalShardEndKey,
-			files: map[uint64]struct{}{},
-		}
-		m.shards[initShard.ID] = initShard
 		err = m.rewrite()
 		if err != nil {
 			return nil, err
@@ -103,7 +98,7 @@ func (m *ShardingManifest) toChangeSet() *protos.ManifestChangeSet {
 			cfLevel := m.globalFiles[fid]
 			cs.Changes = append(cs.Changes, &protos.ManifestChange{
 				ShardID: shardID,
-				Id:      fid,
+				ID:      fid,
 				Op:      protos.ManifestChange_CREATE,
 				Level:   cfLevel.level,
 				CF:      cfLevel.cf,
@@ -115,6 +110,7 @@ func (m *ShardingManifest) toChangeSet() *protos.ManifestChangeSet {
 		}
 		cs.ShardChange = append(cs.ShardChange, &protos.ShardChange{
 			ShardID:  shardID,
+			ShardVer: shard.Ver,
 			Op:       protos.ShardChange_CREATE,
 			StartKey: shard.Start,
 			EndKey:   shard.End,
@@ -142,15 +138,17 @@ func (m *ShardingManifest) Close() error {
 	return m.fd.Close()
 }
 
-var errShardNotFound = errors.New("shard not found")
-
 func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
+	if cs.Split != nil {
+		m.applySplit(cs.Split)
+	}
 	for _, change := range cs.ShardChange {
-		if change.Op != protos.ShardChange_CREATE {
+		if change.Op == protos.ShardChange_DELETE {
 			continue
 		}
 		shard := &ShardInfo{
 			ID:    change.ShardID,
+			Ver:   change.ShardVer,
 			Start: change.StartKey,
 			End:   change.EndKey,
 			files: map[uint64]struct{}{},
@@ -165,7 +163,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 	}
 	for _, change := range cs.Changes {
 		shardID := change.ShardID
-		fid := change.Id
+		fid := change.ID
 		if fid > m.lastID {
 			m.lastID = fid
 		}
@@ -177,7 +175,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 		case protos.ManifestChange_CREATE:
 			m.creations++
 			shardInfo.files[fid] = struct{}{}
-			m.globalFiles[fid] = cfLevel{cf: change.CF, level: change.Level}
+			m.globalFiles[fid] = fileMeta{cf: change.CF, level: change.Level}
 		case protos.ManifestChange_DELETE:
 			m.deletions++
 			delete(shardInfo.files, fid)
@@ -188,7 +186,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 			if _, ok := shardInfo.files[fid]; !ok {
 				return fmt.Errorf("move down file %d not found", fid)
 			}
-			m.globalFiles[fid] = cfLevel{cf: change.CF, level: change.Level}
+			m.globalFiles[fid] = fileMeta{cf: change.CF, level: change.Level}
 		}
 	}
 	for _, change := range cs.ShardChange {
@@ -199,6 +197,33 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
 	}
 	m.version = cs.Head.Version
 	return nil
+}
+
+func (m *ShardingManifest) applySplit(split *protos.ShardSplit) {
+	old := m.shards[split.OldID]
+	newShards := make([]*ShardInfo, len(split.IDs))
+	for i := 0; i < len(split.IDs); i++ {
+		startKey, endKey := getSplittingStartEnd(old.Start, old.End, split.Keys, i)
+		id := split.IDs[i]
+		ver := uint64(1)
+		if id == old.ID {
+			ver = old.Ver + 1
+		}
+		shardInfo := &ShardInfo{
+			ID:    id,
+			Ver:   ver,
+			Start: startKey,
+			End:   endKey,
+			files: map[uint64]struct{}{},
+		}
+		m.shards[id] = shardInfo
+		newShards[i] = shardInfo
+	}
+	for fid := range old.files {
+		fileMeta := m.globalFiles[fid]
+		shardIdx := getSplitShardIndex(split.Keys, fileMeta.smallest)
+		newShards[shardIdx].files[fid] = struct{}{}
+	}
 }
 
 func (m *ShardingManifest) addChanges(keysMap *fileMetaPropertiesMap, changes ...*protos.ManifestChange) error {
@@ -298,23 +323,21 @@ func (m *ShardingManifest) createMetaChangeEvents(propsMap *fileMetaPropertiesMa
 			}
 			metaChanges[change.ShardID] = e
 		}
-		fileKeys := propsMap.m[change.Id]
+		fileKeys := propsMap.m[change.ID]
 		if change.Level == 0 {
 			if change.Op == protos.ManifestChange_CREATE {
 				e.AddedL0Files = append(e.AddedL0Files, &protos.L0FileMeta{
-					ID:              0,
-					CommitTS:        fileKeys.commitTS,
-					MultiCFSmallest: fileKeys.multiCFSmallest,
-					MultiCFBiggest:  fileKeys.multiCFBiggest,
+					ID:       0,
+					CommitTS: fileKeys.commitTS,
 				})
 			} else if change.Op == protos.ManifestChange_DELETE {
-				e.RemovedL0Files = append(e.RemovedL0Files, change.Id)
+				e.RemovedL0Files = append(e.RemovedL0Files, change.ID)
 			} else {
 				panic("unexpected op " + change.Op.String())
 			}
 		} else {
 			fileMeta := &protos.FileMeta{
-				ID:       change.Id,
+				ID:       change.ID,
 				CF:       change.CF,
 				Level:    change.Level,
 				Smallest: fileKeys.smallest,
@@ -332,9 +355,11 @@ func (m *ShardingManifest) createMetaChangeEvents(propsMap *fileMetaPropertiesMa
 	return metaChanges
 }
 
-type cfLevel struct {
-	cf    int32
-	level uint32
+type fileMeta struct {
+	cf       int32
+	level    uint32
+	smallest []byte
+	biggest  []byte
 }
 
 func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset int64, err error) {
@@ -344,7 +369,7 @@ func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset
 	}
 	ret = &ShardingManifest{
 		shards:      map[uint64]*ShardInfo{},
-		globalFiles: map[uint64]cfLevel{},
+		globalFiles: map[uint64]fileMeta{},
 		fd:          fp,
 	}
 	var offset int64

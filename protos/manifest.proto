@@ -24,6 +24,7 @@ message ManifestChangeSet {
   repeated ManifestChange changes = 1;
   HeadInfo head = 2;
   repeated ShardChange shardChange = 3;
+  ShardSplit split = 4;
 }
 
 message HeadInfo {
@@ -33,27 +34,35 @@ message HeadInfo {
 }
 
 message ManifestChange {
-  uint64 Id = 1;            // Table ID.
+  uint64 ID = 1;            // Table ID.
   enum Operation {
     CREATE = 0;
     DELETE = 1;
     MOVE_DOWN = 2;
   }
-  Operation Op   = 2;
-  uint32 Level   = 3;       // Only used for CREATE.
-  int32 CF       = 4;
-  uint64 ShardID = 5;
+  Operation op = 2;
+  uint32 level = 3;       // Only used for CREATE.
+  int32 CF = 4;
+  uint64 shardID = 5;
+  bytes smallest = 6;
+  bytes biggest = 7;
 }
 
 message ShardChange {
-  uint64 shardID  = 1;
+  uint64 shardID = 1;
+  uint64 shardVer = 2;
   enum Operation {
     CREATE = 0;
     DELETE = 1;
-    TRUNCATE = 2;
   }
-  Operation Op    = 2;
-  bytes  startKey = 3;
-  bytes  endKey   = 4;
-  repeated uint64 tableIDs = 5;
+  Operation Op = 3;
+  bytes startKey = 4;
+  bytes endKey = 5;
+  repeated uint64 tableIDs = 6;
+}
+
+message ShardSplit {
+  uint64 oldID = 1;
+  repeated uint64 IDs = 3;
+  repeated bytes Keys = 4;
 }
