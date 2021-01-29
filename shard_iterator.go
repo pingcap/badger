@@ -30,10 +30,6 @@ func (s *Snapshot) newShardIterator(cf int, reverse bool, minL0ID uint64) y.Iter
 			memTbls := s.shard.loadSplittingMemTables(i)
 			iters = s.appendMemTblIters(iters, memTbls, cf, reverse)
 		}
-		for i := 0; i < len(s.shard.splittingL0s); i++ {
-			l0s := s.shard.loadSplittingL0Tables(i)
-			iters = s.appendL0Iters(iters, l0s, cf, reverse, minL0ID)
-		}
 	}
 	memTbls := s.shard.loadMemTables()
 	iters = s.appendMemTblIters(iters, memTbls, cf, reverse)

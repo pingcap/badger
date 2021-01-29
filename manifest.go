@@ -232,11 +232,27 @@ func helpRewrite(dir string, m *Manifest) (*os.File, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	fp, err := rewriteManifest(changeBuf, dir)
+	buf := make([]byte, 0, 16+len(changeBuf))
+	buf = appendMagicHeader(buf)
+	buf = appendChecksumPacket(buf, changeBuf)
+	fp, err := rewriteManifest(buf, dir)
 	if err != nil {
 		return nil, 0, err
 	}
 	return fp, netCreations, nil
+}
+
+func appendMagicHeader(buf []byte) []byte {
+	buf = append(buf, magicText[:]...)
+	return append(buf, magicVersion, 0, 0, 0)
+}
+
+func appendChecksumPacket(buf, packet []byte) []byte {
+	var lenCrcBuf [8]byte
+	binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(buf)))
+	binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(buf, y.CastagnoliCrcTable))
+	buf = append(buf, lenCrcBuf[:]...)
+	return append(buf, packet...)
 }
 
 func rewriteManifest(changeBuf []byte, dir string) (*os.File, error) {
@@ -246,15 +262,7 @@ func rewriteManifest(changeBuf []byte, dir string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 8)
-	copy(buf[0:4], magicText[:])
-	binary.BigEndian.PutUint32(buf[4:8], magicVersion)
-	var lenCrcBuf [8]byte
-	binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(changeBuf)))
-	binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(changeBuf, y.CastagnoliCrcTable))
-	buf = append(buf, lenCrcBuf[:]...)
-	buf = append(buf, changeBuf...)
-	if _, err := fp.Write(buf); err != nil {
+	if _, err := fp.Write(changeBuf); err != nil {
 		fp.Close()
 		return nil, err
 	}
@@ -374,6 +382,18 @@ func readManifestMagic(r io.Reader) error {
 }
 
 func readChangeSet(r io.Reader) (*protos.ManifestChangeSet, error) {
+	buf, err := readChecksumPacket(r)
+	if err != nil {
+		return nil, err
+	}
+	var changeSet protos.ManifestChangeSet
+	if err := changeSet.Unmarshal(buf); err != nil {
+		return nil, err
+	}
+	return &changeSet, nil
+}
+
+func readChecksumPacket(r io.Reader) ([]byte, error) {
 	var lenCrcBuf [8]byte
 	_, err := io.ReadFull(r, lenCrcBuf[:])
 	if err != nil {
@@ -393,11 +413,7 @@ func readChangeSet(r io.Reader) (*protos.ManifestChangeSet, error) {
 	if crc32.Checksum(buf, y.CastagnoliCrcTable) != binary.BigEndian.Uint32(lenCrcBuf[4:8]) {
 		return nil, nil
 	}
-	var changeSet protos.ManifestChangeSet
-	if err := changeSet.Unmarshal(buf); err != nil {
-		return nil, err
-	}
-	return &changeSet, nil
+	return buf, nil
 }
 
 func addNewToManifest(build *Manifest, tc *protos.ManifestChange) {

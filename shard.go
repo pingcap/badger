@@ -2,11 +2,14 @@ package badger
 
 import (
 	"bytes"
+	"fmt"
 	"github.com/dgryski/go-farm"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/y"
+	"math"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -36,12 +39,18 @@ type Shard struct {
 	splitState       uint32
 	splitKeys        [][]byte
 	splittingMemTbls []*unsafe.Pointer
-	splittingL0s     []*unsafe.Pointer
+
+	// Only written by PreSplit, used By FinishSplit.
+	splittingL0Tbls  []*shardL0Tables
 	estimatedSize    int64
 	removeFilesOnDel bool
 
 	// If the shard is not active, flush mem table and do compaction will ignore this shard.
 	active int32
+
+	wal         *shardSplitWAL
+	walFilename string
+	properties  *shardProperties
 }
 
 const (
@@ -51,13 +60,15 @@ const (
 	splitStateSplitDone uint32 = 3
 )
 
-func newShard(id, ver uint64, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
+func newShard(props *protos.ShardProperties, ver uint64, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
 	shard := &Shard{
-		ID:    id,
-		Ver:   ver,
-		Start: start,
-		End:   end,
-		cfs:   make([]*shardCF, len(opt.CFs)),
+		ID:          props.ShardID,
+		Ver:         ver,
+		Start:       start,
+		End:         end,
+		cfs:         make([]*shardCF, len(opt.CFs)),
+		walFilename: filepath.Join(opt.Dir, fmt.Sprintf("%016x_%08d.wal", props.ShardID, ver)),
+		properties:  newShardProperties().applyPB(props),
 	}
 	shard.memTbls = new(unsafe.Pointer)
 	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
@@ -80,14 +91,6 @@ func (s *Shard) tableIDs() []uint64 {
 	l0s := s.loadL0Tables()
 	for _, tbl := range l0s.tables {
 		ids = append(ids, tbl.fid)
-	}
-	if s.isSplitting() {
-		for i := range s.splittingL0s {
-			splittingL0s := s.loadSplittingL0Tables(i)
-			for _, tbl := range splittingL0s.tables {
-				ids = append(ids, tbl.fid)
-			}
-		}
 	}
 	s.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
 		for _, tbl := range level.tables {
@@ -114,14 +117,14 @@ func (s *Shard) setSplitKeys(keys [][]byte) bool {
 	if atomic.CompareAndSwapUint32(&s.splitState, splitStateInitial, splitStateSetKeys) {
 		s.splitKeys = keys
 		s.splittingMemTbls = make([]*unsafe.Pointer, len(keys)+1)
-		s.splittingL0s = make([]*unsafe.Pointer, len(keys)+1)
 		for i := range s.splittingMemTbls {
 			memPtr := new(unsafe.Pointer)
 			*memPtr = unsafe.Pointer(&shardingMemTables{})
 			s.splittingMemTbls[i] = memPtr
-			l0Ptr := new(unsafe.Pointer)
-			*l0Ptr = unsafe.Pointer(&shardL0Tables{})
-			s.splittingL0s[i] = l0Ptr
+		}
+		s.splittingL0Tbls = make([]*shardL0Tables, len(keys)+1)
+		for i := range s.splittingL0Tbls {
+			s.splittingL0Tbls[i] = &shardL0Tables{}
 		}
 		y.Assert(atomic.CompareAndSwapUint32(&s.splitState, splitStateSetKeys, splitStateSplitting))
 		return true
@@ -151,13 +154,6 @@ func (s *Shard) Get(cf int, key y.Key) y.ValueStruct {
 		memTbls := s.loadSplittingMemTables(idx)
 		for _, tbl := range memTbls.tables {
 			v := tbl.Get(cf, key.UserKey, key.Version)
-			if v.Valid() {
-				return v
-			}
-		}
-		l0Tbls := s.loadSplittingL0Tables(idx)
-		for _, tbl := range l0Tbls.tables {
-			v := tbl.Get(cf, key, keyHash)
 			if v.Valid() {
 				return v
 			}
@@ -199,14 +195,6 @@ func (s *Shard) getSplittingIndex(key []byte) int {
 		}
 	}
 	return i
-}
-
-func (s *Shard) loadSplittingL0Tables(i int) *shardL0Tables {
-	return (*shardL0Tables)(atomic.LoadPointer(s.splittingL0s[i]))
-}
-
-func (s *Shard) casSplittingL0Tables(i int, old, new *shardL0Tables) bool {
-	return atomic.CompareAndSwapPointer(s.splittingL0s[i], unsafe.Pointer(old), unsafe.Pointer(new))
 }
 
 func (s *Shard) loadSplittingMemTables(i int) *shardingMemTables {
@@ -277,48 +265,6 @@ func (s *Shard) Delete() error {
 	return nil
 }
 
-func (s *Shard) GetFullMeta() *protos.MetaChangeEvent {
-	e := new(protos.MetaChangeEvent)
-	e.StartKey = s.Start
-	e.EndKey = s.End
-	if s.isSplitting() {
-		for i := 0; i < len(s.splittingMemTbls); i++ {
-			startKey, endKey := getSplittingStartEnd(s.Start, s.End, s.splitKeys, i)
-			l0Tbls := s.loadSplittingL0Tables(i)
-			for _, l0Tbl := range l0Tbls.tables {
-				e.AddedL0Files = append(e.AddedL0Files, &protos.L0FileMeta{
-					ID:       l0Tbl.fid,
-					CommitTS: l0Tbl.commitTS,
-					StartKey: startKey,
-					EndKey:   endKey,
-				})
-			}
-		}
-	}
-	l0s := s.loadL0Tables()
-	for _, tbl := range l0s.tables {
-		e.AddedL0Files = append(e.AddedL0Files, &protos.L0FileMeta{
-			ID:       tbl.fid,
-			CommitTS: tbl.commitTS,
-			StartKey: s.Start,
-			EndKey:   s.End,
-		})
-	}
-	s.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
-		for _, tbl := range level.tables {
-			e.AddedFiles = append(e.AddedFiles, &protos.FileMeta{
-				ID:       tbl.ID(),
-				CF:       int32(cf),
-				Level:    uint32(level.level),
-				Smallest: tbl.Smallest().UserKey,
-				Biggest:  tbl.Biggest().UserKey,
-			})
-		}
-		return false
-	})
-	return e
-}
-
 func getSplittingStartEnd(oldStart, oldEnd []byte, splitKeys [][]byte, i int) (startKey, endKey []byte) {
 	if i != 0 {
 		startKey = splitKeys[i-1]
@@ -375,4 +321,46 @@ type deletions struct {
 
 func (d *deletions) Append(res epoch.Resource) {
 	d.resources = append(d.resources, res)
+}
+
+const commitTSKey = "commitTS"
+
+type shardProperties struct {
+	m map[string][]byte
+}
+
+func newShardProperties() *shardProperties {
+	return &shardProperties{m: map[string][]byte{}}
+}
+
+func (sp *shardProperties) set(key string, val []byte) {
+	y.Assert(len(key) < math.MaxUint16 && len(val) < math.MaxUint16)
+	sp.m[key] = val
+}
+
+func (sp *shardProperties) get(key string) ([]byte, bool) {
+	v, ok := sp.m[key]
+	return v, ok
+}
+
+func (sp *shardProperties) toPB(shardID uint64) *protos.ShardProperties {
+	pbProps := &protos.ShardProperties{
+		ShardID: shardID,
+		Keys:    make([]string, 0, len(sp.m)),
+		Values:  make([][]byte, 0, len(sp.m)),
+	}
+	for k, v := range sp.m {
+		pbProps.Keys = append(pbProps.Keys, k)
+		pbProps.Values = append(pbProps.Values, v)
+	}
+	return pbProps
+}
+
+func (sp *shardProperties) applyPB(pbProps *protos.ShardProperties) *shardProperties {
+	if pbProps != nil {
+		for i, key := range pbProps.Keys {
+			sp.m[key] = pbProps.Values[i]
+		}
+	}
+	return sp
 }

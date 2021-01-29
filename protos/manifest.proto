@@ -23,8 +23,6 @@ message ManifestChangeSet {
   // A set of changes that are applied atomically.
   repeated ManifestChange changes = 1;
   HeadInfo head = 2;
-  repeated ShardChange shardChange = 3;
-  ShardSplit split = 4;
 }
 
 message HeadInfo {
@@ -42,27 +40,66 @@ message ManifestChange {
   }
   Operation op = 2;
   uint32 level = 3;       // Only used for CREATE.
-  int32 CF = 4;
-  uint64 shardID = 5;
-  bytes smallest = 6;
-  bytes biggest = 7;
 }
 
-message ShardChange {
+message ShardChangeSet {
   uint64 shardID = 1;
   uint64 shardVer = 2;
-  enum Operation {
-    CREATE = 0;
-    DELETE = 1;
-  }
-  Operation Op = 3;
-  bytes startKey = 4;
-  bytes endKey = 5;
-  repeated uint64 tableIDs = 6;
+  uint64 version = 3;
+
+  repeated L0Create l0Creates = 4;
+  repeated TableCreate tableCreates = 5;
+  repeated uint64 tableDeletes = 6;
+
+  ShardCreate shardCreate = 7;
+  ShardPreSplit preSplit = 8;
+  ShardSplit split = 9;
+  bool shardDelete = 10;
+}
+
+message L0Create {
+  uint64 ID = 1;
+  bytes start = 2;
+  bytes end = 3;
+  ShardProperties properties = 4;
+}
+
+message TableCreate {
+  uint64 ID = 1;
+  uint32 level = 2;
+  int32 CF = 3;
+  bytes smallest = 4;
+  bytes biggest = 5;
+}
+
+message ShardCreate {
+  bytes startKey = 1;
+  bytes endKey = 2;
+  repeated uint64 tableIDs = 3;
+  ShardProperties properties = 4;
+}
+
+message ShardPreSplit {
+  repeated bytes Keys = 1;
 }
 
 message ShardSplit {
-  uint64 oldID = 1;
-  repeated uint64 IDs = 3;
-  repeated bytes Keys = 4;
+  repeated ShardProperties newShards = 1;
+  repeated bytes Keys = 2;
+}
+
+message ShardProperties {
+  uint64 shardID = 1;
+  repeated string keys = 2;
+  repeated bytes values = 3;
+}
+
+message MetaChangeEvent {
+  uint64 shardID = 1;
+  uint64 shardVer = 2;
+  bytes startKey = 3;
+  bytes endKey = 4;
+  repeated L0Create l0Creates = 5;
+  repeated TableCreate tableCreates = 6;
+  repeated uint64 tableDeletes = 7;
 }

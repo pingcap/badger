@@ -70,7 +70,7 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) ([]*WriteBatch, *preSplitTask) 
 	return writeTasks, splitTask
 }
 
-func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint64) {
+func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint64, preSplitKeys [][]byte) {
 	writableMemTbl := shard.loadWritableMemTable()
 	if writableMemTbl != nil && writableMemTbl.Empty() {
 		return
@@ -89,18 +89,19 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint
 			break
 		}
 	}
-	if writableMemTbl == nil {
+	if writableMemTbl == nil && len(preSplitKeys) == 0 {
 		return
 	}
+	shard.properties.set(commitTSKey, sstable.U64ToBytes(commitTS))
 	sdb.flushCh <- &shardFlushTask{
-		shard:    shard,
-		tbl:      writableMemTbl,
-		commitTS: commitTS,
+		shard:        shard,
+		tbl:          writableMemTbl,
+		preSplitKeys: preSplitKeys,
+		properties:   shard.properties.toPB(shard.ID),
 	}
 }
 
-func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize int64, commitTS uint64) {
-	writableMemTbl := shard.loadSplittingWritableMemTable(idx)
+func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize int64) {
 	newTableSize := sdb.opt.MaxMemTableSize
 	if newTableSize < minSize {
 		newTableSize = minSize
@@ -112,16 +113,8 @@ func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize in
 		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
 		newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
 		if atomic.CompareAndSwapPointer(shard.splittingMemTbls[idx], unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
-			break
-		}
-	}
-	if writableMemTbl != nil && !writableMemTbl.Empty() {
-		sdb.flushCh <- &shardFlushTask{
-			shard:        shard,
-			tbl:          writableMemTbl,
-			splittingIdx: idx,
-			splitting:    true,
-			commitTS:     commitTS,
+			// Splitting MemTable is never flushed, we will flush the mem tables after finish split.
+			return
 		}
 	}
 }
@@ -137,11 +130,15 @@ func (sdb *ShardingDB) executeWriteTasks(tasks []*WriteBatch) {
 		}
 		if shard.isSplitting() {
 			commitTS = sdb.writeSplitting(task, commitTS)
+			err := task.shard.wal.flush()
+			if err != nil {
+				task.notify <- err
+			}
 			continue
 		}
 		memTbl := shard.loadWritableMemTable()
 		if memTbl == nil || memTbl.Size()+task.estimatedSize > sdb.opt.MaxMemTableSize {
-			sdb.switchMemTable(shard, task.estimatedSize, commitTS)
+			sdb.switchMemTable(shard, task.estimatedSize, commitTS, nil)
 			memTbl = shard.loadWritableMemTable()
 			// Update the commitTS so that the new memTable has a new commitTS, then
 			// the old commitTS can be used as a snapshot at the memTable-switching time.
@@ -155,6 +152,9 @@ func (sdb *ShardingDB) executeWriteTasks(tasks []*WriteBatch) {
 				}
 			}
 			memTbl.PutEntries(cf, entries)
+		}
+		for key, val := range task.properties {
+			shard.properties.set(key, val)
 		}
 	}
 	sdb.orc.doneCommit(commitTS)
@@ -173,16 +173,21 @@ func (sdb *ShardingDB) writeSplitting(batch *WriteBatch, commitTS uint64) uint64
 			}
 		}
 		for _, entry := range entries {
+			batch.shard.wal.appendEntry(cf, entry.Key, entry.Value)
 			idx := getSplitShardIndex(batch.shard.splitKeys, entry.Key)
 			memTbl := batch.shard.loadSplittingWritableMemTable(idx)
 			if memTbl == nil || memTbl.Size()+int64(batch.estimatedSize) > sdb.opt.MaxMemTableSize {
-				sdb.switchSplittingMemTable(batch.shard, idx, int64(batch.estimatedSize), commitTS)
+				sdb.switchSplittingMemTable(batch.shard, idx, int64(batch.estimatedSize))
 				sdb.orc.doneCommit(commitTS)
 				commitTS = sdb.orc.allocTs()
 				memTbl = batch.shard.loadSplittingWritableMemTable(idx)
 			}
 			memTbl.Put(cf, entry.Key, entry.Value)
 		}
+	}
+	for key, val := range batch.properties {
+		batch.shard.wal.appendProperty(key, val)
+		batch.shard.properties.set(key, val)
 	}
 	return commitTS
 }
@@ -198,7 +203,13 @@ func (sdb *ShardingDB) executePreSplitTask(task *preSplitTask) {
 		task.notify <- errors.New("failed to set split keys")
 		return
 	}
-	sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize, sdb.orc.readTs())
+	sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize, sdb.orc.readTs(), task.keys)
+	wal, err := newShardSplitWAL(shard.walFilename, task.keys)
+	if err != nil {
+		task.notify <- errors.New("failed to enable WAL")
+		return
+	}
+	shard.wal = wal
 	idCnt := (len(shard.loadL0Tables().tables) + len(shard.loadMemTables().tables)) * (len(task.keys) + 1)
 	task.reservedIDs = make([]uint64, 0, idCnt)
 	for i := 0; i < idCnt; i++ {

@@ -18,14 +18,24 @@ import (
 	"unsafe"
 )
 
-func newManifestChange(fid, shardID uint64, cf int, level int, op protos.ManifestChange_Operation) *protos.ManifestChange {
-	return &protos.ManifestChange{
-		ShardID: shardID,
-		ID:      fid,
-		Op:      op,
-		Level:   uint32(level),
-		CF:      int32(cf),
+func newTableCreate(tbl table.Table, cf int, level int) *protos.TableCreate {
+	return &protos.TableCreate{
+		ID:       tbl.ID(),
+		Level:    uint32(level),
+		CF:       int32(cf),
+		Smallest: tbl.Smallest().UserKey,
+		Biggest:  tbl.Biggest().UserKey,
 	}
+}
+
+func newL0Create(tbl *shardL0Table, props *protos.ShardProperties, start, end []byte) *protos.L0Create {
+	change := &protos.L0Create{
+		ID:         tbl.fid,
+		Start:      start,
+		End:        end,
+		Properties: props,
+	}
+	return change
 }
 
 func debugTableCount(tbl table.Table) int {
@@ -165,10 +175,10 @@ func (h *shardL0BuildHelper) buildOne() (*sstable.BuildResult, error) {
 
 func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) error {
 	l0Tbls := shard.loadL0Tables()
-	var changes []*protos.ManifestChange
+	var tableCreates []*protos.TableCreate
+	var tableDeletes []uint64
 	var toBeDelete []epoch.Resource
 	var shardSizeChange int64
-	keysMap := newFileMetaKeysMap()
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		helper := newBuildHelper(sdb, shard, l0Tbls, cf)
 		var results []*sstable.BuildResult
@@ -201,26 +211,27 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		newHandler.totalSize -= helper.oldHandler.totalSize
 		shardSizeChange += newHandler.totalSize - helper.oldHandler.totalSize
 		y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
-		keysMap.addFromTables(newTables)
 		for _, newTbl := range newTables {
-			changes = append(changes, newManifestChange(newTbl.ID(), shard.ID, cf, 1, protos.ManifestChange_CREATE))
+			tableCreates = append(tableCreates, newTableCreate(newTbl, cf, 1))
 		}
-		keysMap.addFromTables(helper.oldHandler.tables)
 		for _, oldTbl := range helper.oldHandler.tables {
-			changes = append(changes, newManifestChange(oldTbl.ID(), shard.ID, cf, 1, protos.ManifestChange_DELETE))
+			tableDeletes = append(tableDeletes, oldTbl.ID())
 			toBeDelete = append(toBeDelete, oldTbl)
 		}
 	}
 	if l0Tbls != nil {
-		keysMap.addFromShardL0Tables(l0Tbls.tables)
+		// A splitting shard does not run compaction.
 		for _, tbl := range l0Tbls.tables {
-			changes = append(changes, newManifestChange(tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+			tableDeletes = append(tableDeletes, tbl.fid)
 			toBeDelete = append(toBeDelete, tbl)
 			shardSizeChange -= tbl.size
 		}
 	}
 	shard.addEstimatedSize(shardSizeChange)
-	err := sdb.manifest.addChanges(keysMap, changes...)
+	err := sdb.manifest.writeChangeSet(shard, &protos.ShardChangeSet{
+		TableCreates: tableCreates,
+		TableDeletes: tableDeletes,
+	}, true)
 	if err != nil {
 		return err
 	}
@@ -370,7 +381,8 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 	nextLevel := scf.getLevelHandler(cd.Level + 1)
 
 	var newTables []table.Table
-	var changes []*protos.ManifestChange
+	var tableCreates []*protos.TableCreate
+	var tableDeletes []uint64
 	defer func() {
 		for _, tbl := range newTables {
 			tbl.MarkCompacting(false)
@@ -379,14 +391,12 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 			tbl.MarkCompacting(false)
 		}
 	}()
-	keysMap := newFileMetaKeysMap()
-	keysMap.addFromTables(cd.Top)
-	keysMap.addFromTables(cd.Bot)
 	if cd.moveDown() {
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.Top
 		for _, t := range newTables {
-			changes = append(changes, newShardDeleteChange(shard.ID, t.ID(), cf), newShardCreateChange(shard.ID, t.ID(), cf, cd.Level+1))
+			tableDeletes = append(tableDeletes, t.ID())
+			tableCreates = append(tableCreates, newTableCreate(t, cf, cd.Level+1))
 		}
 	} else {
 		var err error
@@ -394,11 +404,21 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 		if err != nil {
 			return errors.WithStack(err)
 		}
-		keysMap.addFromTables(newTables)
-		changes = buildShardChangeSet(shard.ID, cf, cd, newTables)
+		for _, t := range newTables {
+			tableCreates = append(tableCreates, newTableCreate(t, cf, cd.Level+1))
+		}
+		for _, t := range cd.Top {
+			tableDeletes = append(tableDeletes, t.ID())
+		}
+		for _, t := range cd.Bot {
+			tableDeletes = append(tableDeletes, t.ID())
+		}
 	}
 	// We write to the manifest _before_ we delete files (and after we created files)
-	if err := sdb.manifest.addChanges(keysMap, changes...); err != nil {
+	if err := sdb.manifest.writeChangeSet(shard, &protos.ShardChangeSet{
+		TableCreates: tableCreates,
+		TableDeletes: tableDeletes,
+	}, true); err != nil {
 		return err
 	}
 
@@ -500,40 +520,6 @@ func (sdb *ShardingDB) deleteTables(old *levelHandler, toDel []table.Table) *lev
 
 	assertTablesOrder(newHandler.level, newTables, nil)
 	return newHandler
-}
-
-func newShardCreateChange(shardID, fid uint64, cf, level int) *protos.ManifestChange {
-	return &protos.ManifestChange{
-		ShardID: shardID,
-		CF:      int32(cf),
-		ID:      fid,
-		Op:      protos.ManifestChange_CREATE,
-		Level:   uint32(level),
-	}
-}
-
-func newShardDeleteChange(shardID, id uint64, cf int) *protos.ManifestChange {
-	return &protos.ManifestChange{
-		ShardID: shardID,
-		ID:      id,
-		Op:      protos.ManifestChange_DELETE,
-		CF:      int32(cf),
-	}
-}
-
-func buildShardChangeSet(shardID uint64, cf int, cd *CompactDef, newTables []table.Table) []*protos.ManifestChange {
-	changes := make([]*protos.ManifestChange, 0, len(cd.Top)+len(cd.Bot)+len(newTables))
-	for _, table := range newTables {
-		changes = append(changes,
-			newShardCreateChange(shardID, table.ID(), cf, cd.Level+1))
-	}
-	for _, table := range cd.Top {
-		changes = append(changes, newShardDeleteChange(shardID, table.ID(), cf))
-	}
-	for _, table := range cd.Bot {
-		changes = append(changes, newShardDeleteChange(shardID, table.ID(), cf))
-	}
-	return changes
 }
 
 func (sdb *ShardingDB) compactBuildTables(cf int, cd *CompactDef) (newTables []table.Table, err error) {

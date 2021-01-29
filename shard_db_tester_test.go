@@ -3,6 +3,7 @@ package badger
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
@@ -113,11 +114,11 @@ type testerPreSplitRequest struct {
 }
 
 type testerFinishSplitRequest struct {
-	shardID uint64
-	ver     uint64
-	newIDs  []uint64
-	keys    [][]byte
-	resp    chan error
+	shardID  uint64
+	ver      uint64
+	newProps []*protos.ShardProperties
+	keys     [][]byte
+	resp     chan error
 }
 
 func (st *shardTester) runWriter() {
@@ -129,8 +130,9 @@ func (st *shardTester) runWriter() {
 		case *testerPreSplitRequest:
 			x.resp <- st.db.PreSplit(x.shardID, x.ver, x.keys)
 		case *testerFinishSplitRequest:
-			newShards, err := st.db.FinishSplit(x.shardID, x.ver, x.newIDs)
+			newShards, err := st.db.FinishSplit(x.shardID, x.ver, x.newProps)
 			if err == nil {
+				log.S().Info("tester finish split")
 				atomic.StorePointer(&st.shardTree, unsafe.Pointer(st.loadShardTree().split(x.shardID, newShards)))
 			}
 			x.resp <- err
@@ -184,7 +186,10 @@ func (st *shardTester) write(entries ...*testerEntry) error {
 	for _, entry := range entries {
 		shard := tree.getShard(entry.key)
 		if shard == nil {
-			return fmt.Errorf("shard not found for key %v", entry.key)
+			for _, treeShard := range tree.shards {
+				log.S().Infof("tree shard %s %s", treeShard.Start, treeShard.End)
+			}
+			return fmt.Errorf("shard not found for key %s", entry.key)
 		}
 		shardID := shard.ID
 		req, ok := requests[shardID]
@@ -230,12 +235,12 @@ func (st *shardTester) preSplit(shardID, ver uint64, keys [][]byte) error {
 	return <-req.resp
 }
 
-func (st *shardTester) finishSplit(shardID, ver uint64, ids []uint64) error {
+func (st *shardTester) finishSplit(shardID, ver uint64, props []*protos.ShardProperties) error {
 	req := &testerFinishSplitRequest{
-		shardID: shardID,
-		ver:     ver,
-		newIDs:  ids,
-		resp:    make(chan error, 1),
+		shardID:  shardID,
+		ver:      ver,
+		newProps: props,
+		resp:     make(chan error, 1),
 	}
 	st.writeCh <- req
 	return <-req.resp

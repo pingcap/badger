@@ -2,14 +2,10 @@ package badger
 
 import (
 	"bufio"
-	"encoding/binary"
-	"fmt"
 	"github.com/pingcap/badger/protos"
-	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -42,6 +38,10 @@ type ShardInfo struct {
 	End   []byte
 	// fid -> level
 	files map[uint64]struct{}
+	// properties in ShardInfo is only updated on every mem-table flush, it's different than properties in the shard
+	// which is updated on every write operation.
+	properties *shardProperties
+	preSplit   *protos.ShardPreSplit
 }
 
 // ShardLevel is the struct that contains shard id and level id,
@@ -87,134 +87,152 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 	return m, nil
 }
 
-func (m *ShardingManifest) toChangeSet() *protos.ManifestChangeSet {
-	cs := &protos.ManifestChangeSet{
-		Changes:     make([]*protos.ManifestChange, 0, len(m.shards)),
-		Head:        &protos.HeadInfo{Version: m.version},
-		ShardChange: make([]*protos.ShardChange, 0, len(m.shards)),
-	}
-	for shardID, shard := range m.shards {
+func (m *ShardingManifest) toChangeSets() []*protos.ShardChangeSet {
+	var shards []*protos.ShardChangeSet
+	for _, shard := range m.shards {
+		cs := &protos.ShardChangeSet{
+			Version:  m.version,
+			ShardID:  shard.ID,
+			ShardVer: shard.Ver,
+		}
 		for fid := range shard.files {
-			cfLevel := m.globalFiles[fid]
-			cs.Changes = append(cs.Changes, &protos.ManifestChange{
-				ShardID: shardID,
-				ID:      fid,
-				Op:      protos.ManifestChange_CREATE,
-				Level:   cfLevel.level,
-				CF:      cfLevel.cf,
-			})
+			fileMeta := m.globalFiles[fid]
+			if fileMeta.level == 0 {
+				cs.L0Creates = append(cs.L0Creates, &protos.L0Create{
+					ID:         fid,
+					Properties: nil, // Store properties in ShardCreate.
+				})
+			} else {
+				cs.TableCreates = append(cs.TableCreates, &protos.TableCreate{
+					ID:       fid,
+					Level:    fileMeta.level,
+					CF:       fileMeta.cf,
+					Smallest: fileMeta.smallest,
+					Biggest:  fileMeta.biggest,
+				})
+			}
 		}
 		tblIDs := make([]uint64, 0, len(shard.files))
 		for fid := range shard.files {
 			tblIDs = append(tblIDs, fid)
 		}
-		cs.ShardChange = append(cs.ShardChange, &protos.ShardChange{
-			ShardID:  shardID,
-			ShardVer: shard.Ver,
-			Op:       protos.ShardChange_CREATE,
-			StartKey: shard.Start,
-			EndKey:   shard.End,
-			TableIDs: tblIDs,
-		})
+		cs.ShardCreate = &protos.ShardCreate{
+			StartKey:   shard.Start,
+			EndKey:     shard.End,
+			TableIDs:   tblIDs,
+			Properties: shard.properties.toPB(shard.ID),
+		}
+		shards = append(shards, cs)
 	}
-	return cs
+	return shards
 }
 
 func (m *ShardingManifest) rewrite() error {
 	log.Info("rewrite manifest")
-	changeSet := m.toChangeSet()
-	changeBuf, err := changeSet.Marshal()
-	if err != nil {
-		return err
+	changeSets := m.toChangeSets()
+	var changeSetsBuf []byte
+	for _, cs := range changeSets {
+		data, err := cs.Marshal()
+		if err != nil {
+			return err
+		}
+		changeSetsBuf = appendChecksumPacket(changeSetsBuf, data)
 	}
 	if m.fd != nil {
 		m.fd.Close()
 	}
-	m.fd, err = rewriteManifest(changeBuf, m.dir)
-	return nil
+	var err error
+	m.fd, err = rewriteManifest(changeSetsBuf, m.dir)
+	return err
 }
 
 func (m *ShardingManifest) Close() error {
 	return m.fd.Close()
 }
 
-func (m *ShardingManifest) ApplyChangeSet(cs *protos.ManifestChangeSet) error {
-	if cs.Split != nil {
-		m.applySplit(cs.Split)
-	}
-	for _, change := range cs.ShardChange {
-		if change.Op == protos.ShardChange_DELETE {
-			continue
-		}
+func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
+	if cs.ShardCreate != nil {
 		shard := &ShardInfo{
-			ID:    change.ShardID,
-			Ver:   change.ShardVer,
-			Start: change.StartKey,
-			End:   change.EndKey,
-			files: map[uint64]struct{}{},
+			ID:         cs.ShardID,
+			Ver:        cs.ShardVer,
+			Start:      cs.ShardCreate.StartKey,
+			End:        cs.ShardCreate.EndKey,
+			files:      map[uint64]struct{}{},
+			properties: newShardProperties().applyPB(cs.ShardCreate.Properties),
 		}
-		for _, tID := range change.TableIDs {
+		for _, tID := range cs.ShardCreate.TableIDs {
 			shard.files[tID] = struct{}{}
 		}
-		m.shards[change.ShardID] = shard
-		if m.lastID < change.ShardID {
-			m.lastID = change.ShardID
-		}
+		m.shards[cs.ShardID] = shard
 	}
-	for _, change := range cs.Changes {
-		shardID := change.ShardID
-		fid := change.ID
+	shardInfo := m.shards[cs.ShardID]
+	if shardInfo == nil {
+		return errors.WithStack(errShardNotFound)
+	}
+	if cs.PreSplit != nil {
+		m.shards[cs.ShardID].preSplit = cs.PreSplit
+	}
+	if cs.Split != nil {
+		m.applySplit(cs)
+	}
+	for _, fid := range cs.TableDeletes {
+		m.deletions++
+		delete(shardInfo.files, fid)
+		delete(m.globalFiles, fid)
+	}
+	for _, create := range cs.L0Creates {
+		fid := create.ID
 		if fid > m.lastID {
 			m.lastID = fid
 		}
-		shardInfo := m.shards[shardID]
-		if shardInfo == nil {
-			return errors.WithStack(errShardNotFound)
+		m.creations++
+		shardInfo.files[fid] = struct{}{}
+		m.globalFiles[fid] = fileMeta{cf: -1, level: 0, smallest: create.Start, biggest: create.End}
+	}
+	for _, create := range cs.TableCreates {
+		fid := create.ID
+		if fid > m.lastID {
+			m.lastID = fid
 		}
-		switch change.Op {
-		case protos.ManifestChange_CREATE:
-			m.creations++
-			shardInfo.files[fid] = struct{}{}
-			m.globalFiles[fid] = fileMeta{cf: change.CF, level: change.Level}
-		case protos.ManifestChange_DELETE:
-			m.deletions++
-			delete(shardInfo.files, fid)
-			delete(m.globalFiles, fid)
-		case protos.ManifestChange_MOVE_DOWN:
-			m.creations++
-			m.deletions++
-			if _, ok := shardInfo.files[fid]; !ok {
-				return fmt.Errorf("move down file %d not found", fid)
-			}
-			m.globalFiles[fid] = fileMeta{cf: change.CF, level: change.Level}
+		m.creations++
+		shardInfo.files[fid] = struct{}{}
+		m.globalFiles[fid] = fileMeta{
+			cf:       create.CF,
+			level:    create.Level,
+			smallest: create.Smallest,
+			biggest:  create.Biggest,
 		}
 	}
-	for _, change := range cs.ShardChange {
-		if change.Op != protos.ShardChange_DELETE {
-			continue
-		}
-		delete(m.shards, change.ShardID)
+	if cs.ShardDelete {
+		delete(m.shards, cs.ShardID)
 	}
-	m.version = cs.Head.Version
+	m.version = cs.Version
 	return nil
 }
 
-func (m *ShardingManifest) applySplit(split *protos.ShardSplit) {
-	old := m.shards[split.OldID]
-	newShards := make([]*ShardInfo, len(split.IDs))
-	for i := 0; i < len(split.IDs); i++ {
+func (m *ShardingManifest) applySplit(cs *protos.ShardChangeSet) {
+	split := cs.Split
+	old := m.shards[cs.ShardID]
+	newShards := make([]*ShardInfo, len(split.NewShards))
+	for i := 0; i < len(split.NewShards); i++ {
 		startKey, endKey := getSplittingStartEnd(old.Start, old.End, split.Keys, i)
-		id := split.IDs[i]
+		id := split.NewShards[i].ShardID
 		ver := uint64(1)
+		var properties *shardProperties
 		if id == old.ID {
 			ver = old.Ver + 1
+			// inherit old shard properties.
+			properties = m.shards[id].properties
+		} else {
+			properties = newShardProperties()
 		}
 		shardInfo := &ShardInfo{
-			ID:    id,
-			Ver:   ver,
-			Start: startKey,
-			End:   endKey,
-			files: map[uint64]struct{}{},
+			ID:         id,
+			Ver:        ver,
+			Start:      startKey,
+			End:        endKey,
+			files:      map[uint64]struct{}{},
+			properties: properties.applyPB(split.NewShards[i]),
 		}
 		m.shards[id] = shardInfo
 		newShards[i] = shardInfo
@@ -226,32 +244,30 @@ func (m *ShardingManifest) applySplit(split *protos.ShardSplit) {
 	}
 }
 
-func (m *ShardingManifest) addChanges(keysMap *fileMetaPropertiesMap, changes ...*protos.ManifestChange) error {
-	changeSet := &protos.ManifestChangeSet{Changes: changes}
-	return m.writeChangeSet(keysMap, changeSet, true)
-}
-
-func (m *ShardingManifest) writeChangeSet(keysMap *fileMetaPropertiesMap, changeSet *protos.ManifestChangeSet, notifyMetaListener bool) error {
+func (m *ShardingManifest) writeChangeSet(shard *Shard, changeSet *protos.ShardChangeSet, notifyMetaListener bool) error {
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
-	changeSet.Head = &protos.HeadInfo{Version: m.orc.commitTs()}
+	changeSet.ShardID = shard.ID
+	changeSet.ShardVer = shard.Ver
+	changeSet.Version = m.orc.commitTs()
 	buf, err := changeSet.Marshal()
 	if err != nil {
 		return err
-	}
-	var metaChanges map[uint64]*protos.MetaChangeEvent
-	if m.metaListener != nil && notifyMetaListener {
-		// We create MetaChangeEvent before apply in case a shard is deleted.
-		metaChanges = m.createMetaChangeEvents(keysMap, changeSet)
 	}
 	if err = m.ApplyChangeSet(changeSet); err != nil {
 		return err
 	}
 	if m.metaListener != nil && notifyMetaListener {
-		for _, e := range metaChanges {
-			m.metaListener.OnChange(e)
-		}
+		m.metaListener.OnChange(&protos.MetaChangeEvent{
+			ShardID:      changeSet.ShardID,
+			ShardVer:     changeSet.ShardVer,
+			StartKey:     shard.Start,
+			EndKey:       shard.End,
+			L0Creates:    changeSet.L0Creates,
+			TableCreates: changeSet.TableCreates,
+			TableDeletes: changeSet.TableDeletes,
+		})
 	}
 	// Rewrite manifest if it'd shrink by 1/10 and it's big enough to care
 	if m.deletions > m.deletionsRewriteThreshold &&
@@ -260,10 +276,7 @@ func (m *ShardingManifest) writeChangeSet(keysMap *fileMetaPropertiesMap, change
 			return err
 		}
 	} else {
-		var lenCrcBuf [8]byte
-		binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(buf)))
-		binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(buf, y.CastagnoliCrcTable))
-		buf = append(lenCrcBuf[:], buf...)
+		buf = appendChecksumPacket([]byte{}, buf)
 		if _, err = m.fd.Write(buf); err != nil {
 			return err
 		}
@@ -271,88 +284,16 @@ func (m *ShardingManifest) writeChangeSet(keysMap *fileMetaPropertiesMap, change
 	return m.fd.Sync()
 }
 
-type fileMetaPropertiesMap struct {
-	m map[uint64]*fileMetaProperties
-}
-
-func newFileMetaKeysMap() *fileMetaPropertiesMap {
-	return &fileMetaPropertiesMap{m: map[uint64]*fileMetaProperties{}}
-}
-
-func (m *fileMetaPropertiesMap) addFromTables(tbls []table.Table) {
-	for _, t := range tbls {
-		m.m[t.ID()] = &fileMetaProperties{smallest: t.Smallest().UserKey, biggest: t.Biggest().UserKey}
+func (m *ShardingManifest) createMetaChangeEvents(changeSet *protos.ShardChangeSet, startKey, endKey []byte) *protos.MetaChangeEvent {
+	return &protos.MetaChangeEvent{
+		ShardID:      changeSet.ShardID,
+		ShardVer:     changeSet.ShardVer,
+		StartKey:     startKey,
+		EndKey:       endKey,
+		L0Creates:    changeSet.L0Creates,
+		TableCreates: changeSet.TableCreates,
+		TableDeletes: changeSet.TableDeletes,
 	}
-}
-
-func (m *fileMetaPropertiesMap) addFromShardL0Tables(tbls []*shardL0Table) {
-	for _, t := range tbls {
-		metaKeys := &fileMetaProperties{
-			commitTS: t.commitTS,
-		}
-		for _, cfTbl := range t.cfs {
-			if cfTbl == nil {
-				metaKeys.multiCFSmallest = append(metaKeys.multiCFSmallest, nil)
-				metaKeys.multiCFBiggest = append(metaKeys.multiCFBiggest, nil)
-			} else {
-				metaKeys.multiCFSmallest = append(metaKeys.multiCFSmallest, cfTbl.Smallest().UserKey)
-				metaKeys.multiCFBiggest = append(metaKeys.multiCFBiggest, cfTbl.Biggest().UserKey)
-			}
-		}
-		m.m[t.fid] = metaKeys
-	}
-}
-
-type fileMetaProperties struct {
-	smallest        []byte
-	biggest         []byte
-	multiCFSmallest [][]byte
-	multiCFBiggest  [][]byte
-	commitTS        uint64
-}
-
-func (m *ShardingManifest) createMetaChangeEvents(propsMap *fileMetaPropertiesMap, changeSet *protos.ManifestChangeSet) map[uint64]*protos.MetaChangeEvent {
-	metaChanges := map[uint64]*protos.MetaChangeEvent{}
-	for _, change := range changeSet.Changes {
-		e := metaChanges[change.ShardID]
-		if e == nil {
-			shardInfo := m.shards[change.ShardID]
-			e = &protos.MetaChangeEvent{
-				StartKey: shardInfo.Start,
-				EndKey:   shardInfo.End,
-			}
-			metaChanges[change.ShardID] = e
-		}
-		fileKeys := propsMap.m[change.ID]
-		if change.Level == 0 {
-			if change.Op == protos.ManifestChange_CREATE {
-				e.AddedL0Files = append(e.AddedL0Files, &protos.L0FileMeta{
-					ID:       0,
-					CommitTS: fileKeys.commitTS,
-				})
-			} else if change.Op == protos.ManifestChange_DELETE {
-				e.RemovedL0Files = append(e.RemovedL0Files, change.ID)
-			} else {
-				panic("unexpected op " + change.Op.String())
-			}
-		} else {
-			fileMeta := &protos.FileMeta{
-				ID:       change.ID,
-				CF:       change.CF,
-				Level:    change.Level,
-				Smallest: fileKeys.smallest,
-				Biggest:  fileKeys.biggest,
-			}
-			if change.Op == protos.ManifestChange_CREATE {
-				e.AddedFiles = append(e.AddedFiles, fileMeta)
-			} else if change.Op == protos.ManifestChange_DELETE {
-				e.RemovedFiles = append(e.RemovedFiles, fileMeta)
-			} else {
-				panic("unexpected op " + change.Op.String())
-			}
-		}
-	}
-	return metaChanges
 }
 
 type fileMeta struct {
@@ -375,13 +316,18 @@ func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset
 	var offset int64
 	for {
 		offset = r.count
-		var changeSet *protos.ManifestChangeSet
-		changeSet, err = readChangeSet(r)
+		var buf []byte
+		buf, err = readChecksumPacket(r)
 		if err != nil {
 			return nil, 0, err
 		}
-		if changeSet == nil {
+		if len(buf) == 0 {
 			break
+		}
+		changeSet := new(protos.ShardChangeSet)
+		err = changeSet.Unmarshal(buf)
+		if err != nil {
+			return nil, 0, err
 		}
 		err = ret.ApplyChangeSet(changeSet)
 		if err != nil {

@@ -6,7 +6,6 @@ import (
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"os"
 	"sync/atomic"
@@ -16,14 +15,21 @@ import (
 type shardFlushTask struct {
 	shard        *Shard
 	tbl          *memtable.CFTable
-	commitTS     uint64
-	splittingIdx int
-	splitting    bool
+	preSplitKeys [][]byte
+	properties   *protos.ShardProperties
 }
 
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 	defer c.Done()
 	for task := range sdb.flushCh {
+		if task.tbl == nil {
+			y.Assert(len(task.preSplitKeys) > 0)
+			err := sdb.addShardL0Table(task, nil)
+			if err != nil {
+				panic(err)
+			}
+			continue
+		}
 		id := sdb.idAlloc.AllocID()
 		fd, err := sdb.createL0File(id)
 		if err != nil {
@@ -57,7 +63,7 @@ func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 	m := task.tbl
 	log.S().Info("flush memtable")
 	writer := fileutil.NewBufferedWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
-	builder := newShardL0Builder(sdb.numCFs, task.commitTS, sdb.opt.TableBuilderOptions)
+	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		it := m.NewIterator(cf, false)
 		if it == nil {
@@ -77,26 +83,27 @@ func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 
 func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) error {
 	shard := task.shard
-	change := newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
-	keysMap := newFileMetaKeysMap()
-	keysMap.addFromShardL0Tables([]*shardL0Table{l0})
-	err := sdb.manifest.addChanges(keysMap, change)
+	var creates []*protos.L0Create
+	if l0 != nil {
+		creates = []*protos.L0Create{newL0Create(l0, shard.properties.toPB(shard.ID), shard.Start, shard.End)}
+	}
+	var preSplit *protos.ShardPreSplit
+	if len(task.preSplitKeys) > 0 {
+		preSplit = &protos.ShardPreSplit{Keys: task.preSplitKeys}
+	}
+	changeSet := &protos.ShardChangeSet{
+		L0Creates: creates,
+		PreSplit:  preSplit,
+	}
+	err := sdb.manifest.writeChangeSet(shard, changeSet, true)
 	if err != nil {
-		if errors.Cause(err) != errShardNotFound {
-			return err
-		}
-		change = newManifestChange(l0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE)
-		err = sdb.manifest.addChanges(keysMap, change)
-		if err != nil {
-			return err
-		}
+		return err
+	}
+	if l0 == nil {
+		return nil
 	}
 	oldL0sPtr := shard.l0s
 	oldMemTblsPtr := shard.memTbls
-	if task.splitting {
-		oldL0sPtr = shard.splittingL0s[task.splittingIdx]
-		oldMemTblsPtr = shard.splittingMemTbls[task.splittingIdx]
-	}
 	oldL0Tbls := (*shardL0Tables)(atomic.LoadPointer(oldL0sPtr))
 	newL0Tbls := &shardL0Tables{make([]*shardL0Table, 0, len(oldL0Tbls.tables)+1)}
 	newL0Tbls.tables = append(newL0Tbls.tables, l0)

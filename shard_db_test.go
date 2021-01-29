@@ -2,6 +2,7 @@ package badger
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
@@ -23,7 +24,7 @@ func TestShardingDB(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 	opts := getTestOptions(dir)
-	opts.NumCompactors = 0
+	opts.NumCompactors = 1
 	opts.NumLevelZeroTables = 1
 	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
 	db, err := OpenShardingDB(opts)
@@ -60,6 +61,20 @@ func TestShardingDB(t *testing.T) {
 	//sc.checkData()
 }
 
+func TestWALRecovery(t *testing.T) {
+	runPprof()
+	dir, err := ioutil.TempDir("", "sharding")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	opts := getTestOptions(dir)
+	opts.NumCompactors = 1
+	opts.NumLevelZeroTables = 1
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
+	db, err := OpenShardingDB(opts)
+	require.NoError(t, err)
+	initialIngest(t, db)
+}
+
 type shardingCase struct {
 	t      *testing.T
 	n      int
@@ -93,7 +108,17 @@ func (sc *shardingCase) loadData() {
 }
 
 func initialIngest(t *testing.T, db *ShardingDB) {
-	err := db.Ingest(&IngestTree{ShardID: 1, ShardVer: 1, Meta: &protos.MetaChangeEvent{StartKey: nil, EndKey: globalShardEndKey}})
+	err := db.Ingest(&IngestTree{
+		ChangeSet: &protos.ShardChangeSet{
+			ShardID:  1,
+			ShardVer: 1,
+			ShardCreate: &protos.ShardCreate{
+				StartKey:   nil,
+				EndKey:     globalShardEndKey,
+				Properties: &protos.ShardProperties{ShardID: 1},
+			},
+		},
+	})
 	require.NoError(t, err)
 }
 
@@ -130,7 +155,11 @@ func (sc *shardingCase) preSplit(shardID, ver uint64, keys ...[]byte) {
 }
 
 func (sc *shardingCase) finishSplit(shardID, ver uint64, newIDs []uint64) {
-	err := sc.tester.finishSplit(shardID, ver, newIDs)
+	newProps := make([]*protos.ShardProperties, len(newIDs))
+	for i, newID := range newIDs {
+		newProps[i] = &protos.ShardProperties{ShardID: newID}
+	}
+	err := sc.tester.finishSplit(shardID, ver, newProps)
 	require.NoError(sc.t, err)
 }
 
@@ -197,6 +226,7 @@ func TestShardingMetaChangeListener(t *testing.T) {
 	opts.MetaChangeListener = l
 	db, err := OpenShardingDB(opts)
 	require.NoError(t, err)
+	initialIngest(t, db)
 
 	numKeys := 1000
 	numVers := 10
@@ -237,8 +267,14 @@ type metaListener struct {
 
 func (l *metaListener) OnChange(e *protos.MetaChangeEvent) {
 	l.lock.Lock()
-	for _, addedL0 := range e.AddedL0Files {
-		l.commitTS = append(l.commitTS, addedL0.CommitTS)
+	for _, l0 := range e.L0Creates {
+		if l0.Properties != nil {
+			for i, key := range l0.Properties.Keys {
+				if key == commitTSKey {
+					l.commitTS = append(l.commitTS, binary.LittleEndian.Uint64(l0.Properties.Values[i]))
+				}
+			}
+		}
 	}
 	l.lock.Unlock()
 }
@@ -251,8 +287,12 @@ func (l *metaListener) getAllCommitTS() []uint64 {
 	return result
 }
 
+var once = sync.Once{}
+
 func runPprof() {
-	go func() {
-		http.ListenAndServe(":9291", nil)
-	}()
+	once.Do(func() {
+		go func() {
+			http.ListenAndServe(":9291", nil)
+		}()
+	})
 }

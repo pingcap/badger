@@ -49,7 +49,7 @@ func (sdb *ShardingDB) PreSplit(shardID, ver uint64, keys [][]byte) error {
 }
 
 func (sdb *ShardingDB) splitShardFiles(task *preSplitTask, d *deletions) error {
-	change := &protos.ManifestChangeSet{}
+	change := &protos.ShardChangeSet{}
 	shard := task.shard
 	shard.lock.Lock()
 	defer shard.lock.Unlock()
@@ -66,7 +66,7 @@ func (sdb *ShardingDB) splitShardFiles(task *preSplitTask, d *deletions) error {
 			}
 		}
 	}
-	return sdb.manifest.writeChangeSet(nil, change, false)
+	return sdb.manifest.writeChangeSet(shard, change, false)
 }
 
 func (sdb *ShardingDB) waitForAllMemTablesFlushed(shard *Shard) {
@@ -84,39 +84,30 @@ func (sdb *ShardingDB) waitForAllMemTablesFlushed(shard *Shard) {
 	}
 }
 
-func (sdb *ShardingDB) splitShardL0Tables(task *preSplitTask, d *deletions, change *protos.ManifestChangeSet) error {
+func (sdb *ShardingDB) splitShardL0Tables(task *preSplitTask, d *deletions, change *protos.ShardChangeSet) error {
 	shard := task.shard
 	keys := task.keys
 	l0s := shard.loadL0Tables()
-	var allNewL0s [][]*shardL0Table
-	for i := len(l0s.tables) - 1; i >= 0; i-- {
-		// iterator the l0s in reverse order to ensure older tables get smaller id.
+	var allNewL0s []*shardL0Table
+	for i := 0; i < len(l0s.tables); i++ {
 		l0Tbl := l0s.tables[i]
 		newL0s, err := sdb.splitShardL0Table(task, l0Tbl)
 		if err != nil {
 			return err
 		}
-		for _, newL0 := range newL0s {
-			change.Changes = append(change.Changes, newManifestChange(newL0.fid, shard.ID, -1, 0, protos.ManifestChange_CREATE))
+		for splitIdx, newL0 := range newL0s {
+			if newL0 != nil {
+				start, end := getSplittingStartEnd(shard.Start, shard.End, keys, splitIdx)
+				change.L0Creates = append(change.L0Creates, newL0Create(newL0, nil, start, end))
+				splittingL0s := shard.splittingL0Tbls[splitIdx]
+				splittingL0s.tables = append(splittingL0s.tables, newL0)
+				allNewL0s = append(allNewL0s, newL0)
+			}
 		}
-		allNewL0s = append(allNewL0s, newL0s)
 		d.Append(l0Tbl)
-		change.Changes = append(change.Changes, newManifestChange(l0Tbl.fid, shard.ID, -1, 0, protos.ManifestChange_DELETE))
+		change.TableDeletes = append(change.TableDeletes, l0Tbl.fid)
 	}
-	for i := 0; i <= len(keys); i++ {
-		for {
-			splitingL0s := shard.loadSplittingL0Tables(i)
-			newSplitingL0s := &shardL0Tables{}
-			newSplitingL0s.tables = append(newSplitingL0s.tables, splitingL0s.tables...)
-			for j := 0; j < len(allNewL0s); j++ {
-				newSplitingL0s.tables = append(newSplitingL0s.tables, allNewL0s[j][i])
-			}
-			if shard.casSplittingL0Tables(i, splitingL0s, newSplitingL0s) {
-				break
-			}
-		}
-	}
-	atomic.StorePointer(shard.l0s, unsafe.Pointer(&shardL0Tables{}))
+	y.Assert(atomic.CompareAndSwapPointer(shard.l0s, unsafe.Pointer(l0s), unsafe.Pointer(&shardL0Tables{tables: allNewL0s})))
 	return nil
 }
 
@@ -133,13 +124,13 @@ func (sdb *ShardingDB) splitShardL0Table(task *preSplitTask, l0 *shardL0Table) (
 	}
 	var newL0s []*shardL0Table
 	for _, key := range task.keys {
-		newL0, err := sdb.buildShardL0BeforeKey(iters, key, task, l0.commitTS)
+		newL0, err := sdb.buildShardL0BeforeKey(iters, key, task)
 		if err != nil {
 			return nil, err
 		}
 		newL0s = append(newL0s, newL0)
 	}
-	lastL0, err := sdb.buildShardL0BeforeKey(iters, globalShardEndKey, task, l0.commitTS)
+	lastL0, err := sdb.buildShardL0BeforeKey(iters, globalShardEndKey, task)
 	if err != nil {
 		return nil, err
 	}
@@ -147,8 +138,9 @@ func (sdb *ShardingDB) splitShardL0Table(task *preSplitTask, l0 *shardL0Table) (
 	return newL0s, nil
 }
 
-func (sdb *ShardingDB) buildShardL0BeforeKey(iters []y.Iterator, key []byte, task *preSplitTask, commitTS uint64) (*shardL0Table, error) {
-	builder := newShardL0Builder(sdb.numCFs, commitTS, sdb.opt.TableBuilderOptions)
+func (sdb *ShardingDB) buildShardL0BeforeKey(iters []y.Iterator, key []byte, task *preSplitTask) (*shardL0Table, error) {
+	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
+	var hasData bool
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		iter := iters[cf]
 		if iter == nil {
@@ -159,11 +151,17 @@ func (sdb *ShardingDB) buildShardL0BeforeKey(iters []y.Iterator, key []byte, tas
 				break
 			}
 			builder.Add(cf, iter.Key(), iter.Value())
+			hasData = true
 		}
 	}
+	if !hasData {
+		return nil, nil
+	}
 	shardL0Data := builder.Finish()
-	fid := task.reservedIDs[0]
-	task.reservedIDs = task.reservedIDs[1:]
+	// Allocate the ID in reverse order so the latest table get larger ID.
+	lastIDIdx := len(task.reservedIDs) - 1
+	fid := task.reservedIDs[lastIDIdx]
+	task.reservedIDs = task.reservedIDs[:lastIDIdx]
 	fd, err := sdb.createL0File(fid)
 	if err != nil {
 		panic(err)
@@ -184,7 +182,7 @@ func (sdb *ShardingDB) buildShardL0BeforeKey(iters []y.Iterator, key []byte, tas
 	return tbl, nil
 }
 
-func (sdb *ShardingDB) splitTables(shard *Shard, cf int, level int, keys [][]byte, d *deletions, changeSet *protos.ManifestChangeSet) error {
+func (sdb *ShardingDB) splitTables(shard *Shard, cf int, level int, keys [][]byte, d *deletions, changeSet *protos.ShardChangeSet) error {
 	scf := shard.cfs[cf]
 	oldHandler := scf.getLevelHandler(level)
 	oldTables := oldHandler.tables
@@ -214,11 +212,11 @@ func (sdb *ShardingDB) splitTables(shard *Shard, cf int, level int, keys [][]byt
 				return err
 			}
 			if ntbl != nil {
-				changeSet.Changes = append(changeSet.Changes, newShardCreateChange(shard.ID, ntbl.ID(), cf, level))
+				changeSet.TableCreates = append(changeSet.TableCreates, newTableCreate(tbl, cf, level))
 				newTbls = append(newTbls, ntbl)
 			}
 		}
-		changeSet.Changes = append(changeSet.Changes, newShardDeleteChange(shard.ID, tbl.ID(), cf))
+		changeSet.TableDeletes = append(changeSet.TableDeletes, tbl.ID())
 	}
 	newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level, sdb.metrics)
 	newHandler.totalSize = oldHandler.totalSize
@@ -275,7 +273,7 @@ func builderToTable(b *sstable.Builder) (table.Table, error) {
 
 // FinishSplit finishes the Split process on a Shard in PreSplitState.
 // This is done after preSplit is done, so we don't need to acquire any lock, just atomic CAS will do.
-func (sdb *ShardingDB) FinishSplit(oldShardID, ver uint64, newShardIDs []uint64) (newShards []*Shard, err error) {
+func (sdb *ShardingDB) FinishSplit(oldShardID, ver uint64, newShardsProps []*protos.ShardProperties) (newShards []*Shard, err error) {
 	oldShard := sdb.GetShard(oldShardID)
 	if oldShard.Ver != ver {
 		return nil, errShardNotMatch
@@ -283,8 +281,8 @@ func (sdb *ShardingDB) FinishSplit(oldShardID, ver uint64, newShardIDs []uint64)
 	if !oldShard.isSplitting() {
 		return nil, errors.New("shard is not in splitting state")
 	}
-	if len(newShardIDs) != len(oldShard.splittingMemTbls) {
-		return nil, fmt.Errorf("new ShardIDs length %d is not equals to splittingMemTbls length %d", len(newShardIDs), len(oldShard.splittingL0s))
+	if len(newShardsProps) != len(oldShard.splittingMemTbls) {
+		return nil, fmt.Errorf("newShardsProps length %d is not equals to splittingMemTbls length %d", len(newShardsProps), len(oldShard.splittingMemTbls))
 	}
 	oldShard.lock.Lock()
 	defer func() {
@@ -293,14 +291,13 @@ func (sdb *ShardingDB) FinishSplit(oldShardID, ver uint64, newShardIDs []uint64)
 		}
 		oldShard.lock.Unlock()
 	}()
-	changeSet := &protos.ManifestChangeSet{
+	changeSet := &protos.ShardChangeSet{
 		Split: &protos.ShardSplit{
-			OldID: oldShardID,
-			IDs:   newShardIDs,
-			Keys:  oldShard.splitKeys,
+			NewShards: newShardsProps,
+			Keys:      oldShard.splitKeys,
 		},
 	}
-	err = sdb.manifest.writeChangeSet(nil, changeSet, true)
+	err = sdb.manifest.writeChangeSet(oldShard, changeSet, true)
 	if err != nil {
 		return nil, err
 	}
@@ -308,17 +305,13 @@ func (sdb *ShardingDB) FinishSplit(oldShardID, ver uint64, newShardIDs []uint64)
 	for i := range oldShard.splittingMemTbls {
 		startKey, endKey := getSplittingStartEnd(oldShard.Start, oldShard.End, oldShard.splitKeys, i)
 		ver := uint64(1)
-		if newShardIDs[i] == oldShardID {
+		if newShardsProps[i].ShardID == oldShardID {
 			ver = oldShard.Ver + 1
 		}
-		shard := newShard(newShardIDs[i], ver, startKey, endKey, sdb.opt, sdb.metrics)
+		shard := newShard(newShardsProps[i], ver, startKey, endKey, sdb.opt, sdb.metrics)
 		shard.memTbls = oldShard.splittingMemTbls[i]
-		writable := shard.loadWritableMemTable()
-		if writable != nil {
-			iter := writable.NewIterator(0, false)
-			iter.Rewind()
-		}
-		shard.l0s = oldShard.splittingL0s[i]
+		shard.l0s = new(unsafe.Pointer)
+		atomic.StorePointer(shard.l0s, unsafe.Pointer(oldShard.splittingL0Tbls[i]))
 		newShards[i] = shard
 	}
 	for cf, scf := range oldShard.cfs {
@@ -332,7 +325,7 @@ func (sdb *ShardingDB) FinishSplit(oldShardID, ver uint64, newShardIDs []uint64)
 	for _, nShard := range newShards {
 		sdb.shardMap.Store(nShard.ID, nShard)
 	}
-	log.S().Infof("shard %d split to %v", oldShardID, newShardIDs)
+	log.S().Infof("shard %d split to %s", oldShardID, newShardsProps)
 	return newShards, nil
 }
 

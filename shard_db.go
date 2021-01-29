@@ -148,7 +148,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 
 func (sdb *ShardingDB) loadShards() error {
 	for _, mShard := range sdb.manifest.shards {
-		shard := newShard(mShard.ID, mShard.Ver, mShard.Start, mShard.End, sdb.opt, sdb.metrics)
+		shard := newShard(mShard.properties.toPB(mShard.ID), mShard.Ver, mShard.Start, mShard.End, sdb.opt, sdb.metrics)
 		for fid := range mShard.files {
 			cfLevel, ok := sdb.manifest.globalFiles[fid]
 			y.Assert(ok)
@@ -227,16 +227,6 @@ func (sdb *ShardingDB) PrintStructure() {
 		return true
 	})
 	for _, shard := range allShards {
-		if shard.isSplitting() {
-			var l0IDs []uint64
-			for i := 0; i < len(shard.splittingL0s); i++ {
-				splittingL0s := shard.loadSplittingL0Tables(i)
-				for _, tbl := range splittingL0s.tables {
-					l0IDs = append(l0IDs, tbl.fid)
-				}
-			}
-			log.S().Infof("shard %d splitting l0 tables %v", l0IDs)
-		}
 		l0s := shard.loadL0Tables()
 		var l0IDs []uint64
 		for _, tbl := range l0s.tables {
@@ -286,6 +276,7 @@ type WriteBatch struct {
 	entries       [][]*memtable.Entry
 	estimatedSize int64
 	notify        chan error
+	properties    map[string][]byte
 }
 
 func (sdb *ShardingDB) NewWriteBatch(shard *Shard) *WriteBatch {
@@ -331,6 +322,10 @@ func (wb *WriteBatch) Delete(cf byte, key []byte, version uint64) error {
 	})
 	wb.estimatedSize += int64(len(key) + memtable.EstimateNodeSize)
 	return nil
+}
+
+func (wb *WriteBatch) SetProperty(key string, val []byte) {
+	wb.properties[key] = val
 }
 
 func (sdb *ShardingDB) Write(wb *WriteBatch) error {
@@ -429,13 +424,12 @@ func (sdb *ShardingDB) RemoveShard(shardID uint64, removeFile bool) error {
 	if !ok {
 		return errors.New("shard not found")
 	}
-	change := &protos.ManifestChangeSet{}
-	change.ShardChange = []*protos.ShardChange{{Op: protos.ShardChange_DELETE, ShardID: shardID}}
-	err := sdb.manifest.writeChangeSet(nil, change, false)
+	change := &protos.ShardChangeSet{ShardID: shardID, ShardDelete: true}
+	shard := shardVal.(*Shard)
+	err := sdb.manifest.writeChangeSet(shard, change, false)
 	if err != nil {
 		return err
 	}
-	shard := shardVal.(*Shard)
 	shard.removeFilesOnDel = removeFile
 	sdb.shardMap.Delete(shardID)
 	guard := sdb.resourceMgr.Acquire()
