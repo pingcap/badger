@@ -255,6 +255,22 @@ func (m *ShardingManifest) writeChangeSet(shard *Shard, changeSet *protos.ShardC
 	if err != nil {
 		return err
 	}
+	// Rewrite manifest if it'd shrink by 1/10 and it's big enough to care
+	if m.deletions > m.deletionsRewriteThreshold &&
+		m.deletions > manifestDeletionsRatio*(m.creations-m.deletions) {
+		if err = m.rewrite(); err != nil {
+			return err
+		}
+	} else {
+		buf = appendChecksumPacket([]byte{}, buf)
+		if _, err = m.fd.Write(buf); err != nil {
+			return err
+		}
+	}
+	err = m.fd.Sync()
+	if err != nil {
+		return err
+	}
 	if err = m.ApplyChangeSet(changeSet); err != nil {
 		return err
 	}
@@ -269,19 +285,51 @@ func (m *ShardingManifest) writeChangeSet(shard *Shard, changeSet *protos.ShardC
 			TableDeletes: changeSet.TableDeletes,
 		})
 	}
-	// Rewrite manifest if it'd shrink by 1/10 and it's big enough to care
-	if m.deletions > m.deletionsRewriteThreshold &&
-		m.deletions > manifestDeletionsRatio*(m.creations-m.deletions) {
-		if err = m.rewrite(); err != nil {
-			return err
-		}
-	} else {
-		buf = appendChecksumPacket([]byte{}, buf)
-		if _, err = m.fd.Write(buf); err != nil {
+	return nil
+}
+
+func (m *ShardingManifest) writeFinishSplitChangeSet(shards []*Shard, split *protos.ShardChangeSet, l0s []*protos.ShardChangeSet, notifyMetaListener bool) error {
+	// Maybe we could use O_APPEND instead (on certain file systems)
+	m.appendLock.Lock()
+	defer m.appendLock.Unlock()
+	commitTS := m.orc.commitTs()
+	var buf []byte
+	data, _ := split.Marshal()
+	buf = appendChecksumPacket(buf, data)
+	for _, l0 := range l0s {
+		l0.Version = commitTS
+		data, _ = l0.Marshal()
+		buf = appendChecksumPacket(buf, data)
+	}
+	if _, err := m.fd.Write(buf); err != nil {
+		return err
+	}
+	err := m.fd.Sync()
+	if err != nil {
+		return err
+	}
+	if err = m.ApplyChangeSet(split); err != nil {
+		return err
+	}
+	for _, l0 := range l0s {
+		if err = m.ApplyChangeSet(l0); err != nil {
 			return err
 		}
 	}
-	return m.fd.Sync()
+	if m.metaListener != nil && notifyMetaListener {
+		for i, changeSet := range l0s {
+			shard := shards[i]
+			m.metaListener.OnChange(&protos.MetaChangeEvent{
+				ShardID:      changeSet.ShardID,
+				ShardVer:     changeSet.ShardVer,
+				StartKey:     shard.Start,
+				EndKey:       shard.End,
+				L0Creates:    changeSet.L0Creates,
+				TableCreates: changeSet.TableCreates,
+			})
+		}
+	}
+	return nil
 }
 
 func (m *ShardingManifest) createMetaChangeEvents(changeSet *protos.ShardChangeSet, startKey, endKey []byte) *protos.MetaChangeEvent {

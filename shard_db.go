@@ -13,6 +13,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"math"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -192,6 +193,16 @@ func (sdb *ShardingDB) loadShards() error {
 			}
 		}
 		sdb.shardMap.Store(shard.ID, shard)
+		walName := shard.walFilename
+		if mShard.preSplit != nil {
+			shard.setSplitKeys(mShard.preSplit.Keys)
+			sdb.replayWAL(shard)
+		} else {
+			// The wal is redundant if manifest is not in pre-split state.
+			if _, err := os.Stat(walName); err == nil {
+				os.Remove(walName)
+			}
+		}
 	}
 	return nil
 }
@@ -275,7 +286,6 @@ type WriteBatch struct {
 	cfConfs       []CFConfig
 	entries       [][]*memtable.Entry
 	estimatedSize int64
-	notify        chan error
 	properties    map[string][]byte
 }
 
@@ -283,7 +293,6 @@ func (sdb *ShardingDB) NewWriteBatch(shard *Shard) *WriteBatch {
 	return &WriteBatch{
 		shard:   shard,
 		cfConfs: sdb.opt.CFs,
-		notify:  make(chan error, 1),
 		entries: make([][]*memtable.Entry, sdb.numCFs),
 	}
 }
@@ -329,8 +338,9 @@ func (wb *WriteBatch) SetProperty(key string, val []byte) {
 }
 
 func (sdb *ShardingDB) Write(wb *WriteBatch) error {
-	sdb.writeCh <- engineTask{writeTask: wb}
-	return <-wb.notify
+	notify := make(chan error, 1)
+	sdb.writeCh <- engineTask{writeTask: wb, notify: notify}
+	return <-notify
 }
 
 type Snapshot struct {

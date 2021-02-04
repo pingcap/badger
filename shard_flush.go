@@ -17,11 +17,23 @@ type shardFlushTask struct {
 	tbl          *memtable.CFTable
 	preSplitKeys [][]byte
 	properties   *protos.ShardProperties
+
+	finishSplitOldShard *Shard
+	finishSplitShards   []*Shard
+	finishSplitMemTbls  []*shardingMemTables
+	finishSplitProps    []*protos.ShardProperties
 }
 
 func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 	defer c.Done()
 	for task := range sdb.flushCh {
+		if len(task.finishSplitShards) > 0 {
+			err := sdb.flushFinishSplit(task)
+			if err != nil {
+				panic(err)
+			}
+			continue
+		}
 		if task.tbl == nil {
 			y.Assert(len(task.preSplitKeys) > 0)
 			err := sdb.addShardL0Table(task, nil)
@@ -30,26 +42,9 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 			}
 			continue
 		}
-		id := sdb.idAlloc.AllocID()
-		fd, err := sdb.createL0File(id)
+		l0Table, err := sdb.flushMemTable(task.tbl)
 		if err != nil {
-			panic(err)
-		}
-		err = sdb.flushMemTable(task, fd)
-		if err != nil {
-			panic(err)
-		}
-		filename := fd.Name()
-		fd.Close()
-		if sdb.s3c != nil {
-			err = putSSTBuildResultToS3(sdb.s3c, &sstable.BuildResult{FileName: filename})
-			if err != nil {
-				// TODO: handle this error by queue the failed operation and retry.
-				panic(err)
-			}
-		}
-		l0Table, err := openShardL0Table(filename, id)
-		if err != nil {
+			// TODO: handle S3 error by queue the failed operation and retry.
 			panic(err)
 		}
 		err = sdb.addShardL0Table(task, l0Table)
@@ -59,9 +54,61 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 	}
 }
 
-func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
-	m := task.tbl
-	log.S().Info("flush memtable")
+func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
+	allL0s := make([]*shardL0Tables, len(task.finishSplitMemTbls))
+	for idx, memTbls := range task.finishSplitMemTbls {
+		l0s := &shardL0Tables{tables: make([]*shardL0Table, len(memTbls.tables))}
+		for j, memTbl := range memTbls.tables {
+			l0Table, err := sdb.flushMemTable(memTbl)
+			if err != nil {
+				// TODO: handle s3 error by queue the failed operation and retry.
+				panic(err)
+			}
+			l0s.tables[j] = l0Table
+		}
+		allL0s[idx] = l0s
+	}
+	oldShard := task.finishSplitOldShard
+	splitChangeSet := &protos.ShardChangeSet{
+		ShardID:  oldShard.ID,
+		ShardVer: oldShard.Ver,
+		Split: &protos.ShardSplit{
+			NewShards: task.finishSplitProps,
+			Keys:      oldShard.splitKeys,
+		},
+	}
+	l0ChangeSets := make([]*protos.ShardChangeSet, len(task.finishSplitMemTbls))
+	for i := range allL0s {
+		nShard := task.finishSplitShards[i]
+		l0s := allL0s[i]
+		l0ChangeSet := &protos.ShardChangeSet{
+			ShardID:  nShard.ID,
+			ShardVer: nShard.Ver,
+		}
+		for _, l0 := range l0s.tables {
+			l0ChangeSet.L0Creates = append(l0ChangeSet.L0Creates, &protos.L0Create{
+				ID:    l0.fid,
+				Start: nShard.Start,
+				End:   nShard.End,
+			})
+		}
+		l0ChangeSets[i] = l0ChangeSet
+	}
+	err := sdb.manifest.writeFinishSplitChangeSet(task.finishSplitShards, splitChangeSet, l0ChangeSets, true)
+	if err != nil {
+		return err
+	}
+	os.Remove(oldShard.walFilename)
+	return nil
+}
+
+func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable) (*shardL0Table, error) {
+	id := sdb.idAlloc.AllocID()
+	log.S().Infof("flush memtable %d", id)
+	fd, err := sdb.createL0File(id)
+	if err != nil {
+		return nil, err
+	}
 	writer := fileutil.NewBufferedWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
 	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
 	for cf := 0; cf < sdb.numCFs; cf++ {
@@ -74,11 +121,24 @@ func (sdb *ShardingDB) flushMemTable(task *shardFlushTask, fd *os.File) error {
 		}
 	}
 	shardL0Data := builder.Finish()
-	_, err := writer.Write(shardL0Data)
+	_, err = writer.Write(shardL0Data)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writer.Finish()
+	err = writer.Finish()
+	if err != nil {
+		return nil, err
+	}
+	filename := fd.Name()
+	_ = fd.Close()
+	if sdb.s3c != nil {
+		err = putSSTBuildResultToS3(sdb.s3c, &sstable.BuildResult{FileName: filename})
+		if err != nil {
+			// TODO: handle this error by queue the failed operation and retry.
+			return nil, err
+		}
+	}
+	return openShardL0Table(filename, id)
 }
 
 func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) error {

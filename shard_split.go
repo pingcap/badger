@@ -29,13 +29,13 @@ func (sdb *ShardingDB) PreSplit(shardID, ver uint64, keys [][]byte) error {
 		log.Info("shard not match", zap.Uint64("current", shard.Ver), zap.Uint64("request", ver))
 		return errShardNotMatch
 	}
+	notify := make(chan error, 1)
 	task := &preSplitTask{
-		shard:  shard,
-		keys:   keys,
-		notify: make(chan error, 1),
+		shard: shard,
+		keys:  keys,
 	}
-	sdb.writeCh <- engineTask{preSplitTask: task}
-	err := <-task.notify
+	sdb.writeCh <- engineTask{preSplitTask: task, notify: notify}
+	err := <-notify
 	if err != nil {
 		return err
 	}
@@ -284,49 +284,17 @@ func (sdb *ShardingDB) FinishSplit(oldShardID, ver uint64, newShardsProps []*pro
 	if len(newShardsProps) != len(oldShard.splittingMemTbls) {
 		return nil, fmt.Errorf("newShardsProps length %d is not equals to splittingMemTbls length %d", len(newShardsProps), len(oldShard.splittingMemTbls))
 	}
-	oldShard.lock.Lock()
-	defer func() {
-		if err == nil {
-			atomic.StoreUint32(&oldShard.splitState, splitStateSplitDone)
-		}
-		oldShard.lock.Unlock()
-	}()
-	changeSet := &protos.ShardChangeSet{
-		Split: &protos.ShardSplit{
-			NewShards: newShardsProps,
-			Keys:      oldShard.splitKeys,
-		},
+	notify := make(chan error, 1)
+	task := &finishSplitTask{
+		shard:    oldShard,
+		newProps: newShardsProps,
 	}
-	err = sdb.manifest.writeChangeSet(oldShard, changeSet, true)
+	sdb.writeCh <- engineTask{finishSplitTask: task, notify: notify}
+	err = <-notify
 	if err != nil {
 		return nil, err
 	}
-	newShards = make([]*Shard, len(oldShard.splittingMemTbls))
-	for i := range oldShard.splittingMemTbls {
-		startKey, endKey := getSplittingStartEnd(oldShard.Start, oldShard.End, oldShard.splitKeys, i)
-		ver := uint64(1)
-		if newShardsProps[i].ShardID == oldShardID {
-			ver = oldShard.Ver + 1
-		}
-		shard := newShard(newShardsProps[i], ver, startKey, endKey, sdb.opt, sdb.metrics)
-		shard.memTbls = oldShard.splittingMemTbls[i]
-		shard.l0s = new(unsafe.Pointer)
-		atomic.StorePointer(shard.l0s, unsafe.Pointer(oldShard.splittingL0Tbls[i]))
-		newShards[i] = shard
-	}
-	for cf, scf := range oldShard.cfs {
-		for l := 1; l <= ShardMaxLevel; l++ {
-			level := scf.getLevelHandler(l)
-			for _, t := range level.tables {
-				sdb.insertTableToNewShard(t, cf, level.level, newShards, oldShard.splitKeys)
-			}
-		}
-	}
-	for _, nShard := range newShards {
-		sdb.shardMap.Store(nShard.ID, nShard)
-	}
-	log.S().Infof("shard %d split to %s", oldShardID, newShardsProps)
-	return newShards, nil
+	return task.newShards, nil
 }
 
 func (sdb *ShardingDB) insertTableToNewShard(t table.Table, cf, level int, shards []*Shard, splitKeys [][]byte) {
