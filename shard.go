@@ -39,6 +39,7 @@ type Shard struct {
 	splitState       uint32
 	splitKeys        [][]byte
 	splittingMemTbls []*unsafe.Pointer
+	splittingCnt     int
 
 	// Only written by PreSplit, used By FinishSplit.
 	splittingL0Tbls  []*shardL0Tables
@@ -285,6 +286,10 @@ func (s *Shard) OverlapRange(startKey, endKey []byte) bool {
 
 func (s *Shard) OverlapKey(key []byte) bool {
 	return bytes.Compare(s.Start, key) <= 0 && bytes.Compare(key, s.End) < 0
+}
+
+func (s *Shard) GetProperty(key string) ([]byte, bool) {
+	return s.properties.get(key)
 }
 
 type shardCF struct {

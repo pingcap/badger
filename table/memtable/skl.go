@@ -38,7 +38,6 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/coocood/rtutil"
 	"github.com/pingcap/badger/y"
 )
 
@@ -82,7 +81,10 @@ type skiplist struct {
 	height int32 // Current height. 1 <= height <= kMaxHeight. CAS.
 	head   *node
 	arena  *arena
+	randX  uint32
 }
+
+const randSeed = 410958445
 
 // DecrRef decrements the refcount, deallocating the Skiplist when done using it
 func (s *skiplist) Delete() {
@@ -122,6 +124,7 @@ func newSkiplist(arenaSize int64) *skiplist {
 		height: 1,
 		head:   head,
 		arena:  arena,
+		randX:  randSeed,
 	}
 }
 
@@ -180,10 +183,20 @@ func (n *node) casNextOffset(h int, old, val uint32) bool {
 
 func (s *skiplist) randomHeight() int {
 	h := 1
-	for h < maxHeight && rtutil.FastRand() <= heightIncrease {
+	for h < maxHeight && s.nextRand() <= heightIncrease {
 		h++
 	}
 	return h
+}
+
+func (s *skiplist) nextRand() uint32 {
+	// See https://en.wikipedia.org/wiki/Xorshift
+	x := s.randX
+	x ^= x << 13
+	x ^= x >> 17
+	x ^= x << 5
+	s.randX = x
+	return x
 }
 
 func (s *skiplist) getNext(nd *node, height int) *node {

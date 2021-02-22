@@ -83,15 +83,7 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint
 		newTableSize = minSize
 	}
 	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
-	for {
-		oldMemTbls := shard.loadMemTables()
-		newMemTbls := &shardingMemTables{}
-		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
-		newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
-		if atomic.CompareAndSwapPointer(shard.memTbls, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
-			break
-		}
-	}
+	atomicAddMemTable(shard.memTbls, newMemTable)
 	if writableMemTbl == nil && len(preSplitKeys) == 0 {
 		return
 	}
@@ -110,16 +102,8 @@ func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize in
 		newTableSize = minSize
 	}
 	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
-	for {
-		oldMemTbls := shard.loadSplittingMemTables(idx)
-		newMemTbls := &shardingMemTables{}
-		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
-		newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
-		if atomic.CompareAndSwapPointer(shard.splittingMemTbls[idx], unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
-			// Splitting MemTable is never flushed, we will flush the mem tables after finish split.
-			return
-		}
-	}
+	atomicAddMemTable(shard.splittingMemTbls[idx], newMemTable)
+	// Splitting MemTable is never flushed, we will flush the mem tables after finish split.
 }
 
 func (sdb *ShardingDB) executeWriteTasks(eTask engineTask) {
@@ -186,6 +170,7 @@ func (sdb *ShardingDB) writeSplitting(batch *WriteBatch, commitTS uint64) uint64
 			}
 			batch.shard.wal.appendEntry(idx, cf, entry.Key, entry.Value)
 			memTbl.Put(cf, entry.Key, entry.Value)
+			batch.shard.splittingCnt++
 		}
 	}
 	for key, val := range batch.properties {
@@ -207,6 +192,7 @@ func (sdb *ShardingDB) executePreSplitTask(eTask engineTask) {
 		eTask.notify <- errors.New("failed to set split keys")
 		return
 	}
+	log.Info("pre-split switch memtable")
 	sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize, sdb.orc.readTs(), task.keys)
 	wal, err := newShardSplitWAL(shard.walFilename)
 	if err != nil {
@@ -262,6 +248,13 @@ func (sdb *ShardingDB) buildSplitShards(oldShard *Shard, newShardsProps []*proto
 		atomic.StorePointer(shard.l0s, unsafe.Pointer(oldShard.splittingL0Tbls[i]))
 		newShards[i] = shard
 	}
+	l0s := oldShard.loadL0Tables()
+	for _, l0 := range l0s.tables {
+		idx := l0.getSplitIndex(oldShard.splitKeys)
+		nShard := newShards[idx]
+		nL0s := nShard.loadL0Tables()
+		nL0s.tables = append(nL0s.tables, l0)
+	}
 	for cf, scf := range oldShard.cfs {
 		for l := 1; l <= ShardMaxLevel; l++ {
 			level := scf.getLevelHandler(l)
@@ -274,9 +267,10 @@ func (sdb *ShardingDB) buildSplitShards(oldShard *Shard, newShardsProps []*proto
 		sdb.shardMap.Store(nShard.ID, nShard)
 	}
 	flushTask = &shardFlushTask{
-		finishSplitShards:  newShards,
-		finishSplitProps:   newShardsProps,
-		finishSplitMemTbls: make([]*shardingMemTables, len(newShards)),
+		finishSplitOldShard: oldShard,
+		finishSplitShards:   newShards,
+		finishSplitProps:    newShardsProps,
+		finishSplitMemTbls:  make([]*shardingMemTables, len(newShards)),
 	}
 	for i, nShard := range newShards {
 		memTbls := nShard.loadMemTables()

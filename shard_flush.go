@@ -55,6 +55,10 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 }
 
 func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
+	log.S().Info("flush finish split")
+	if atomic.LoadUint32(&sdb.closed) == 1 {
+		return nil
+	}
 	allL0s := make([]*shardL0Tables, len(task.finishSplitMemTbls))
 	for idx, memTbls := range task.finishSplitMemTbls {
 		l0s := &shardL0Tables{tables: make([]*shardL0Table, len(memTbls.tables))}
@@ -94,6 +98,11 @@ func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
 		}
 		l0ChangeSets[i] = l0ChangeSet
 	}
+	for idx, nShard := range task.finishSplitShards {
+		newL0s := allL0s[idx]
+		atomicAddL0(nShard.l0s, newL0s.tables...)
+		atomicRemoveMemTable(nShard.memTbls, len(newL0s.tables))
+	}
 	err := sdb.manifest.writeFinishSplitChangeSet(task.finishSplitShards, splitChangeSet, l0ChangeSets, true)
 	if err != nil {
 		return err
@@ -103,6 +112,7 @@ func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
 }
 
 func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable) (*shardL0Table, error) {
+	y.Assert(sdb.idAlloc != nil)
 	id := sdb.idAlloc.AllocID()
 	log.S().Infof("flush memtable %d", id)
 	fd, err := sdb.createL0File(id)
@@ -145,7 +155,7 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 	shard := task.shard
 	var creates []*protos.L0Create
 	if l0 != nil {
-		creates = []*protos.L0Create{newL0Create(l0, shard.properties.toPB(shard.ID), shard.Start, shard.End)}
+		creates = []*protos.L0Create{newL0Create(l0, task.properties, shard.Start, shard.End)}
 	}
 	var preSplit *protos.ShardPreSplit
 	if len(task.preSplitKeys) > 0 {
@@ -162,21 +172,55 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 	if l0 == nil {
 		return nil
 	}
-	oldL0sPtr := shard.l0s
-	oldMemTblsPtr := shard.memTbls
-	oldL0Tbls := (*shardL0Tables)(atomic.LoadPointer(oldL0sPtr))
-	newL0Tbls := &shardL0Tables{make([]*shardL0Table, 0, len(oldL0Tbls.tables)+1)}
-	newL0Tbls.tables = append(newL0Tbls.tables, l0)
-	newL0Tbls.tables = append(newL0Tbls.tables, oldL0Tbls.tables...)
-	y.Assert(atomic.CompareAndSwapPointer(oldL0sPtr, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)))
+	atomicAddL0(shard.l0s, l0)
 	shard.addEstimatedSize(l0.size)
+	atomicRemoveMemTable(shard.memTbls, 1)
+	return nil
+}
+
+func atomicAddMemTable(pointer *unsafe.Pointer, memTbl *memtable.CFTable) {
 	for {
-		oldMemTbls := (*shardingMemTables)(atomic.LoadPointer(oldMemTblsPtr))
-		newMemTbls := &shardingMemTables{tables: make([]*memtable.CFTable, len(oldMemTbls.tables)-1)}
-		copy(newMemTbls.tables, oldMemTbls.tables)
-		if atomic.CompareAndSwapPointer(oldMemTblsPtr, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
+		oldMemTbls := (*shardingMemTables)(atomic.LoadPointer(pointer))
+		newMemTbls := &shardingMemTables{make([]*memtable.CFTable, 0, len(oldMemTbls.tables)+1)}
+		newMemTbls.tables = append(newMemTbls.tables, memTbl)
+		newMemTbls.tables = append(newMemTbls.tables, oldMemTbls.tables...)
+		if atomic.CompareAndSwapPointer(pointer, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
 			break
 		}
 	}
-	return nil
+}
+
+func atomicRemoveMemTable(pointer *unsafe.Pointer, cnt int) {
+	for {
+		oldMemTbls := (*shardingMemTables)(atomic.LoadPointer(pointer))
+		newMemTbls := &shardingMemTables{make([]*memtable.CFTable, len(oldMemTbls.tables)-cnt)}
+		copy(newMemTbls.tables, oldMemTbls.tables)
+		if atomic.CompareAndSwapPointer(pointer, unsafe.Pointer(oldMemTbls), unsafe.Pointer(newMemTbls)) {
+			break
+		}
+	}
+}
+
+func atomicAddL0(pointer *unsafe.Pointer, l0Tbls ...*shardL0Table) {
+	for {
+		oldL0Tbls := (*shardL0Tables)(atomic.LoadPointer(pointer))
+		newL0Tbls := &shardL0Tables{make([]*shardL0Table, 0, len(oldL0Tbls.tables)+1)}
+		newL0Tbls.tables = append(newL0Tbls.tables, l0Tbls...)
+		newL0Tbls.tables = append(newL0Tbls.tables, oldL0Tbls.tables...)
+		if atomic.CompareAndSwapPointer(pointer, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)) {
+			break
+		}
+	}
+}
+
+func atomicRemoveL0(pointer *unsafe.Pointer, cnt int) {
+	log.S().Infof("atomic remove l0 %p", pointer)
+	for {
+		oldL0Tbls := (*shardL0Tables)(atomic.LoadPointer(pointer))
+		newL0Tbls := &shardL0Tables{make([]*shardL0Table, len(oldL0Tbls.tables)-cnt)}
+		copy(newL0Tbls.tables, oldL0Tbls.tables)
+		if atomic.CompareAndSwapPointer(pointer, unsafe.Pointer(oldL0Tbls), unsafe.Pointer(newL0Tbls)) {
+			break
+		}
+	}
 }

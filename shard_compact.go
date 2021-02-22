@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
 func newTableCreate(tbl table.Table, cf int, level int) *protos.TableCreate {
@@ -202,7 +201,6 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		if err != nil {
 			return err
 		}
-		log.S().Infof("cf %d new tables %d", cf, len(newTables))
 		newHandler := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, 1, sdb.metrics)
 		newHandler.tables = newTables
 		for _, tbl := range newTables {
@@ -236,15 +234,8 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		return err
 	}
 	guard.Delete(toBeDelete)
-	originL0Len := len(l0Tbls.tables)
-	for {
-		l0Tbls = shard.loadL0Tables()
-		newAddedTbls := l0Tbls.tables[:len(l0Tbls.tables)-originL0Len]
-		newL0s := &shardL0Tables{}
-		newL0s.tables = append(newL0s.tables, newAddedTbls...)
-		if atomic.CompareAndSwapPointer(shard.l0s, unsafe.Pointer(l0Tbls), unsafe.Pointer(newL0s)) {
-			break
-		}
+	if l0Tbls != nil {
+		atomicRemoveL0(shard.l0s, len(l0Tbls.tables))
 	}
 	return nil
 }

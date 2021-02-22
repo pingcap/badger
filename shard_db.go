@@ -12,6 +12,7 @@ import (
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"go.uber.org/zap"
 	"math"
 	"os"
 	"sort"
@@ -73,6 +74,7 @@ type ShardingDB struct {
 	mangedSafeTS  uint64
 	idAlloc       IDAllocator
 	s3c           *s3util.S3Client
+	closed        uint32
 }
 
 func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
@@ -122,14 +124,13 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		writeCh:  make(chan engineTask, kvWriteChCapacity),
 		manifest: manifest,
 	}
-	if err = db.loadShards(); err != nil {
-		return nil, err
-	}
-
 	if opt.IDAllocator != nil {
 		db.idAlloc = opt.IDAllocator
 	} else {
 		db.idAlloc = &localIDAllocator{latest: manifest.lastID}
+	}
+	if err = db.loadShards(); err != nil {
+		return nil, err
 	}
 	if opt.S3Options.EndPoint != "" {
 		db.s3c = s3util.NewS3Client(opt.S3Options)
@@ -148,6 +149,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 }
 
 func (sdb *ShardingDB) loadShards() error {
+	log.Info("load shards")
 	for _, mShard := range sdb.manifest.shards {
 		shard := newShard(mShard.properties.toPB(mShard.ID), mShard.Ver, mShard.Start, mShard.End, sdb.opt, sdb.metrics)
 		for fid := range mShard.files {
@@ -194,9 +196,15 @@ func (sdb *ShardingDB) loadShards() error {
 		}
 		sdb.shardMap.Store(shard.ID, shard)
 		walName := shard.walFilename
+		log.S().Infof("load shard %d", shard.ID)
 		if mShard.preSplit != nil {
 			shard.setSplitKeys(mShard.preSplit.Keys)
-			sdb.replayWAL(shard)
+			err := sdb.replayWAL(shard)
+			if err != nil {
+				log.Info("replay WAL error", zap.Error(err))
+			} else {
+				log.Info("replay WAL ok")
+			}
 		} else {
 			// The wal is redundant if manifest is not in pre-split state.
 			if _, err := os.Stat(walName); err == nil {
@@ -216,6 +224,7 @@ func (l *localIDAllocator) AllocID() uint64 {
 }
 
 func (sdb *ShardingDB) Close() error {
+	atomic.StoreUint32(&sdb.closed, 1)
 	log.S().Info("closing ShardingDB")
 	sdb.closers.writes.SignalAndWait()
 	close(sdb.flushCh)
@@ -291,9 +300,10 @@ type WriteBatch struct {
 
 func (sdb *ShardingDB) NewWriteBatch(shard *Shard) *WriteBatch {
 	return &WriteBatch{
-		shard:   shard,
-		cfConfs: sdb.opt.CFs,
-		entries: make([][]*memtable.Entry, sdb.numCFs),
+		shard:      shard,
+		cfConfs:    sdb.opt.CFs,
+		entries:    make([][]*memtable.Entry, sdb.numCFs),
+		properties: map[string][]byte{},
 	}
 }
 

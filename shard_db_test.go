@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
@@ -32,7 +33,6 @@ func TestShardingDB(t *testing.T) {
 	initialIngest(t, db)
 	sc := &shardingCase{
 		t:      t,
-		n:      10000,
 		tester: newShardTester(db),
 	}
 	ch := make(chan time.Duration, 1)
@@ -48,36 +48,16 @@ func TestShardingDB(t *testing.T) {
 		ch <- time.Since(begin)
 	}()
 	begin := time.Now()
-	sc.loadData()
+	sc.loadData(0, 10000)
 	log.S().Infof("time split %v; load %v", <-ch, time.Since(begin))
 	db.PrintStructure()
-	sc.checkData()
+	sc.checkData(0, 10000)
 	err = db.Close()
 	require.NoError(t, err)
-	//db, err = OpenShardingDB(opts)
-	//require.NoError(t, err)
-	//db.PrintStructure()
-	//sc.tester.db = db
-	//sc.checkData()
-}
-
-func TestWALRecovery(t *testing.T) {
-	runPprof()
-	dir, err := ioutil.TempDir("", "sharding")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
-	opts := getTestOptions(dir)
-	opts.NumCompactors = 1
-	opts.NumLevelZeroTables = 1
-	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}, {Managed: false}}
-	db, err := OpenShardingDB(opts)
-	require.NoError(t, err)
-	initialIngest(t, db)
 }
 
 type shardingCase struct {
 	t      *testing.T
-	n      int
 	tester *shardTester
 }
 
@@ -85,9 +65,9 @@ func iToKey(i int) []byte {
 	return []byte(fmt.Sprintf("key%06d", i))
 }
 
-func (sc *shardingCase) loadData() {
+func (sc *shardingCase) loadData(begin, end int) {
 	var entries []*testerEntry
-	for i := 0; i < sc.n; i++ {
+	for i := begin; i < end; i++ {
 		key := iToKey(i)
 		entries = append(entries, &testerEntry{
 			cf:  0,
@@ -104,6 +84,10 @@ func (sc *shardingCase) loadData() {
 			require.NoError(sc.t, err)
 			entries = nil
 		}
+	}
+	if len(entries) > 0 {
+		err := sc.tester.write(entries...)
+		require.NoError(sc.t, err)
 	}
 }
 
@@ -122,8 +106,8 @@ func initialIngest(t *testing.T, db *ShardingDB) {
 	require.NoError(t, err)
 }
 
-func (sc *shardingCase) checkGet(snap *Snapshot) {
-	for i := 0; i < sc.n; i++ {
+func (sc *shardingCase) checkGet(snap *Snapshot, begin, end int) {
+	for i := begin; i < end; i++ {
 		key := iToKey(i)
 		item, err := snap.Get(0, y.KeyWithTs(key, 2))
 		require.Nil(sc.t, err)
@@ -134,10 +118,10 @@ func (sc *shardingCase) checkGet(snap *Snapshot) {
 	}
 }
 
-func (sc *shardingCase) checkIterator(snap *Snapshot) {
+func (sc *shardingCase) checkIterator(snap *Snapshot, begin, end int) {
 	for cf := 0; cf < 2; cf++ {
 		iter := snap.NewIterator(cf, false, false)
-		i := 0
+		i := begin
 		for iter.Rewind(); iter.Valid(); iter.Next() {
 			key := iToKey(i)
 			item := iter.Item()
@@ -145,7 +129,7 @@ func (sc *shardingCase) checkIterator(snap *Snapshot) {
 			require.EqualValues(sc.t, bytes.Repeat(key, int(cf)+1), item.vptr)
 			i++
 		}
-		require.Equal(sc.t, sc.n, i)
+		require.Equal(sc.t, end, i)
 	}
 }
 
@@ -163,29 +147,23 @@ func (sc *shardingCase) finishSplit(shardID, ver uint64, newIDs []uint64) {
 	require.NoError(sc.t, err)
 }
 
-func (sc *shardingCase) checkData() {
-	var i int
-	err := sc.tester.iterate(nil, globalShardEndKey, 0, func(key, val []byte) {
+func (sc *shardingCase) checkData(begin, end int) {
+	i := begin
+	err := sc.tester.iterate(iToKey(begin), iToKey(end), 0, func(key, val []byte) {
 		require.Equal(sc.t, string(iToKey(i)), string(key))
 		require.Equal(sc.t, string(key), string(val))
 		i++
 	})
 	require.Nil(sc.t, err)
-	require.Equal(sc.t, i, sc.n)
-	i = 0
-	err = sc.tester.iterate(nil, globalShardEndKey, 1, func(key, val []byte) {
-		require.Equal(sc.t, key, iToKey(i))
-		require.Equal(sc.t, string(val), strings.Repeat(string(key), 2))
+	require.Equal(sc.t, end, i)
+	i = begin
+	err = sc.tester.iterate(iToKey(begin), iToKey(end), 1, func(key, val []byte) {
+		require.Equal(sc.t, string(iToKey(i)), string(key))
+		require.Equal(sc.t, strings.Repeat(string(key), 2), string(val))
 		i++
 	})
 	require.Nil(sc.t, err)
-	require.Equal(sc.t, i, sc.n)
-}
-
-func TestIngestTree(t *testing.T) {
-	dir, err := ioutil.TempDir("", "sharding")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	require.Equal(sc.t, end, i)
 }
 
 func TestSplitSuggestion(t *testing.T) {
@@ -203,10 +181,9 @@ func TestSplitSuggestion(t *testing.T) {
 	initialIngest(t, db)
 	sc := &shardingCase{
 		t:      t,
-		n:      20000,
 		tester: newShardTester(db),
 	}
-	sc.loadData()
+	sc.loadData(0, 20000)
 	time.Sleep(time.Second * 2)
 	keys := db.GetSplitSuggestion(1, opts.MaxMemTableSize)
 	log.S().Infof("split keys %s", keys)
@@ -260,9 +237,81 @@ func TestShardingMetaChangeListener(t *testing.T) {
 	db.Close()
 }
 
+func TestMigration(t *testing.T) {
+	dirA, err := ioutil.TempDir("", "shardingA")
+	require.NoError(t, err)
+	dirB, err := ioutil.TempDir("", "shardingB")
+	require.NoError(t, err)
+	defer func() {
+		os.RemoveAll(dirA)
+		os.RemoveAll(dirB)
+	}()
+	allocator := &localIDAllocator{}
+	opts := getTestOptions(dirA)
+	opts.IDAllocator = allocator
+	opts.NumCompactors = 2
+	opts.NumLevelZeroTables = 1
+	metaListener := &metaListener{}
+	opts.MetaChangeListener = metaListener
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}}
+	db, err := OpenShardingDB(opts)
+	require.NoError(t, err)
+	initialIngest(t, db)
+	sc := &shardingCase{
+		t:      t,
+		tester: newShardTester(db),
+	}
+	sc.loadData(0, 5000)
+	sc.preSplit(1, 1, iToKey(2500))
+	sc.finishSplit(1, 1, []uint64{uint64(2), 1})
+	end := 5899
+	sc.loadData(5000, end)
+	time.Sleep(time.Millisecond * 100)
+	shard := db.GetShard(1)
+	snap := db.NewSnapshot(shard)
+	readTS := snap.GetReadTS()
+	require.True(t, readTS > 0)
+	ingestTree := &IngestTree{MaxTS: readTS, LocalPath: dirA}
+	cfTbl := memtable.NewCFTable(opts.MaxMemTableSize, 2)
+	for cf := 0; cf < 2; cf++ {
+		iter := snap.NewDeltaIterator(cf, metaListener.maxL0ID)
+		for iter.Rewind(); iter.Valid(); iter.Next() {
+			item := iter.Item()
+			val, _ := item.ValueCopy(nil)
+			cfTbl.Put(cf, y.Copy(item.key.UserKey), y.ValueStruct{Value: val, Version: item.Version()})
+		}
+	}
+	snap.Discard()
+	ingestTree.Delta = []*memtable.CFTable{cfTbl}
+	changeSets := db.manifest.toChangeSets()
+	for _, changeSet := range changeSets {
+		if changeSet.ShardID == 1 {
+			ingestTree.ChangeSet = changeSet
+			break
+		}
+	}
+	opts = getTestOptions(dirB)
+	opts.IDAllocator = allocator
+	opts.NumCompactors = 2
+	opts.NumLevelZeroTables = 1
+	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}}
+	dbB, err := OpenShardingDB(opts)
+	require.Nil(t, err)
+	err = dbB.Ingest(ingestTree)
+	require.Nil(t, err)
+	readTS = dbB.orc.readTs()
+	require.True(t, readTS == ingestTree.MaxTS)
+	scB := &shardingCase{
+		t:      t,
+		tester: newShardTester(dbB),
+	}
+	scB.checkData(2500, end)
+}
+
 type metaListener struct {
 	lock     sync.Mutex
 	commitTS []uint64
+	maxL0ID  uint64
 }
 
 func (l *metaListener) OnChange(e *protos.MetaChangeEvent) {
@@ -274,6 +323,9 @@ func (l *metaListener) OnChange(e *protos.MetaChangeEvent) {
 					l.commitTS = append(l.commitTS, binary.LittleEndian.Uint64(l0.Properties.Values[i]))
 				}
 			}
+		}
+		if l0.ID > l.maxL0ID {
+			l.maxL0ID = l0.ID
 		}
 	}
 	l.lock.Unlock()

@@ -23,6 +23,15 @@ func (st *shardL0Table) Delete() error {
 	return os.Remove(st.filename)
 }
 
+func (st *shardL0Table) getSplitIndex(splitKeys [][]byte) int {
+	for _, cf := range st.cfs {
+		if cf != nil {
+			return getSplitShardIndex(splitKeys, cf.Smallest().UserKey)
+		}
+	}
+	return 0
+}
+
 func openShardL0Table(filename string, fid uint64) (*shardL0Table, error) {
 	shardData, err := ioutil.ReadFile(filename)
 	if err != nil {

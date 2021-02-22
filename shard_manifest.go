@@ -2,6 +2,7 @@ package badger
 
 import (
 	"bufio"
+	"encoding/binary"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
@@ -130,12 +131,16 @@ func (m *ShardingManifest) toChangeSets() []*protos.ShardChangeSet {
 func (m *ShardingManifest) rewrite() error {
 	log.Info("rewrite manifest")
 	changeSets := m.toChangeSets()
-	var changeSetsBuf []byte
+	changeSetsBuf := make([]byte, 8)
+	copy(changeSetsBuf, magicText[:])
+	binary.BigEndian.PutUint32(changeSetsBuf[4:], magicVersion)
+	var creations int
 	for _, cs := range changeSets {
 		data, err := cs.Marshal()
 		if err != nil {
 			return err
 		}
+		creations += len(cs.L0Creates) + len(cs.TableCreates)
 		changeSetsBuf = appendChecksumPacket(changeSetsBuf, data)
 	}
 	if m.fd != nil {
@@ -143,7 +148,12 @@ func (m *ShardingManifest) rewrite() error {
 	}
 	var err error
 	m.fd, err = rewriteManifest(changeSetsBuf, m.dir)
-	return err
+	if err != nil {
+		return err
+	}
+	m.creations = creations
+	m.deletions = 0
+	return nil
 }
 
 func (m *ShardingManifest) Close() error {
@@ -181,6 +191,11 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
 		delete(m.globalFiles, fid)
 	}
 	for _, create := range cs.L0Creates {
+		if create.Properties != nil {
+			for i, key := range create.Properties.Keys {
+				shardInfo.properties.set(key, create.Properties.Values[i])
+			}
+		}
 		fid := create.ID
 		if fid > m.lastID {
 			m.lastID = fid
@@ -258,6 +273,7 @@ func (m *ShardingManifest) writeChangeSet(shard *Shard, changeSet *protos.ShardC
 	// Rewrite manifest if it'd shrink by 1/10 and it's big enough to care
 	if m.deletions > m.deletionsRewriteThreshold &&
 		m.deletions > manifestDeletionsRatio*(m.creations-m.deletions) {
+		log.S().Infof("deletions %d createions %d", m.deletions, m.creations)
 		if err = m.rewrite(); err != nil {
 			return err
 		}
@@ -352,6 +368,7 @@ type fileMeta struct {
 }
 
 func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset int64, err error) {
+	log.Info("replay manifest")
 	r := &countingReader{wrapped: bufio.NewReader(fp)}
 	if err = readManifestMagic(r); err != nil {
 		return nil, 0, err

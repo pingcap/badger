@@ -80,7 +80,6 @@ func (sdb *ShardingDB) waitForAllMemTablesFlushed(shard *Shard) {
 		for _, tbl := range memTbls.tables {
 			sizes = append(sizes, tbl.Size())
 		}
-		log.S().Infof("memtable size %v", sizes)
 	}
 }
 

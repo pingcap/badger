@@ -16,6 +16,7 @@ type IngestTree struct {
 	ChangeSet *protos.ShardChangeSet
 	MaxTS     uint64
 	Delta     []*memtable.CFTable
+	LocalPath string
 }
 
 func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
@@ -31,7 +32,7 @@ func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
 	guard := sdb.resourceMgr.Acquire()
 	defer guard.Done()
 
-	err := sdb.loadFilesFromS3(ingestTree.ChangeSet)
+	err := sdb.loadFiles(ingestTree)
 	if err != nil {
 		return err
 	}
@@ -113,15 +114,27 @@ func (sdb *ShardingDB) IngestBuffer(shardID, shardVer uint64, buffer *memtable.C
 	return nil
 }
 
-func (sdb *ShardingDB) loadFilesFromS3(changeSet *protos.ShardChangeSet) error {
+func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {
+	changeSet := ingestTree.ChangeSet
 	for _, l0 := range changeSet.L0Creates {
-		err := sdb.loadFileFromS3(l0.ID, true)
+		var err error
+		if ingestTree.LocalPath != "" {
+			err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, l0.ID, true)
+		} else {
+			err = sdb.loadFileFromS3(l0.ID, true)
+		}
 		if err != nil {
 			return err
 		}
 	}
 	for _, tbl := range changeSet.TableCreates {
-		err := sdb.loadFileFromS3(tbl.ID, false)
+		var err error
+		if ingestTree.LocalPath != "" {
+			err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, tbl.ID, false)
+		} else {
+			err = sdb.loadFileFromS3(tbl.ID, false)
+		}
+
 		if err != nil {
 			return err
 		}
@@ -150,4 +163,19 @@ func (sdb *ShardingDB) loadFileFromS3(id uint64, isL0 bool) error {
 		}
 	}
 	return os.Rename(tmpBlockFileName, localFileName)
+}
+
+func (sdb *ShardingDB) loadFileFromLocalPath(localPath string, id uint64, isL0 bool) error {
+	localFileName := sstable.NewFilename(id, localPath)
+	dstFileName := sstable.NewFilename(id, sdb.opt.Dir)
+	err := os.Link(localFileName, dstFileName)
+	if err != nil {
+		return err
+	}
+	if !isL0 {
+		localIdxFileName := sstable.IndexFilename(localFileName)
+		dstIdxFileName := sstable.IndexFilename(dstFileName)
+		err = os.Link(localIdxFileName, dstIdxFileName)
+	}
+	return err
 }

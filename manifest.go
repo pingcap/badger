@@ -249,8 +249,8 @@ func appendMagicHeader(buf []byte) []byte {
 
 func appendChecksumPacket(buf, packet []byte) []byte {
 	var lenCrcBuf [8]byte
-	binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(buf)))
-	binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(buf, y.CastagnoliCrcTable))
+	binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(packet)))
+	binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(packet, y.CastagnoliCrcTable))
 	buf = append(buf, lenCrcBuf[:]...)
 	return append(buf, packet...)
 }

@@ -2,11 +2,14 @@ package badger
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -17,6 +20,8 @@ type shardTester struct {
 	writeCh      chan interface{}
 	db           *ShardingDB
 	shardTree    unsafe.Pointer
+	wg           sync.WaitGroup
+	requestLog   []*testerWriteRequest
 }
 
 func newShardTester(db *ShardingDB) *shardTester {
@@ -24,19 +29,29 @@ func newShardTester(db *ShardingDB) *shardTester {
 		shardIDAlloc: 0,
 		writeCh:      make(chan interface{}, 256),
 		db:           db,
-		shardTree: unsafe.Pointer(&testerShardTree{
-			shards: []*Shard{db.GetShard(1)},
-		}),
 	}
+	var shards []*shardWithWriteLog
+	db.shardMap.Range(func(key, value interface{}) bool {
+		shard := value.(*Shard)
+		shards = append(shards, &shardWithWriteLog{Shard: shard, writeLog: &testerWriteLog{}})
+		return true
+	})
+	sort.Slice(shards, func(i, j int) bool {
+		return bytes.Compare(shards[i].Start, shards[j].Start) < 0
+	})
+	tester.shardTree = unsafe.Pointer(&testerShardTree{
+		shards: shards,
+	})
+	tester.wg.Add(1)
 	go tester.runWriter()
 	return tester
 }
 
 type testerWriteRequest struct {
-	shardID  uint64
-	shardVer uint64
-	entries  []*testerEntry
-	resp     chan error
+	shard   *shardWithWriteLog
+	entries []*testerEntry
+	replay  bool
+	resp    chan error
 }
 
 type testerEntry struct {
@@ -46,18 +61,24 @@ type testerEntry struct {
 	ver uint64
 }
 
-type testerShardRange struct {
-	shardID  uint64
-	shardVer uint64
-	startKey []byte
-	endKey   []byte
-}
-
 type testerShardTree struct {
-	shards []*Shard
+	shards []*shardWithWriteLog
 }
 
-func (tree *testerShardTree) getShard(key []byte) *Shard {
+type shardWithWriteLog struct {
+	*Shard
+	writeLog *testerWriteLog
+}
+
+type testerWriteLog struct {
+	entries [][]*testerEntry
+}
+
+func (wl *testerWriteLog) length() int {
+	return len(wl.entries)
+}
+
+func (tree *testerShardTree) getShard(key []byte) *shardWithWriteLog {
 	for _, shd := range tree.shards {
 		if bytes.Compare(key, shd.End) >= 0 {
 			continue
@@ -97,7 +118,11 @@ func (tree *testerShardTree) split(oldID uint64, newShards []*Shard) *testerShar
 	for _, shd := range tree.shards {
 		if shd.ID == oldID {
 			for _, newShd := range newShards {
-				newTree.shards = append(newTree.shards, newShd)
+				if newShd.ID == oldID {
+					newTree.shards = append(newTree.shards, &shardWithWriteLog{Shard: newShd, writeLog: shd.writeLog})
+				} else {
+					newTree.shards = append(newTree.shards, &shardWithWriteLog{Shard: newShd, writeLog: &testerWriteLog{}})
+				}
 			}
 		} else {
 			newTree.shards = append(newTree.shards, shd)
@@ -122,9 +147,12 @@ type testerFinishSplitRequest struct {
 }
 
 func (st *shardTester) runWriter() {
+	defer st.wg.Done()
 	for {
 		val := <-st.writeCh
 		switch x := val.(type) {
+		case nil:
+			return
 		case *testerWriteRequest:
 			st.handleWriteRequest(x)
 		case *testerPreSplitRequest:
@@ -143,10 +171,13 @@ func (st *shardTester) runWriter() {
 }
 
 func (st *shardTester) handleWriteRequest(req *testerWriteRequest) {
-	shard := st.db.GetShard(req.shardID)
-	if shard.Ver != req.shardVer {
+	shard := st.db.GetShard(req.shard.ID)
+	if shard.Ver != req.shard.Ver {
 		req.resp <- errShardNotMatch
 		return
+	}
+	if !req.replay {
+		req.shard.writeLog.entries = append(req.shard.writeLog.entries, req.entries)
 	}
 	wb := st.db.NewWriteBatch(shard)
 	for _, e := range req.entries {
@@ -156,9 +187,14 @@ func (st *shardTester) handleWriteRequest(req *testerWriteRequest) {
 			return
 		}
 	}
+	idxBin := make([]byte, 4)
+	binary.LittleEndian.PutUint32(idxBin, uint32(len(req.shard.writeLog.entries)))
+	wb.SetProperty(appliedIndex, idxBin)
 	err := st.db.Write(wb)
 	req.resp <- err
 }
+
+const appliedIndex = "applied_index"
 
 func (st *shardTester) handleIterateRequest(req *testerGetSnapRequest) {
 	shard := st.db.GetShard(req.shard.ID)
@@ -195,9 +231,8 @@ func (st *shardTester) write(entries ...*testerEntry) error {
 		req, ok := requests[shardID]
 		if !ok {
 			req = &testerWriteRequest{
-				shardID:  shardID,
-				shardVer: shard.Ver,
-				resp:     make(chan error, 1),
+				shard: shard,
+				resp:  make(chan error, 1),
 			}
 			requests[shardID] = req
 		}
@@ -210,7 +245,7 @@ func (st *shardTester) write(entries ...*testerEntry) error {
 	for _, req := range requests {
 		err := <-req.resp
 		if err == errShardNotMatch {
-			log.S().Infof("write shard not match %s %s %d %d", entries[0].key, entries[len(entries)-1].key, req.shardID, req.shardVer)
+			log.S().Infof("write shard not match %s %s %d %d", entries[0].key, entries[len(entries)-1].key, req.shard.ID, req.shard.Ver)
 			retries = append(retries, req.entries...)
 		} else if err != nil {
 			return err
@@ -268,7 +303,7 @@ func (st *shardTester) iterate(start, end []byte, cf int, iterFunc func(key, val
 				reqEnd = end
 			}
 			req := &testerGetSnapRequest{
-				shard: shd,
+				shard: shd.Shard,
 				start: reqStart,
 				end:   reqEnd,
 				resp:  make(chan error, 1),
@@ -305,4 +340,9 @@ func (st *shardTester) iterate(start, end []byte, cf int, iterFunc func(key, val
 		}
 	}
 	return nil
+}
+
+func (st *shardTester) close() {
+	st.writeCh <- nil
+	st.wg.Wait()
 }

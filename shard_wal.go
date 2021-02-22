@@ -17,11 +17,11 @@ type shardSplitWAL struct {
 }
 
 func newShardSplitWAL(filename string) (*shardSplitWAL, error) {
-	fd, err := y.OpenTruncFile(filename, false)
+	fd, err := y.OpenSyncedFile(filename, false)
 	if err != nil {
 		return nil, errors.New("failed to create shard split WAL")
 	}
-	return &shardSplitWAL{fd: fd}, nil
+	return &shardSplitWAL{fd: fd, buf: make([]byte, 8)}, nil
 }
 
 const (
@@ -38,6 +38,10 @@ func (wal *shardSplitWAL) appendEntry(splitIdx int, cf int, key []byte, val y.Va
 	keyLen := uint16(len(key))
 	wal.buf = append(wal.buf, byte(keyLen), byte(keyLen>>8))
 	wal.buf = append(wal.buf, key...)
+	valLen := val.EncodedSize()
+	lenBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(lenBuf, valLen)
+	wal.buf = append(wal.buf, lenBuf...)
 	wal.buf = val.EncodeTo(wal.buf)
 }
 
@@ -77,14 +81,12 @@ func (wal *shardSplitWAL) appendSwitchMemTable(splitIdx int, minSize uint64) {
 }
 
 func (wal *shardSplitWAL) flush() error {
-	length := uint32(len(wal.buf)) + 4
-	binary.LittleEndian.PutUint32(wal.buf, length)
-	checksum := crc32.Checksum(wal.buf[:4], crc32.MakeTable(crc32.Castagnoli))
-	checksumBuf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(checksumBuf, checksum)
-	wal.buf = append(wal.buf, checksumBuf...)
+	length := uint32(len(wal.buf) - 8)
+	binary.BigEndian.PutUint32(wal.buf, length)
+	checksum := crc32.Checksum(wal.buf[8:], crc32.MakeTable(crc32.Castagnoli))
+	binary.BigEndian.PutUint32(wal.buf[4:], checksum)
 	_, err := wal.fd.Write(wal.buf)
-	wal.buf = wal.buf[:4]
+	wal.buf = wal.buf[:8]
 	return err
 }
 
@@ -97,45 +99,43 @@ func (wal *shardSplitWAL) replay(fn replayFn) error {
 	if err != nil {
 		return err
 	}
+	var offset int64
 	for {
-		err = wal.readPacket()
-		if err == io.EOF {
-			return nil
-		}
+		var buf []byte
+		buf, err = readChecksumPacket(wal.fd)
 		if err != nil {
 			return err
 		}
-		if !wal.verifyCheckSum() {
-			return io.EOF
+		if len(buf) == 0 {
+			err = wal.fd.Truncate(offset)
+			if err != nil {
+				return err
+			}
+			_, err = wal.fd.Seek(offset, 0)
+			return err
 		}
-		err = fn(wal.buf)
+		offset += 8 + int64(len(buf))
+		err = fn(buf)
 		if err != nil {
 			return err
 		}
 	}
 }
 
-func (wal *shardSplitWAL) readPacket() error {
-	lenBuf := make([]byte, 4)
-	_, err := io.ReadFull(wal.fd, lenBuf)
-	if err != nil {
-		return err
-	}
-	length := binary.LittleEndian.Uint32(lenBuf)
-	if cap(wal.buf) < int(length) {
-		wal.buf = make([]byte, length)
-	}
-	wal.buf = wal.buf[:length]
-	_, err = io.ReadFull(wal.fd, wal.buf)
-	if err != nil {
-		return err
-	}
-	return nil
+func (wal *shardSplitWAL) decodeByte(packet []byte) (remain []byte, b byte) {
+	return packet[1:], packet[0]
 }
 
-func (wal *shardSplitWAL) verifyCheckSum() bool {
-	crcVal := crc32.Checksum(wal.buf[:len(wal.buf)-4], crc32.MakeTable(crc32.Castagnoli))
-	return crcVal == binary.LittleEndian.Uint32(wal.buf[len(wal.buf)-4:])
+func (wal *shardSplitWAL) decodeShortVal(packet []byte) (remain, val []byte) {
+	l := binary.LittleEndian.Uint16(packet)
+	packet = packet[2:]
+	return packet[l:], packet[:l]
+}
+
+func (wal *shardSplitWAL) decodeLongVal(packet []byte) (remain, val []byte) {
+	l := binary.LittleEndian.Uint32(packet)
+	packet = packet[4:]
+	return packet[l:], packet[:l]
 }
 
 func (s *Shard) enableWAL() error {
@@ -160,11 +160,11 @@ type replayFn = func(packet []byte) error
 
 func (sdb *ShardingDB) replayWAL(shard *Shard) error {
 	// The wal must exists if we are in pre-split state.
-	fd, err := os.Open(shard.walFilename)
+	wal, err := newShardSplitWAL(shard.walFilename)
 	if err != nil {
 		return err
 	}
-	wal := &shardSplitWAL{fd: fd}
+	shard.wal = wal
 	return wal.replay(func(packet []byte) error {
 		var props []*protos.ShardProperties
 		for len(packet) > 0 {
@@ -178,33 +178,30 @@ func (sdb *ShardingDB) replayWAL(shard *Shard) error {
 				packet = packet[8:]
 				sdb.switchSplittingMemTable(shard, splitIdx, int64(minSize))
 			case walTypeEntry:
-				splitIdx := int(packet[0])
+				var splitIdx, cf int
+				splitIdx = int(packet[0])
 				packet = packet[1:]
-				cf := int(packet[0])
+				cf = int(packet[0])
 				packet = packet[1:]
-				keyLen := binary.LittleEndian.Uint16(packet)
-				packet = packet[2:]
-				key := packet[:keyLen]
-				packet = packet[keyLen:]
+				var key, valBin []byte
+				packet, key = wal.decodeShortVal(packet)
+				packet, valBin = wal.decodeLongVal(packet)
 				var val y.ValueStruct
-				val.Decode(packet)
-				packet = packet[val.EncodedSize():]
+				val.Decode(valBin)
 				mem := shard.loadSplittingWritableMemTable(splitIdx)
+				if !sdb.opt.CFs[cf].Managed && val.Version > sdb.orc.curRead {
+					sdb.orc.curRead = val.Version
+					sdb.orc.nextCommit = val.Version + 1
+				}
 				mem.Put(cf, key, val)
 			case walTypeProperty:
-				keyLen := binary.LittleEndian.Uint16(packet)
-				packet = packet[2:]
-				key := packet[:keyLen]
-				packet = packet[keyLen:]
-				valLen := binary.LittleEndian.Uint16(packet)
-				packet = packet[2:]
-				val := packet[:valLen]
-				packet = packet[valLen:]
+				var key, val []byte
+				packet, key = wal.decodeShortVal(packet)
+				packet, val = wal.decodeShortVal(packet)
 				shard.properties.set(string(key), y.Copy(val))
 			case walTypeFinish:
-				valLen := binary.LittleEndian.Uint16(packet)
-				val := packet[:valLen]
-				packet = packet[valLen:]
+				var val []byte
+				packet, val = wal.decodeShortVal(packet)
 				prop := new(protos.ShardProperties)
 				err = prop.Unmarshal(val)
 				y.Assert(err == nil)
@@ -220,4 +217,8 @@ func (sdb *ShardingDB) replayWAL(shard *Shard) error {
 		}
 		return nil
 	})
+}
+
+func takeByte(buf []byte) ([]byte, byte) {
+	return buf[1:], buf[0]
 }
