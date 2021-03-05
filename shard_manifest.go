@@ -3,14 +3,15 @@ package badger
 import (
 	"bufio"
 	"encoding/binary"
-	"github.com/pingcap/badger/protos"
-	"github.com/pingcap/badger/y"
-	"github.com/pingcap/errors"
-	"github.com/pingcap/log"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/y"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
 )
 
 // The manifest file is used to restore the tree
@@ -43,6 +44,8 @@ type ShardInfo struct {
 	// which is updated on every write operation.
 	properties *shardProperties
 	preSplit   *protos.ShardPreSplit
+	split      *protos.ShardSplit
+	splitState protos.SplitState
 }
 
 // ShardLevel is the struct that contains shard id and level id,
@@ -90,42 +93,45 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 
 func (m *ShardingManifest) toChangeSets() []*protos.ShardChangeSet {
 	var shards []*protos.ShardChangeSet
-	for _, shard := range m.shards {
-		cs := &protos.ShardChangeSet{
-			Version:  m.version,
-			ShardID:  shard.ID,
-			ShardVer: shard.Ver,
-		}
-		for fid := range shard.files {
-			fileMeta := m.globalFiles[fid]
-			if fileMeta.level == 0 {
-				cs.L0Creates = append(cs.L0Creates, &protos.L0Create{
-					ID:         fid,
-					Properties: nil, // Store properties in ShardCreate.
-				})
-			} else {
-				cs.TableCreates = append(cs.TableCreates, &protos.TableCreate{
-					ID:       fid,
-					Level:    fileMeta.level,
-					CF:       fileMeta.cf,
-					Smallest: fileMeta.smallest,
-					Biggest:  fileMeta.biggest,
-				})
-			}
-		}
-		tblIDs := make([]uint64, 0, len(shard.files))
-		for fid := range shard.files {
-			tblIDs = append(tblIDs, fid)
-		}
-		cs.ShardCreate = &protos.ShardCreate{
-			StartKey:   shard.Start,
-			EndKey:     shard.End,
-			TableIDs:   tblIDs,
-			Properties: shard.properties.toPB(shard.ID),
-		}
+	for id := range m.shards {
+		cs := m.toChangeSet(id)
 		shards = append(shards, cs)
 	}
 	return shards
+}
+
+func (m *ShardingManifest) toChangeSet(shardID uint64) *protos.ShardChangeSet {
+	shard := m.shards[shardID]
+	cs := &protos.ShardChangeSet{
+		Version:  m.version,
+		ShardID:  shard.ID,
+		ShardVer: shard.Ver,
+		State:    shard.splitState,
+	}
+	shardSnap := &protos.ShardSnapshot{
+		Start:      shard.Start,
+		End:        shard.End,
+		Properties: shard.properties.toPB(shard.ID),
+	}
+	cs.Snapshot = shardSnap
+	for fid := range shard.files {
+		fileMeta := m.globalFiles[fid]
+		if fileMeta.level == 0 {
+			shardSnap.L0Creates = append(shardSnap.L0Creates, &protos.L0Create{
+				ID:         fid,
+				Properties: nil, // Store properties in ShardCreate.
+			})
+		} else {
+			shardSnap.TableCreates = append(shardSnap.TableCreates, &protos.TableCreate{
+				ID:       fid,
+				Level:    fileMeta.level,
+				CF:       fileMeta.cf,
+				Smallest: fileMeta.smallest,
+				Biggest:  fileMeta.biggest,
+			})
+		}
+	}
+	return cs
 }
 
 func (m *ShardingManifest) rewrite() error {
@@ -140,7 +146,7 @@ func (m *ShardingManifest) rewrite() error {
 		if err != nil {
 			return err
 		}
-		creations += len(cs.L0Creates) + len(cs.TableCreates)
+		creations += len(cs.Snapshot.L0Creates) + len(cs.Snapshot.TableCreates)
 		changeSetsBuf = appendChecksumPacket(changeSetsBuf, data)
 	}
 	if m.fd != nil {
@@ -161,73 +167,132 @@ func (m *ShardingManifest) Close() error {
 }
 
 func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
-	if cs.ShardCreate != nil {
-		shard := &ShardInfo{
-			ID:         cs.ShardID,
-			Ver:        cs.ShardVer,
-			Start:      cs.ShardCreate.StartKey,
-			End:        cs.ShardCreate.EndKey,
-			files:      map[uint64]struct{}{},
-			properties: newShardProperties().applyPB(cs.ShardCreate.Properties),
-		}
-		for _, tID := range cs.ShardCreate.TableIDs {
-			shard.files[tID] = struct{}{}
-		}
-		m.shards[cs.ShardID] = shard
+	if m.version < cs.Version {
+		m.version = cs.Version
+	}
+	if cs.Snapshot != nil {
+		m.applySnapshot(cs)
+		return nil
 	}
 	shardInfo := m.shards[cs.ShardID]
 	if shardInfo == nil {
 		return errors.WithStack(errShardNotFound)
 	}
+	if cs.Flush != nil {
+		m.applyFlush(cs, shardInfo)
+		if cs.State == protos.SplitState_PRE_SPLIT_FLUSH_DONE {
+			shardInfo.splitState = protos.SplitState_PRE_SPLIT_FLUSH_DONE
+			if shardInfo.preSplit.MemProps != nil {
+				shardInfo.preSplit.MemProps = nil
+			}
+		}
+		return nil
+	}
+	if cs.Compaction != nil {
+		m.applyCompaction(cs, shardInfo)
+		return nil
+	}
 	if cs.PreSplit != nil {
-		m.shards[cs.ShardID].preSplit = cs.PreSplit
+		y.Assert(cs.PreSplit.MemProps != nil)
+		shardInfo.preSplit = cs.PreSplit
+		shardInfo.splitState = protos.SplitState_PRE_SPLIT
+		return nil
+	}
+	if cs.SplitFiles != nil {
+		m.applySplitFiles(cs, shardInfo)
+		shardInfo.splitState = protos.SplitState_SPLIT_FILE_DONE
+		return nil
 	}
 	if cs.Split != nil {
-		m.applySplit(cs)
+		if cs.Split.MemProps != nil {
+			// It's a unstable Split, we need to recover before execute split.
+			shardInfo.split = cs.Split
+		} else {
+			m.applySplit(cs.ShardID, cs.Split)
+		}
+		return nil
 	}
-	for _, fid := range cs.TableDeletes {
-		m.deletions++
-		delete(shardInfo.files, fid)
-		delete(m.globalFiles, fid)
+	if cs.ShardDelete {
+		delete(m.shards, cs.ShardID)
 	}
-	for _, create := range cs.L0Creates {
+	return nil
+}
+
+func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
+	snap := cs.Snapshot
+	shard := &ShardInfo{
+		ID:         cs.ShardID,
+		Ver:        cs.ShardVer,
+		Start:      snap.Start,
+		End:        snap.End,
+		files:      map[uint64]struct{}{},
+		properties: newShardProperties().applyPB(snap.Properties),
+		splitState: cs.State,
+	}
+	if len(cs.Snapshot.SplitKeys) > 0 {
+		shard.preSplit = &protos.ShardPreSplit{Keys: cs.Snapshot.SplitKeys}
+	}
+	for _, l0 := range snap.L0Creates {
+		m.addFile(l0.ID, -1, 0, l0.Start, l0.End, shard)
+	}
+	for _, tbl := range snap.TableCreates {
+		m.addFile(tbl.ID, tbl.CF, tbl.Level, tbl.Smallest, tbl.Biggest, shard)
+	}
+	m.shards[cs.ShardID] = shard
+}
+
+func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+	for _, create := range cs.Flush.L0Creates {
 		if create.Properties != nil {
 			for i, key := range create.Properties.Keys {
 				shardInfo.properties.set(key, create.Properties.Values[i])
 			}
 		}
-		fid := create.ID
-		if fid > m.lastID {
-			m.lastID = fid
-		}
-		m.creations++
-		shardInfo.files[fid] = struct{}{}
-		m.globalFiles[fid] = fileMeta{cf: -1, level: 0, smallest: create.Start, biggest: create.End}
+		m.addFile(create.ID, -1, 0, create.Start, create.End, shardInfo)
 	}
-	for _, create := range cs.TableCreates {
-		fid := create.ID
-		if fid > m.lastID {
-			m.lastID = fid
-		}
-		m.creations++
-		shardInfo.files[fid] = struct{}{}
-		m.globalFiles[fid] = fileMeta{
-			cf:       create.CF,
-			level:    create.Level,
-			smallest: create.Smallest,
-			biggest:  create.Biggest,
-		}
-	}
-	if cs.ShardDelete {
-		delete(m.shards, cs.ShardID)
-	}
-	m.version = cs.Version
-	return nil
 }
 
-func (m *ShardingManifest) applySplit(cs *protos.ShardChangeSet) {
-	split := cs.Split
-	old := m.shards[cs.ShardID]
+func (m *ShardingManifest) addFile(fid uint64, cf int32, level uint32, smallest, biggest []byte, shardInfo *ShardInfo) {
+	if fid > m.lastID {
+		m.lastID = fid
+	}
+	m.creations++
+	shardInfo.files[fid] = struct{}{}
+	m.globalFiles[fid] = fileMeta{cf: cf, level: level, smallest: smallest, biggest: biggest}
+}
+
+func (m *ShardingManifest) deleteFile(fid uint64, shardInfo *ShardInfo) {
+	m.deletions++
+	delete(shardInfo.files, fid)
+	delete(m.globalFiles, fid)
+}
+
+func (m *ShardingManifest) applyCompaction(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+	for _, id := range cs.Compaction.TopDeletes {
+		m.deleteFile(id, shardInfo)
+	}
+	for _, id := range cs.Compaction.BottomDeletes {
+		m.deleteFile(id, shardInfo)
+	}
+	for _, create := range cs.Compaction.TableCreates {
+		m.addFile(create.ID, create.CF, create.Level, create.Smallest, create.Biggest, shardInfo)
+	}
+}
+
+func (m *ShardingManifest) applySplitFiles(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+	for _, id := range cs.SplitFiles.TableDeletes {
+		m.deleteFile(id, shardInfo)
+	}
+	for _, l0 := range cs.SplitFiles.L0Creates {
+		m.addFile(l0.ID, -1, 0, l0.Start, l0.End, shardInfo)
+	}
+	for _, tbl := range cs.SplitFiles.TableCreates {
+		m.addFile(tbl.ID, tbl.CF, tbl.Level, tbl.Smallest, tbl.Biggest, shardInfo)
+	}
+}
+
+func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) {
+	old := m.shards[shardID]
 	newShards := make([]*ShardInfo, len(split.NewShards))
 	for i := 0; i < len(split.NewShards); i++ {
 		startKey, endKey := getSplittingStartEnd(old.Start, old.End, split.Keys, i)
@@ -259,12 +324,10 @@ func (m *ShardingManifest) applySplit(cs *protos.ShardChangeSet) {
 	}
 }
 
-func (m *ShardingManifest) writeChangeSet(shard *Shard, changeSet *protos.ShardChangeSet, notifyMetaListener bool) error {
+func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet, notifyMetaListener bool) error {
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
-	changeSet.ShardID = shard.ID
-	changeSet.ShardVer = shard.Ver
 	changeSet.Version = m.orc.commitTs()
 	buf, err := changeSet.Marshal()
 	if err != nil {
@@ -291,20 +354,27 @@ func (m *ShardingManifest) writeChangeSet(shard *Shard, changeSet *protos.ShardC
 		return err
 	}
 	if m.metaListener != nil && notifyMetaListener {
-		m.metaListener.OnChange(&protos.MetaChangeEvent{
-			ShardID:      changeSet.ShardID,
-			ShardVer:     changeSet.ShardVer,
-			StartKey:     shard.Start,
-			EndKey:       shard.End,
-			L0Creates:    changeSet.L0Creates,
-			TableCreates: changeSet.TableCreates,
-			TableDeletes: changeSet.TableDeletes,
-		})
+		m.metaListener.OnChange(changeSet)
 	}
 	return nil
 }
 
-func (m *ShardingManifest) writeFinishSplitChangeSet(shards []*Shard, split *protos.ShardChangeSet, l0s []*protos.ShardChangeSet, notifyMetaListener bool) error {
+func (m *ShardingManifest) writeFinishSplitChangeSet(split *protos.ShardChangeSet, allL0s []*shardL0Tables, task *shardFlushTask, notifyMetaListener bool) error {
+	l0ChangeSets := make([]*protos.ShardChangeSet, len(task.finishSplitMemTbls))
+	for i := range allL0s {
+		nShard := task.finishSplitShards[i]
+		l0s := allL0s[i]
+		l0ChangeSet := newShardChangeSet(nShard)
+		l0ChangeSet.Flush = &protos.ShardFlush{}
+		for _, l0 := range l0s.tables {
+			l0ChangeSet.Flush.L0Creates = append(l0ChangeSet.Flush.L0Creates, &protos.L0Create{
+				ID:    l0.fid,
+				Start: nShard.Start,
+				End:   nShard.End,
+			})
+		}
+		l0ChangeSets[i] = l0ChangeSet
+	}
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
@@ -312,7 +382,7 @@ func (m *ShardingManifest) writeFinishSplitChangeSet(shards []*Shard, split *pro
 	var buf []byte
 	data, _ := split.Marshal()
 	buf = appendChecksumPacket(buf, data)
-	for _, l0 := range l0s {
+	for _, l0 := range l0ChangeSets {
 		l0.Version = commitTS
 		data, _ = l0.Marshal()
 		buf = appendChecksumPacket(buf, data)
@@ -327,37 +397,17 @@ func (m *ShardingManifest) writeFinishSplitChangeSet(shards []*Shard, split *pro
 	if err = m.ApplyChangeSet(split); err != nil {
 		return err
 	}
-	for _, l0 := range l0s {
+	for _, l0 := range l0ChangeSets {
 		if err = m.ApplyChangeSet(l0); err != nil {
 			return err
 		}
 	}
 	if m.metaListener != nil && notifyMetaListener {
-		for i, changeSet := range l0s {
-			shard := shards[i]
-			m.metaListener.OnChange(&protos.MetaChangeEvent{
-				ShardID:      changeSet.ShardID,
-				ShardVer:     changeSet.ShardVer,
-				StartKey:     shard.Start,
-				EndKey:       shard.End,
-				L0Creates:    changeSet.L0Creates,
-				TableCreates: changeSet.TableCreates,
-			})
+		for _, changeSet := range l0ChangeSets {
+			m.metaListener.OnChange(changeSet)
 		}
 	}
 	return nil
-}
-
-func (m *ShardingManifest) createMetaChangeEvents(changeSet *protos.ShardChangeSet, startKey, endKey []byte) *protos.MetaChangeEvent {
-	return &protos.MetaChangeEvent{
-		ShardID:      changeSet.ShardID,
-		ShardVer:     changeSet.ShardVer,
-		StartKey:     startKey,
-		EndKey:       endKey,
-		L0Creates:    changeSet.L0Creates,
-		TableCreates: changeSet.TableCreates,
-		TableDeletes: changeSet.TableDeletes,
-	}
 }
 
 type fileMeta struct {
@@ -400,4 +450,11 @@ func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset
 		}
 	}
 	return ret, offset, nil
+}
+
+func newShardChangeSet(shard *Shard) *protos.ShardChangeSet {
+	return &protos.ShardChangeSet{
+		ShardID:  shard.ID,
+		ShardVer: shard.Ver,
+	}
 }

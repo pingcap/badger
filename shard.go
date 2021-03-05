@@ -2,27 +2,21 @@ package badger
 
 import (
 	"bytes"
-	"fmt"
+	"math"
+	"sync"
+	"sync/atomic"
+	"unsafe"
+
 	"github.com/dgryski/go-farm"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/y"
-	"math"
-	"path/filepath"
-	"sync"
-	"sync/atomic"
-	"unsafe"
+	"github.com/pingcap/log"
 )
 
 const ShardMaxLevel = 4
 
-// Shard split can be performed by the following steps:
-// 1. set the splitKeys and mark the state to splitting.
-// 2. a splitting Shard will separate all the files by the SplitKeys.
-// 3. incoming SST is also split by SplitKeys.
-// 4. After all existing files are split by the split keys, the state is changed to SplitDone.
-// 5. After SplitDone, the shard map replace the old shard two new shardsByID.
 type Shard struct {
 	ID    uint64
 	Ver   uint64
@@ -35,8 +29,8 @@ type Shard struct {
 	l0s     *unsafe.Pointer
 	flushCh chan *shardFlushTask
 
-	// split state transition: initial(0) -> set keys (1) -> splitting (2) -> splitDone (3)
-	splitState       uint32
+	// split state transition: initial(0) -> pre-split (1) -> split-file-done (2)
+	splitState       int32
 	splitKeys        [][]byte
 	splittingMemTbls []*unsafe.Pointer
 	splittingCnt     int
@@ -46,30 +40,20 @@ type Shard struct {
 	estimatedSize    int64
 	removeFilesOnDel bool
 
-	// If the shard is not active, flush mem table and do compaction will ignore this shard.
-	active int32
+	// If the shard is passive, flush mem table and do compaction will ignore this shard.
+	passive int32
 
-	wal         *shardSplitWAL
-	walFilename string
-	properties  *shardProperties
+	properties *shardProperties
 }
-
-const (
-	splitStateInitial   uint32 = 0
-	splitStateSetKeys   uint32 = 1
-	splitStateSplitting uint32 = 2
-	splitStateSplitDone uint32 = 3
-)
 
 func newShard(props *protos.ShardProperties, ver uint64, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
 	shard := &Shard{
-		ID:          props.ShardID,
-		Ver:         ver,
-		Start:       start,
-		End:         end,
-		cfs:         make([]*shardCF, len(opt.CFs)),
-		walFilename: filepath.Join(opt.Dir, fmt.Sprintf("%016x_%08d.wal", props.ShardID, ver)),
-		properties:  newShardProperties().applyPB(props),
+		ID:         props.ShardID,
+		Ver:        ver,
+		Start:      start,
+		End:        end,
+		cfs:        make([]*shardCF, len(opt.CFs)),
+		properties: newShardProperties().applyPB(props),
 	}
 	shard.memTbls = new(unsafe.Pointer)
 	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
@@ -84,6 +68,30 @@ func newShard(props *protos.ShardProperties, ver uint64, start, end []byte, opt 
 		}
 		shard.cfs[i] = sCF
 	}
+	return shard
+}
+
+func newShardForLoading(shardInfo *ShardInfo, opt Options, metrics *y.MetricsSet) *Shard {
+	shard := newShard(shardInfo.properties.toPB(shardInfo.ID), shardInfo.Ver, shardInfo.Start, shardInfo.End, opt, metrics)
+	if shardInfo.preSplit != nil {
+		if shardInfo.preSplit.MemProps != nil {
+			// Don't set split keys for RecoverHandler to recover the data before pre-split.
+			return shard
+		}
+		shard.setSplitKeys(shardInfo.preSplit.Keys)
+	}
+	y.Assert(shardInfo.split == nil || shardInfo.split.MemProps != nil)
+	shard.setSplitState(shardInfo.splitState)
+	return shard
+}
+
+func newShardForIngest(changeSet *protos.ShardChangeSet, opt Options, metrics *y.MetricsSet) *Shard {
+	shardSnap := changeSet.Snapshot
+	shard := newShard(shardSnap.Properties, changeSet.ShardVer, shardSnap.Start, shardSnap.End, opt, metrics)
+	if changeSet.PreSplit != nil {
+		shard.setSplitKeys(changeSet.PreSplit.Keys)
+	}
+	shard.setSplitState(changeSet.State)
 	return shard
 }
 
@@ -102,8 +110,20 @@ func (s *Shard) tableIDs() []uint64 {
 	return ids
 }
 
+func (s *Shard) IsPassive() bool {
+	return atomic.LoadInt32(&s.passive) == 1
+}
+
+func (s *Shard) SetPassive(passive bool) {
+	v := int32(0)
+	if passive {
+		v = 1
+	}
+	atomic.StoreInt32(&s.passive, v)
+}
+
 func (s *Shard) isSplitting() bool {
-	return atomic.LoadUint32(&s.splitState) >= splitStateSplitting
+	return atomic.LoadInt32(&s.splitState) >= int32(protos.SplitState_PRE_SPLIT)
 }
 
 func (s *Shard) GetEstimatedSize() int64 {
@@ -115,7 +135,7 @@ func (s *Shard) addEstimatedSize(size int64) int64 {
 }
 
 func (s *Shard) setSplitKeys(keys [][]byte) bool {
-	if atomic.CompareAndSwapUint32(&s.splitState, splitStateInitial, splitStateSetKeys) {
+	if s.GetSplitState() == protos.SplitState_INITIAL {
 		s.splitKeys = keys
 		s.splittingMemTbls = make([]*unsafe.Pointer, len(keys)+1)
 		for i := range s.splittingMemTbls {
@@ -127,14 +147,10 @@ func (s *Shard) setSplitKeys(keys [][]byte) bool {
 		for i := range s.splittingL0Tbls {
 			s.splittingL0Tbls[i] = &shardL0Tables{}
 		}
-		y.Assert(atomic.CompareAndSwapUint32(&s.splitState, splitStateSetKeys, splitStateSplitting))
+		s.setSplitState(protos.SplitState_PRE_SPLIT)
 		return true
 	}
 	return false
-}
-
-func (s *Shard) setSplitDone() {
-	y.Assert(atomic.CompareAndSwapUint32(&s.splitState, splitStateSplitting, splitStateSplitDone))
 }
 
 func (s *Shard) foreachLevel(f func(cf int, level *levelHandler) (stop bool)) {
@@ -288,7 +304,23 @@ func (s *Shard) OverlapKey(key []byte) bool {
 	return bytes.Compare(s.Start, key) <= 0 && bytes.Compare(key, s.End) < 0
 }
 
-func (s *Shard) GetProperty(key string) ([]byte, bool) {
+func (s *Shard) GetSplitState() protos.SplitState {
+	return protos.SplitState(atomic.LoadInt32(&s.splitState))
+}
+
+func (s *Shard) setSplitState(state protos.SplitState) {
+	oldState := s.GetSplitState()
+	if int32(oldState) == int32(state) {
+		return
+	}
+	if int32(oldState) > int32(state) {
+		log.Error("shard split state regression")
+		return
+	}
+	atomic.CompareAndSwapInt32(&s.splitState, int32(oldState), int32(state))
+}
+
+func (s *Shard) RecoverGetProperty(key string) ([]byte, bool) {
 	return s.properties.get(key)
 }
 
@@ -368,4 +400,13 @@ func (sp *shardProperties) applyPB(pbProps *protos.ShardProperties) *shardProper
 		}
 	}
 	return sp
+}
+
+func GetShardProperty(key string, props *protos.ShardProperties) ([]byte, bool) {
+	for i, k := range props.Keys {
+		if key == k {
+			return props.Values[i], true
+		}
+	}
+	return nil, false
 }

@@ -12,9 +12,7 @@ import (
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"go.uber.org/zap"
 	"math"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -52,8 +50,9 @@ var ShardingDBDefaultOpt = Options{
 }
 
 var (
-	errShardNotFound = errors.New("shard not found")
-	errShardNotMatch = errors.New("shard not match")
+	errShardNotFound            = errors.New("shard not found")
+	errShardNotMatch            = errors.New("shard not match")
+	errShardWrongSplittingState = errors.New("shard wrong splitting state")
 )
 
 type ShardingDB struct {
@@ -150,69 +149,107 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 
 func (sdb *ShardingDB) loadShards() error {
 	log.Info("load shards")
+	var needSplitShards []*Shard
+	var splitMetas []*protos.ShardSplit
 	for _, mShard := range sdb.manifest.shards {
-		shard := newShard(mShard.properties.toPB(mShard.ID), mShard.Ver, mShard.Start, mShard.End, sdb.opt, sdb.metrics)
-		for fid := range mShard.files {
-			cfLevel, ok := sdb.manifest.globalFiles[fid]
-			y.Assert(ok)
-			cf := cfLevel.cf
-			if cf == -1 {
-				filename := sstable.NewFilename(fid, sdb.opt.Dir)
-				sl0Tbl, err := openShardL0Table(filename, fid)
+		shard, err := sdb.loadShard(mShard)
+		if err != nil {
+			return err
+		}
+		if sdb.opt.RecoverHandler != nil {
+			if mShard.preSplit != nil {
+				if mShard.preSplit.MemProps != nil {
+					// Recover to the state before PreSplit.
+					err = sdb.opt.RecoverHandler.Recover(sdb, shard, mShard.preSplit.MemProps)
+					if err != nil {
+						return err
+					}
+					shard.setSplitKeys(mShard.preSplit.Keys)
+				}
+				err = sdb.opt.RecoverHandler.Recover(sdb, shard, nil)
+			}
+		}
+		// When a shard's split meta is persisted, there are some volatile data.
+		// We need to recover it.
+		if mShard.split != nil && mShard.split.MemProps != nil {
+			// We need to finish the split process after recovered.
+			needSplitShards = append(needSplitShards, shard)
+			splitMetas = append(splitMetas, mShard.split)
+		}
+	}
+	for i := 0; i < len(needSplitShards); i++ {
+		shard := needSplitShards[i]
+		sdb.manifest.applySplit(shard.ID, splitMetas[i])
+		newShards, _ := sdb.buildSplitShards(shard, splitMetas[i].NewShards)
+		for _, nShard := range newShards {
+			// After split meta is persisted, the new shards may have more volatile data to recover.
+			if sdb.opt.RecoverHandler != nil {
+				err := sdb.opt.RecoverHandler.Recover(sdb, nShard, nil)
 				if err != nil {
 					return err
 				}
-				shard.addEstimatedSize(sl0Tbl.size)
-				l0Tbls := shard.loadL0Tables()
-				l0Tbls.tables = append(l0Tbls.tables, sl0Tbl)
-				continue
 			}
-			level := cfLevel.level
-			scf := shard.cfs[cf]
-			handler := scf.getLevelHandler(int(level))
-			filename := sstable.NewFilename(fid, sdb.opt.Dir)
-			reader, err := sstable.NewMMapFile(filename)
-			if err != nil {
-				return err
-			}
-			tbl, err := sstable.OpenTable(filename, reader)
-			if err != nil {
-				return err
-			}
-			shard.addEstimatedSize(tbl.Size())
-			handler.tables = append(handler.tables, tbl)
-		}
-		l0Tbls := shard.loadL0Tables()
-		// Sort the l0 tables by age.
-		sort.Slice(l0Tbls.tables, func(i, j int) bool {
-			return l0Tbls.tables[i].fid > l0Tbls.tables[j].fid
-		})
-		for cf := 0; cf < len(sdb.opt.CFs); cf++ {
-			scf := shard.cfs[cf]
-			for level := 1; level <= ShardMaxLevel; level++ {
-				handler := scf.getLevelHandler(level)
-				sortTables(handler.tables)
-			}
-		}
-		sdb.shardMap.Store(shard.ID, shard)
-		walName := shard.walFilename
-		log.S().Infof("load shard %d", shard.ID)
-		if mShard.preSplit != nil {
-			shard.setSplitKeys(mShard.preSplit.Keys)
-			err := sdb.replayWAL(shard)
-			if err != nil {
-				log.Info("replay WAL error", zap.Error(err))
-			} else {
-				log.Info("replay WAL ok")
-			}
-		} else {
-			// The wal is redundant if manifest is not in pre-split state.
-			if _, err := os.Stat(walName); err == nil {
-				os.Remove(walName)
-			}
+			sdb.shardMap.Store(nShard.ID, nShard)
 		}
 	}
 	return nil
+}
+
+func (sdb *ShardingDB) loadShard(shardInfo *ShardInfo) (*Shard, error) {
+	shard := newShardForLoading(shardInfo, sdb.opt, sdb.metrics)
+	for fid := range shardInfo.files {
+		cfLevel, ok := sdb.manifest.globalFiles[fid]
+		y.Assert(ok)
+		cf := cfLevel.cf
+		if cf == -1 {
+			filename := sstable.NewFilename(fid, sdb.opt.Dir)
+			sl0Tbl, err := openShardL0Table(filename, fid)
+			if err != nil {
+				return nil, err
+			}
+			shard.addEstimatedSize(sl0Tbl.size)
+			l0Tbls := shard.loadL0Tables()
+			l0Tbls.tables = append(l0Tbls.tables, sl0Tbl)
+			continue
+		}
+		level := cfLevel.level
+		scf := shard.cfs[cf]
+		handler := scf.getLevelHandler(int(level))
+		filename := sstable.NewFilename(fid, sdb.opt.Dir)
+		reader, err := sstable.NewMMapFile(filename)
+		if err != nil {
+			return nil, err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
+		if err != nil {
+			return nil, err
+		}
+		shard.addEstimatedSize(tbl.Size())
+		handler.tables = append(handler.tables, tbl)
+	}
+	l0Tbls := shard.loadL0Tables()
+	// Sort the l0 tables by age.
+	sort.Slice(l0Tbls.tables, func(i, j int) bool {
+		return l0Tbls.tables[i].commitTS > l0Tbls.tables[j].commitTS
+	})
+	for cf := 0; cf < len(sdb.opt.CFs); cf++ {
+		scf := shard.cfs[cf]
+		for level := 1; level <= ShardMaxLevel; level++ {
+			handler := scf.getLevelHandler(level)
+			sortTables(handler.tables)
+		}
+	}
+	sdb.shardMap.Store(shard.ID, shard)
+	log.S().Infof("load shard %d", shard.ID)
+	return shard, nil
+}
+
+// RecoverHandler handles recover a shard's mem-table data from another data source.
+type RecoverHandler interface {
+	// Recover recovers from the shard's state to the state that is stored in the toState property.
+	// So the DB has a chance to execute pre-split command.
+	// If toState is nil, the implementation should recovers to the latest state.
+	Recover(db *ShardingDB, shard *Shard, toState *protos.ShardProperties) error
 }
 
 type localIDAllocator struct {
@@ -347,10 +384,56 @@ func (wb *WriteBatch) SetProperty(key string, val []byte) {
 	wb.properties[key] = val
 }
 
-func (sdb *ShardingDB) Write(wb *WriteBatch) error {
-	notify := make(chan error, 1)
-	sdb.writeCh <- engineTask{writeTask: wb, notify: notify}
-	return <-notify
+func (wb *WriteBatch) EstimatedSize() int64 {
+	return wb.estimatedSize
+}
+
+func (wb *WriteBatch) NumEntries() int {
+	var n int
+	for _, entries := range wb.entries {
+		n += len(entries)
+	}
+	return n
+}
+
+func (wb *WriteBatch) Reset() {
+	for i, entries := range wb.entries {
+		wb.entries[i] = entries[:0]
+	}
+	wb.estimatedSize = 0
+	for key := range wb.properties {
+		delete(wb.properties, key)
+	}
+}
+
+func (wb *WriteBatch) Iterate(cf int, fn func(e *memtable.Entry) (more bool)) {
+	for _, e := range wb.entries[cf] {
+		if !fn(e) {
+			break
+		}
+	}
+}
+
+func (sdb *ShardingDB) Write(wbs ...*WriteBatch) error {
+	notifies := make([]chan error, len(wbs))
+	for i, wb := range wbs {
+		notify := make(chan error, 1)
+		notifies[i] = notify
+		sdb.writeCh <- engineTask{writeTask: wb, notify: notify}
+	}
+	for _, notify := range notifies {
+		err := <-notify
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (sdb *ShardingDB) RecoverWrite(wb *WriteBatch) error {
+	eTask := engineTask{writeTask: wb, notify: make(chan error, 1)}
+	sdb.executeWriteTask(eTask)
+	return <-eTask.notify
 }
 
 type Snapshot struct {
@@ -444,9 +527,10 @@ func (sdb *ShardingDB) RemoveShard(shardID uint64, removeFile bool) error {
 	if !ok {
 		return errors.New("shard not found")
 	}
-	change := &protos.ShardChangeSet{ShardID: shardID, ShardDelete: true}
 	shard := shardVal.(*Shard)
-	err := sdb.manifest.writeChangeSet(shard, change, false)
+	change := newShardChangeSet(shard)
+	change.ShardDelete = true
+	err := sdb.manifest.writeChangeSet(change, false)
 	if err != nil {
 		return err
 	}
@@ -478,12 +562,14 @@ func (sdb *ShardingDB) GetSplitSuggestion(shardID uint64, splitSize int64) [][]b
 
 func (sdb *ShardingDB) Size() int64 {
 	var size int64
+	var shardCnt int64
 	sdb.shardMap.Range(func(key, value interface{}) bool {
 		shard := value.(*Shard)
 		size += atomic.LoadInt64(&shard.estimatedSize)
+		shardCnt++
 		return true
 	})
-	return size
+	return size + shardCnt
 }
 
 func (sdb *ShardingDB) NumCFs() int {
@@ -492,4 +578,18 @@ func (sdb *ShardingDB) NumCFs() int {
 
 func (sdb *ShardingDB) GetOpt() Options {
 	return sdb.opt
+}
+
+func (sdb *ShardingDB) GetShardChangeSet(shardID uint64) *protos.ShardChangeSet {
+	sdb.manifest.appendLock.Lock()
+	defer sdb.manifest.appendLock.Unlock()
+	return sdb.manifest.toChangeSet(shardID)
+}
+
+func (sdb *ShardingDB) GetPropertiesWithSnap(shard *Shard, keys []string) (values [][]byte, snap *Snapshot) {
+	notify := make(chan error, 1)
+	task := &getPropertyTask{shard: shard, keys: keys}
+	sdb.writeCh <- engineTask{getProperties: task, notify: notify}
+	<-notify
+	return task.values, task.snap
 }

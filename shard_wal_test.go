@@ -1,8 +1,6 @@
 package badger
 
 import (
-	"encoding/binary"
-	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
 	"io/ioutil"
 	"os"
@@ -68,29 +66,9 @@ func TestLogRecovery(t *testing.T) {
 	err = db.Close()
 	require.NoError(t, err)
 	sc.tester.close()
+	opts.RecoverHandler = sc.tester
 	db, err = OpenShardingDB(opts)
 	require.NoError(t, err)
-	oldTesterTree := sc.tester.loadShardTree()
 	sc.tester = newShardTester(db)
-	newTesterTree := sc.tester.loadShardTree()
-	for i, oldShard := range oldTesterTree.shards {
-		nShard := newTesterTree.shards[i]
-		nShard.writeLog = oldShard.writeLog
-		idxBin, ok := nShard.GetProperty(appliedIndex)
-		require.True(t, ok)
-		idx := int(binary.LittleEndian.Uint32(idxBin))
-		log.S().Infof("applied index %d, logLen %d", idx, nShard.writeLog.length())
-		var requests []*testerWriteRequest
-		for i := idx; i < nShard.writeLog.length(); i++ {
-			entries := nShard.writeLog.entries[i]
-			req := &testerWriteRequest{entries: entries, shard: nShard, resp: make(chan error, 1), replay: true}
-			sc.tester.writeCh <- req
-			requests = append(requests, req)
-		}
-		for _, req := range requests {
-			err = <-req.resp
-			require.Nil(t, err)
-		}
-	}
 	sc.checkData(0, 2000)
 }

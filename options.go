@@ -119,6 +119,8 @@ type Options struct {
 	IDAllocator IDAllocator
 
 	MetaChangeListener MetaChangeListener
+
+	RecoverHandler RecoverHandler
 }
 
 type CFConfig struct {
@@ -164,7 +166,7 @@ type IDAllocator interface {
 
 // MetaChangeListener is used to notify the engine user that engine meta has changed.
 type MetaChangeListener interface {
-	OnChange(e *protos.MetaChangeEvent)
+	OnChange(e *protos.ShardChangeSet)
 }
 
 // DefaultOptions sets a list of recommended options for good performance.

@@ -109,6 +109,14 @@ func OpenTable(filename string, reader TableFile) (*Table, error) {
 	return t, nil
 }
 
+func OpenMMapTable(filename string) (*Table, error) {
+	reader, err1 := NewMMapFile(filename)
+	if err1 != nil {
+		return nil, err1
+	}
+	return OpenTable(filename, reader)
+}
+
 // OpenInMemoryTable opens a table that has data in memory.
 func OpenInMemoryTable(reader *InMemFile) (*Table, error) {
 	t := &Table{

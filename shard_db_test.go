@@ -4,11 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"github.com/pingcap/badger/protos"
-	"github.com/pingcap/badger/table/memtable"
-	"github.com/pingcap/badger/y"
-	"github.com/pingcap/log"
-	"github.com/stretchr/testify/require"
 	"io/ioutil"
 	"net/http"
 	_ "net/http/pprof"
@@ -17,6 +12,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/table/memtable"
+	"github.com/pingcap/badger/y"
+	"github.com/pingcap/log"
+	"github.com/stretchr/testify/require"
 )
 
 func TestShardingDB(t *testing.T) {
@@ -96,9 +97,9 @@ func initialIngest(t *testing.T, db *ShardingDB) {
 		ChangeSet: &protos.ShardChangeSet{
 			ShardID:  1,
 			ShardVer: 1,
-			ShardCreate: &protos.ShardCreate{
-				StartKey:   nil,
-				EndKey:     globalShardEndKey,
+			Snapshot: &protos.ShardSnapshot{
+				Start:      nil,
+				End:        globalShardEndKey,
 				Properties: &protos.ShardProperties{ShardID: 1},
 			},
 		},
@@ -283,13 +284,7 @@ func TestMigration(t *testing.T) {
 	}
 	snap.Discard()
 	ingestTree.Delta = []*memtable.CFTable{cfTbl}
-	changeSets := db.manifest.toChangeSets()
-	for _, changeSet := range changeSets {
-		if changeSet.ShardID == 1 {
-			ingestTree.ChangeSet = changeSet
-			break
-		}
-	}
+	ingestTree.ChangeSet = db.manifest.toChangeSet(1)
 	opts = getTestOptions(dirB)
 	opts.IDAllocator = allocator
 	opts.NumCompactors = 2
@@ -314,18 +309,20 @@ type metaListener struct {
 	maxL0ID  uint64
 }
 
-func (l *metaListener) OnChange(e *protos.MetaChangeEvent) {
+func (l *metaListener) OnChange(e *protos.ShardChangeSet) {
 	l.lock.Lock()
-	for _, l0 := range e.L0Creates {
-		if l0.Properties != nil {
-			for i, key := range l0.Properties.Keys {
-				if key == commitTSKey {
-					l.commitTS = append(l.commitTS, binary.LittleEndian.Uint64(l0.Properties.Values[i]))
+	if e.Flush != nil {
+		for _, l0 := range e.Flush.L0Creates {
+			if l0.Properties != nil {
+				for i, key := range l0.Properties.Keys {
+					if key == commitTSKey {
+						l.commitTS = append(l.commitTS, binary.LittleEndian.Uint64(l0.Properties.Values[i]))
+					}
 				}
 			}
-		}
-		if l0.ID > l.maxL0ID {
-			l.maxL0ID = l0.ID
+			if l0.ID > l.maxL0ID {
+				l.maxL0ID = l0.ID
+			}
 		}
 	}
 	l.lock.Unlock()

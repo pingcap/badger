@@ -46,15 +46,48 @@ message ShardChangeSet {
   uint64 shardID = 1;
   uint64 shardVer = 2;
   uint64 version = 3;
-
-  repeated L0Create l0Creates = 4;
-  repeated TableCreate tableCreates = 5;
-  repeated uint64 tableDeletes = 6;
-
-  ShardCreate shardCreate = 7;
+  ShardCompaction compaction = 4;
+  ShardFlush flush = 5;
+  ShardSnapshot snapshot = 6;
+  SplitState state = 7;
   ShardPreSplit preSplit = 8;
-  ShardSplit split = 9;
-  bool shardDelete = 10;
+  ShardSplitFiles splitFiles = 9;
+  ShardSplit split = 10;
+  bool shardDelete = 11;
+}
+
+enum SplitState {
+  INITIAL = 0;
+  PRE_SPLIT = 1;
+  PRE_SPLIT_FLUSH_DONE = 2;
+  SPLIT_FILE_DONE = 3;
+}
+
+message ShardCompaction {
+  int32 cf = 1;
+  uint32 level = 2;
+  repeated TableCreate tableCreates = 3;
+  repeated uint64 topDeletes = 4;
+  repeated uint64 bottomDeletes = 5;
+}
+
+message ShardFlush {
+  repeated L0Create l0Creates = 1;
+}
+
+message ShardSnapshot {
+  bytes start = 1;
+  bytes end = 2;
+  ShardProperties properties = 3;
+  repeated bytes splitKeys = 4;
+  repeated L0Create l0Creates = 5;
+  repeated TableCreate tableCreates = 6;
+}
+
+message ShardSplitFiles {
+  repeated L0Create l0Creates = 1;
+  repeated TableCreate tableCreates = 2;
+  repeated uint64 tableDeletes = 3;
 }
 
 message L0Create {
@@ -72,34 +105,21 @@ message TableCreate {
   bytes biggest = 5;
 }
 
-message ShardCreate {
-  bytes startKey = 1;
-  bytes endKey = 2;
-  repeated uint64 tableIDs = 3;
-  ShardProperties properties = 4;
-}
-
 message ShardPreSplit {
   repeated bytes Keys = 1;
+  // the properties that is in mem-table, not persistent.
+  // If it is nil, then the pre split is stable.
+  ShardProperties memProps = 2;
 }
 
 message ShardSplit {
   repeated ShardProperties newShards = 1;
-  repeated bytes Keys = 2;
+  repeated bytes Keys = 3;
+  ShardProperties memProps = 4;
 }
 
 message ShardProperties {
   uint64 shardID = 1;
   repeated string keys = 2;
   repeated bytes values = 3;
-}
-
-message MetaChangeEvent {
-  uint64 shardID = 1;
-  uint64 shardVer = 2;
-  bytes startKey = 3;
-  bytes endKey = 4;
-  repeated L0Create l0Creates = 5;
-  repeated TableCreate tableCreates = 6;
-  repeated uint64 tableDeletes = 7;
 }

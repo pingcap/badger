@@ -2,11 +2,14 @@ package memtable
 
 import (
 	"github.com/pingcap/badger/y"
+	"sync/atomic"
 )
 
 type CFTable struct {
-	skls  []*skiplist
-	arena *arena
+	skls    []*skiplist
+	arena   *arena
+	version uint64
+	flushing uint32
 }
 
 func NewCFTable(arenaSize int64, numCFs int) *CFTable {
@@ -63,4 +66,12 @@ func (cft *CFTable) Empty() bool {
 		}
 	}
 	return true
+}
+
+func (cft *CFTable) SetVersion(version uint64) {
+	atomic.StoreUint64(&cft.version, version)
+}
+
+func (cft *CFTable) GetVersion() uint64 {
+	return atomic.LoadUint64(&cft.version)
 }

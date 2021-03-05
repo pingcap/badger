@@ -1,22 +1,22 @@
 package badger
 
 import (
+	"sync/atomic"
+	"unsafe"
+
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
-	"os"
-	"sync/atomic"
-	"unsafe"
 )
 
 type shardFlushTask struct {
-	shard        *Shard
-	tbl          *memtable.CFTable
-	preSplitKeys [][]byte
-	properties   *protos.ShardProperties
+	shard         *Shard
+	tbl           *memtable.CFTable
+	preSplitFlush bool
+	properties    *protos.ShardProperties
 
 	finishSplitOldShard *Shard
 	finishSplitShards   []*Shard
@@ -35,7 +35,7 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 			continue
 		}
 		if task.tbl == nil {
-			y.Assert(len(task.preSplitKeys) > 0)
+			y.Assert(task.preSplitFlush)
 			err := sdb.addShardL0Table(task, nil)
 			if err != nil {
 				panic(err)
@@ -73,42 +73,17 @@ func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
 		allL0s[idx] = l0s
 	}
 	oldShard := task.finishSplitOldShard
-	splitChangeSet := &protos.ShardChangeSet{
-		ShardID:  oldShard.ID,
-		ShardVer: oldShard.Ver,
-		Split: &protos.ShardSplit{
-			NewShards: task.finishSplitProps,
-			Keys:      oldShard.splitKeys,
-		},
-	}
-	l0ChangeSets := make([]*protos.ShardChangeSet, len(task.finishSplitMemTbls))
-	for i := range allL0s {
-		nShard := task.finishSplitShards[i]
-		l0s := allL0s[i]
-		l0ChangeSet := &protos.ShardChangeSet{
-			ShardID:  nShard.ID,
-			ShardVer: nShard.Ver,
-		}
-		for _, l0 := range l0s.tables {
-			l0ChangeSet.L0Creates = append(l0ChangeSet.L0Creates, &protos.L0Create{
-				ID:    l0.fid,
-				Start: nShard.Start,
-				End:   nShard.End,
-			})
-		}
-		l0ChangeSets[i] = l0ChangeSet
+	splitChangeSet := newShardChangeSet(oldShard)
+	splitChangeSet.Split = &protos.ShardSplit{
+		NewShards: task.finishSplitProps,
+		Keys:      oldShard.splitKeys,
 	}
 	for idx, nShard := range task.finishSplitShards {
 		newL0s := allL0s[idx]
 		atomicAddL0(nShard.l0s, newL0s.tables...)
 		atomicRemoveMemTable(nShard.memTbls, len(newL0s.tables))
 	}
-	err := sdb.manifest.writeFinishSplitChangeSet(task.finishSplitShards, splitChangeSet, l0ChangeSets, true)
-	if err != nil {
-		return err
-	}
-	os.Remove(oldShard.walFilename)
-	return nil
+	return sdb.manifest.writeFinishSplitChangeSet(splitChangeSet, allL0s, task, true)
 }
 
 func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable) (*shardL0Table, error) {
@@ -120,7 +95,7 @@ func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable) (*shardL0Table, error)
 		return nil, err
 	}
 	writer := fileutil.NewBufferedWriter(fd, sdb.opt.TableBuilderOptions.WriteBufferSize, nil)
-	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions)
+	builder := newShardL0Builder(sdb.numCFs, sdb.opt.TableBuilderOptions, m.GetVersion())
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		it := m.NewIterator(cf, false)
 		if it == nil {
@@ -157,17 +132,19 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 	if l0 != nil {
 		creates = []*protos.L0Create{newL0Create(l0, task.properties, shard.Start, shard.End)}
 	}
-	var preSplit *protos.ShardPreSplit
-	if len(task.preSplitKeys) > 0 {
-		preSplit = &protos.ShardPreSplit{Keys: task.preSplitKeys}
-	}
-	changeSet := &protos.ShardChangeSet{
+	changeSet := newShardChangeSet(shard)
+	changeSet.Flush = &protos.ShardFlush{
 		L0Creates: creates,
-		PreSplit:  preSplit,
 	}
-	err := sdb.manifest.writeChangeSet(shard, changeSet, true)
+	if task.preSplitFlush {
+		changeSet.State = protos.SplitState_PRE_SPLIT_FLUSH_DONE
+	}
+	err := sdb.manifest.writeChangeSet(changeSet, true)
 	if err != nil {
 		return err
+	}
+	if task.preSplitFlush {
+		shard.setSplitState(protos.SplitState_PRE_SPLIT_FLUSH_DONE)
 	}
 	if l0 == nil {
 		return nil

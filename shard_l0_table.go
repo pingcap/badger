@@ -17,6 +17,7 @@ type shardL0Table struct {
 	fid      uint64
 	filename string
 	size     int64
+	commitTS uint64
 }
 
 func (st *shardL0Table) Delete() error {
@@ -42,8 +43,9 @@ func openShardL0Table(filename string, fid uint64) (*shardL0Table, error) {
 		filename: filename,
 		size:     int64(len(shardData)),
 	}
-	numCF := int(shardData[len(shardData)-1])
-	shardData = shardData[:len(shardData)-1]
+	l0.commitTS = binary.LittleEndian.Uint64(shardData[len(shardData)-8:])
+	numCF := int(shardData[len(shardData)-9])
+	shardData = shardData[:len(shardData)-9]
 	l0.cfs = make([]*sstable.Table, 0, numCF)
 	cfIdx := shardData[len(shardData)-numCF*8:]
 	for i := 0; i < len(cfIdx); i += 8 {
@@ -104,11 +106,13 @@ func (sl0s *shardL0Tables) totalSize() int64 {
 
 type shardL0Builder struct {
 	builders []*sstable.Builder
+	commitTS uint64
 }
 
-func newShardL0Builder(numCFs int, opt options.TableBuilderOptions) *shardL0Builder {
+func newShardL0Builder(numCFs int, opt options.TableBuilderOptions, commitTS uint64) *shardL0Builder {
 	sdb := &shardL0Builder{
 		builders: make([]*sstable.Builder, numCFs),
+		commitTS: commitTS,
 	}
 	for i := 0; i < numCFs; i++ {
 		sdb.builders[i] = sstable.NewTableBuilder(nil, nil, 0, opt)
@@ -144,5 +148,8 @@ func (e *shardL0Builder) Finish() []byte {
 	}
 	result = append(result, cfsIndex...)
 	result = append(result, byte(len(e.builders))) // number of CF
+	commitBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(commitBuf, e.commitTS)
+	result = append(result, commitBuf...)
 	return result
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/y"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 	"sort"
@@ -21,7 +22,7 @@ type shardTester struct {
 	db           *ShardingDB
 	shardTree    unsafe.Pointer
 	wg           sync.WaitGroup
-	requestLog   []*testerWriteRequest
+	writeLogs    *writeLogStore
 }
 
 func newShardTester(db *ShardingDB) *shardTester {
@@ -29,11 +30,12 @@ func newShardTester(db *ShardingDB) *shardTester {
 		shardIDAlloc: 0,
 		writeCh:      make(chan interface{}, 256),
 		db:           db,
+		writeLogs:    &writeLogStore{m: map[shardIDVer]*testerWriteLog{}},
 	}
-	var shards []*shardWithWriteLog
+	var shards []*Shard
 	db.shardMap.Range(func(key, value interface{}) bool {
 		shard := value.(*Shard)
-		shards = append(shards, &shardWithWriteLog{Shard: shard, writeLog: &testerWriteLog{}})
+		shards = append(shards, shard)
 		return true
 	})
 	sort.Slice(shards, func(i, j int) bool {
@@ -48,7 +50,7 @@ func newShardTester(db *ShardingDB) *shardTester {
 }
 
 type testerWriteRequest struct {
-	shard   *shardWithWriteLog
+	shard   *Shard
 	entries []*testerEntry
 	replay  bool
 	resp    chan error
@@ -62,23 +64,55 @@ type testerEntry struct {
 }
 
 type testerShardTree struct {
-	shards []*shardWithWriteLog
-}
-
-type shardWithWriteLog struct {
-	*Shard
-	writeLog *testerWriteLog
+	shards []*Shard
 }
 
 type testerWriteLog struct {
-	entries [][]*testerEntry
+	beginIdx int
+	entries  [][]*testerEntry
 }
 
-func (wl *testerWriteLog) length() int {
-	return len(wl.entries)
+type shardIDVer struct {
+	id  uint64
+	ver uint64
 }
 
-func (tree *testerShardTree) getShard(key []byte) *shardWithWriteLog {
+func newIDVer(shard *Shard) shardIDVer {
+	return shardIDVer{id: shard.ID, ver: shard.Ver}
+}
+
+type writeLogStore struct {
+	m map[shardIDVer]*testerWriteLog
+}
+
+func (wls *writeLogStore) append(shard *Shard, entries []*testerEntry) {
+	idver := newIDVer(shard)
+	wl, ok := wls.m[idver]
+	if !ok {
+		wl = &testerWriteLog{}
+		wls.m[idver] = wl
+	}
+	wl.entries = append(wl.entries, entries)
+}
+
+func (wls *writeLogStore) getEntries(shard *Shard, idx int) []*testerEntry {
+	idver := newIDVer(shard)
+	wl, ok := wls.m[idver]
+	if !ok {
+		return nil
+	}
+	return wl.entries[idx-wl.beginIdx]
+}
+
+func (wls *writeLogStore) latestIndex(shard *Shard) int {
+	wl, ok := wls.m[newIDVer(shard)]
+	if !ok {
+		return -1
+	}
+	return wl.beginIdx + len(wl.entries) - 1
+}
+
+func (tree *testerShardTree) getShard(key []byte) *Shard {
 	for _, shd := range tree.shards {
 		if bytes.Compare(key, shd.End) >= 0 {
 			continue
@@ -113,22 +147,22 @@ func (tree *testerShardTree) buildGetSnapRequests(start, end []byte) []*testerGe
 	return results
 }
 
-func (tree *testerShardTree) split(oldID uint64, newShards []*Shard) *testerShardTree {
+func (st *shardTester) split(oldID uint64, newShards []*Shard) {
 	newTree := &testerShardTree{}
+	tree := st.loadShardTree()
 	for _, shd := range tree.shards {
 		if shd.ID == oldID {
 			for _, newShd := range newShards {
+				newTree.shards = append(newTree.shards, newShd)
 				if newShd.ID == oldID {
-					newTree.shards = append(newTree.shards, &shardWithWriteLog{Shard: newShd, writeLog: shd.writeLog})
-				} else {
-					newTree.shards = append(newTree.shards, &shardWithWriteLog{Shard: newShd, writeLog: &testerWriteLog{}})
+					st.writeLogs.m[newIDVer(newShd)] = &testerWriteLog{beginIdx: st.writeLogs.latestIndex(shd)}
 				}
 			}
 		} else {
 			newTree.shards = append(newTree.shards, shd)
 		}
 	}
-	return newTree
+	atomic.StorePointer(&st.shardTree, unsafe.Pointer(newTree))
 }
 
 type testerPreSplitRequest struct {
@@ -156,12 +190,17 @@ func (st *shardTester) runWriter() {
 		case *testerWriteRequest:
 			st.handleWriteRequest(x)
 		case *testerPreSplitRequest:
-			x.resp <- st.db.PreSplit(x.shardID, x.ver, x.keys)
+			err := st.db.PreSplit(x.shardID, x.ver, x.keys)
+			if err != nil {
+				x.resp <- err
+			} else {
+				x.resp <- st.db.SplitShardFiles(x.shardID, x.ver)
+			}
 		case *testerFinishSplitRequest:
 			newShards, err := st.db.FinishSplit(x.shardID, x.ver, x.newProps)
 			if err == nil {
 				log.S().Info("tester finish split")
-				atomic.StorePointer(&st.shardTree, unsafe.Pointer(st.loadShardTree().split(x.shardID, newShards)))
+				st.split(x.shardID, newShards)
 			}
 			x.resp <- err
 		case *testerGetSnapRequest:
@@ -177,7 +216,7 @@ func (st *shardTester) handleWriteRequest(req *testerWriteRequest) {
 		return
 	}
 	if !req.replay {
-		req.shard.writeLog.entries = append(req.shard.writeLog.entries, req.entries)
+		st.writeLogs.append(shard, req.entries)
 	}
 	wb := st.db.NewWriteBatch(shard)
 	for _, e := range req.entries {
@@ -188,7 +227,7 @@ func (st *shardTester) handleWriteRequest(req *testerWriteRequest) {
 		}
 	}
 	idxBin := make([]byte, 4)
-	binary.LittleEndian.PutUint32(idxBin, uint32(len(req.shard.writeLog.entries)))
+	binary.LittleEndian.PutUint32(idxBin, uint32(st.writeLogs.latestIndex(req.shard)))
 	wb.SetProperty(appliedIndex, idxBin)
 	err := st.db.Write(wb)
 	req.resp <- err
@@ -303,7 +342,7 @@ func (st *shardTester) iterate(start, end []byte, cf int, iterFunc func(key, val
 				reqEnd = end
 			}
 			req := &testerGetSnapRequest{
-				shard: shd.Shard,
+				shard: shd,
 				start: reqStart,
 				end:   reqEnd,
 				resp:  make(chan error, 1),
@@ -345,4 +384,35 @@ func (st *shardTester) iterate(start, end []byte, cf int, iterFunc func(key, val
 func (st *shardTester) close() {
 	st.writeCh <- nil
 	st.wg.Wait()
+}
+
+func (st *shardTester) Recover(db *ShardingDB, shard *Shard, toState *protos.ShardProperties) error {
+	val, ok := shard.RecoverGetProperty(appliedIndex)
+	if !ok {
+		return errors.New("no applied index")
+	}
+	start := int(binary.LittleEndian.Uint32(val)) + 1
+	end := st.writeLogs.latestIndex(shard) + 1
+	if toState != nil {
+		val, ok = GetShardProperty(appliedIndex, toState)
+		if !ok {
+			return errors.New("no applied index")
+		}
+		end = int(binary.LittleEndian.Uint32(val)) + 1
+	}
+	for i := start; i < end; i++ {
+		entries := st.writeLogs.getEntries(shard, i)
+		wb := db.NewWriteBatch(shard)
+		for _, e := range entries {
+			err := wb.Put(e.cf, e.key, y.ValueStruct{Version: e.ver, Value: e.val})
+			if err != nil {
+				return err
+			}
+		}
+		err := db.RecoverWrite(wb)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

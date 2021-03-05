@@ -2,13 +2,14 @@ package badger
 
 import (
 	"encoding/binary"
+	"hash/crc32"
+	"io"
+	"os"
+
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
-	"hash/crc32"
-	"io"
-	"os"
 )
 
 type shardSplitWAL struct {
@@ -138,86 +139,7 @@ func (wal *shardSplitWAL) decodeLongVal(packet []byte) (remain, val []byte) {
 	return packet[l:], packet[:l]
 }
 
-func (s *Shard) enableWAL() error {
-	fd, err := y.OpenTruncFile(s.walFilename, false)
-	if err != nil {
-		return err
-	}
-	s.wal = &shardSplitWAL{fd: fd}
-	return nil
-}
-
-func (s *Shard) disableWAL() error {
-	if s.wal != nil {
-		_ = s.wal.fd.Close()
-		s.wal = nil
-		return os.Remove(s.walFilename)
-	}
-	return nil
-}
-
 type replayFn = func(packet []byte) error
-
-func (sdb *ShardingDB) replayWAL(shard *Shard) error {
-	// The wal must exists if we are in pre-split state.
-	wal, err := newShardSplitWAL(shard.walFilename)
-	if err != nil {
-		return err
-	}
-	shard.wal = wal
-	return wal.replay(func(packet []byte) error {
-		var props []*protos.ShardProperties
-		for len(packet) > 0 {
-			tp := packet[0]
-			packet = packet[1:]
-			switch tp {
-			case walTypeSwitch:
-				splitIdx := int(packet[0])
-				packet = packet[1:]
-				minSize := binary.LittleEndian.Uint64(packet)
-				packet = packet[8:]
-				sdb.switchSplittingMemTable(shard, splitIdx, int64(minSize))
-			case walTypeEntry:
-				var splitIdx, cf int
-				splitIdx = int(packet[0])
-				packet = packet[1:]
-				cf = int(packet[0])
-				packet = packet[1:]
-				var key, valBin []byte
-				packet, key = wal.decodeShortVal(packet)
-				packet, valBin = wal.decodeLongVal(packet)
-				var val y.ValueStruct
-				val.Decode(valBin)
-				mem := shard.loadSplittingWritableMemTable(splitIdx)
-				if !sdb.opt.CFs[cf].Managed && val.Version > sdb.orc.curRead {
-					sdb.orc.curRead = val.Version
-					sdb.orc.nextCommit = val.Version + 1
-				}
-				mem.Put(cf, key, val)
-			case walTypeProperty:
-				var key, val []byte
-				packet, key = wal.decodeShortVal(packet)
-				packet, val = wal.decodeShortVal(packet)
-				shard.properties.set(string(key), y.Copy(val))
-			case walTypeFinish:
-				var val []byte
-				packet, val = wal.decodeShortVal(packet)
-				prop := new(protos.ShardProperties)
-				err = prop.Unmarshal(val)
-				y.Assert(err == nil)
-				props = append(props, prop)
-			}
-		}
-		if len(props) > 0 {
-			_, flushTask := sdb.buildSplitShards(shard, props)
-			err1 := sdb.flushFinishSplit(flushTask)
-			if err1 != nil {
-				return err1
-			}
-		}
-		return nil
-	})
-}
 
 func takeByte(buf []byte) ([]byte, byte) {
 	return buf[1:], buf[0]

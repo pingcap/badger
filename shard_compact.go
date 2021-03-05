@@ -1,6 +1,7 @@
 package badger
 
 import (
+	"bytes"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 func newTableCreate(tbl table.Table, cf int, level int) *protos.TableCreate {
@@ -174,8 +176,7 @@ func (h *shardL0BuildHelper) buildOne() (*sstable.BuildResult, error) {
 
 func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) error {
 	l0Tbls := shard.loadL0Tables()
-	var tableCreates []*protos.TableCreate
-	var tableDeletes []uint64
+	comp := &protos.ShardCompaction{}
 	var toBeDelete []epoch.Resource
 	var shardSizeChange int64
 	for cf := 0; cf < sdb.numCFs; cf++ {
@@ -210,26 +211,25 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 		shardSizeChange += newHandler.totalSize - helper.oldHandler.totalSize
 		y.Assert(shard.cfs[cf].casLevelHandler(1, helper.oldHandler, newHandler))
 		for _, newTbl := range newTables {
-			tableCreates = append(tableCreates, newTableCreate(newTbl, cf, 1))
+			comp.TableCreates = append(comp.TableCreates, newTableCreate(newTbl, cf, 1))
 		}
 		for _, oldTbl := range helper.oldHandler.tables {
-			tableDeletes = append(tableDeletes, oldTbl.ID())
+			comp.BottomDeletes = append(comp.BottomDeletes, oldTbl.ID())
 			toBeDelete = append(toBeDelete, oldTbl)
 		}
 	}
 	if l0Tbls != nil {
 		// A splitting shard does not run compaction.
 		for _, tbl := range l0Tbls.tables {
-			tableDeletes = append(tableDeletes, tbl.fid)
+			comp.TopDeletes = append(comp.TopDeletes, tbl.fid)
 			toBeDelete = append(toBeDelete, tbl)
 			shardSizeChange -= tbl.size
 		}
 	}
 	shard.addEstimatedSize(shardSizeChange)
-	err := sdb.manifest.writeChangeSet(shard, &protos.ShardChangeSet{
-		TableCreates: tableCreates,
-		TableDeletes: tableDeletes,
-	}, true)
+	change := newShardChangeSet(shard)
+	change.Compaction = comp
+	err := sdb.manifest.writeChangeSet(change, true)
 	if err != nil {
 		return err
 	}
@@ -301,9 +301,11 @@ func (sdb *ShardingDB) GetCompactionPriorities(buf []CompactionPriority) []Compa
 	results := buf[:0]
 	sdb.shardMap.Range(func(key, value interface{}) bool {
 		shard := value.(*Shard)
-		pri := sdb.getCompactionPriority(shard)
-		if pri.Score > 1 {
-			results = append(results, pri)
+		if !shard.IsPassive() {
+			pri := sdb.getCompactionPriority(shard)
+			if pri.Score > 1 {
+				results = append(results, pri)
+			}
 		}
 		return true
 	})
@@ -372,8 +374,7 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 	nextLevel := scf.getLevelHandler(cd.Level + 1)
 
 	var newTables []table.Table
-	var tableCreates []*protos.TableCreate
-	var tableDeletes []uint64
+	comp := &protos.ShardCompaction{}
 	defer func() {
 		for _, tbl := range newTables {
 			tbl.MarkCompacting(false)
@@ -386,8 +387,8 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 		// skip level 0, since it may has many table overlap with each other
 		newTables = cd.Top
 		for _, t := range newTables {
-			tableDeletes = append(tableDeletes, t.ID())
-			tableCreates = append(tableCreates, newTableCreate(t, cf, cd.Level+1))
+			comp.TopDeletes = append(comp.TopDeletes, t.ID())
+			comp.TableCreates = append(comp.TableCreates, newTableCreate(t, cf, cd.Level+1))
 		}
 	} else {
 		var err error
@@ -396,20 +397,19 @@ func (sdb *ShardingDB) runCompactionDef(shard *Shard, cf int, cd *CompactDef, gu
 			return errors.WithStack(err)
 		}
 		for _, t := range newTables {
-			tableCreates = append(tableCreates, newTableCreate(t, cf, cd.Level+1))
+			comp.TableCreates = append(comp.TableCreates, newTableCreate(t, cf, cd.Level+1))
 		}
 		for _, t := range cd.Top {
-			tableDeletes = append(tableDeletes, t.ID())
+			comp.TopDeletes = append(comp.TopDeletes, t.ID())
 		}
 		for _, t := range cd.Bot {
-			tableDeletes = append(tableDeletes, t.ID())
+			comp.BottomDeletes = append(comp.BottomDeletes, t.ID())
 		}
 	}
+	change := newShardChangeSet(shard)
+	change.Compaction = comp
 	// We write to the manifest _before_ we delete files (and after we created files)
-	if err := sdb.manifest.writeChangeSet(shard, &protos.ShardChangeSet{
-		TableCreates: tableCreates,
-		TableDeletes: tableDeletes,
-	}, true); err != nil {
+	if err := sdb.manifest.writeChangeSet(change, true); err != nil {
 		return err
 	}
 
@@ -566,14 +566,10 @@ func (sdb *ShardingDB) prepareCompactionDef(cf int, cd *CompactDef) error {
 
 func (sdb *ShardingDB) openTables(buildResults []*sstable.BuildResult) (newTables []table.Table, err error) {
 	for _, result := range buildResults {
-		reader, err1 := sstable.NewMMapFile(result.FileName)
-		if err1 != nil {
-			return nil, err1
-		}
 		var tbl table.Table
-		tbl, err1 = sstable.OpenTable(result.FileName, reader)
-		if err1 != nil {
-			return nil, err1
+		tbl, err = sstable.OpenMMapTable(result.FileName)
+		if err != nil {
+			return nil, err
 		}
 		newTables = append(newTables, tbl)
 	}
@@ -587,4 +583,208 @@ func (sdb *ShardingDB) openTables(buildResults []*sstable.BuildResult) (newTable
 	}
 	sortTables(newTables)
 	return
+}
+
+// ApplySlowPassiveChangeSet applies long running tasks for passive shard.
+// Includes:
+//   - mem-table flush.
+//   - compaction.
+//   - split-files.
+func (sdb *ShardingDB) ApplySlowPassiveChangeSet(shard *Shard, changeSet *protos.ShardChangeSet) error {
+	guard := sdb.resourceMgr.Acquire()
+	defer guard.Done()
+	if changeSet.Flush != nil {
+		return sdb.applyPassiveFlush(shard, changeSet)
+	}
+	if changeSet.Compaction != nil {
+		return sdb.applyPassiveCompaction(shard, changeSet, guard)
+	}
+	if changeSet.SplitFiles != nil {
+		return sdb.applyPassiveSplitFiles(shard, changeSet, guard)
+	}
+	return nil
+}
+
+func (sdb *ShardingDB) applyPassiveFlush(shard *Shard, changeSet *protos.ShardChangeSet) error {
+	flush := changeSet.Flush
+	for _, l0 := range flush.L0Creates {
+		err := sdb.loadFileFromS3(l0.ID, true)
+		if err != nil {
+			return err
+		}
+	}
+	if err := sdb.manifest.writeChangeSet(changeSet, false); err != nil {
+		return err
+	}
+	var newL0Tbls []*shardL0Table
+	for _, newL0 := range flush.L0Creates {
+		filename := sstable.NewFilename(newL0.ID, sdb.opt.Dir)
+		tbl, err := openShardL0Table(filename, newL0.ID)
+		if err != nil {
+			return err
+		}
+		newL0Tbls = append(newL0Tbls, tbl)
+	}
+	atomicAddL0(shard.l0s, newL0Tbls...)
+	atomicRemoveMemTable(shard.memTbls, len(newL0Tbls))
+	return nil
+}
+
+func (sdb *ShardingDB) applyPassiveCompaction(shard *Shard, changeSet *protos.ShardChangeSet, guard *epoch.Guard) error {
+	comp := changeSet.Compaction
+	for _, tbl := range comp.TableCreates {
+		err := sdb.loadFileFromS3(tbl.ID, false)
+		if err != nil {
+			return err
+		}
+	}
+	if err := sdb.manifest.writeChangeSet(changeSet, false); err != nil {
+		return err
+	}
+	del := new(deletions)
+	if comp.Level == 0 {
+		for cf := 0; cf < sdb.numCFs; cf++ {
+			err := sdb.compactionUpdateLevelHandler(shard, cf, 1, comp.TableCreates, comp.BottomDeletes, del)
+			if err != nil {
+				return err
+			}
+		}
+		atomicRemoveL0(shard.l0s, len(comp.TopDeletes))
+	} else {
+		err := sdb.compactionUpdateLevelHandler(shard, int(comp.Cf), int(comp.Level), comp.TableCreates, comp.BottomDeletes, del)
+		if err != nil {
+			return err
+		}
+		err = sdb.compactionUpdateLevelHandler(shard, int(comp.Cf), int(comp.Level+1), nil, comp.TopDeletes, del)
+		if err != nil {
+			return err
+		}
+	}
+	guard.Delete(del.resources)
+	return nil
+}
+
+func (sdb *ShardingDB) compactionUpdateLevelHandler(shard *Shard, cf, level int,
+	creates []*protos.TableCreate, delIDs []uint64, del *deletions) error {
+	oldLevel := shard.cfs[cf].getLevelHandler(level)
+	newLevel := newLevelHandler(sdb.opt.NumLevelZeroTablesStall, level, sdb.metrics)
+	for _, tbl := range creates {
+		if int(tbl.CF) != cf {
+			continue
+		}
+		filename := sstable.NewFilename(tbl.ID, sdb.opt.Dir)
+		tbl, err := sstable.OpenMMapTable(filename)
+		if err != nil {
+			return err
+		}
+		newLevel.tables = append(newLevel.tables, tbl)
+		newLevel.totalSize += tbl.Size()
+	}
+	for _, oldTbl := range oldLevel.tables {
+		if containsUint64(delIDs, oldTbl.ID()) {
+			del.Append(oldTbl)
+		} else {
+			newLevel.tables = append(newLevel.tables, oldTbl)
+			newLevel.totalSize += oldTbl.Size()
+		}
+	}
+	return nil
+}
+
+func (sdb *ShardingDB) applyPassiveSplitFiles(shard *Shard, changeSet *protos.ShardChangeSet, guard *epoch.Guard) error {
+	if shard.GetSplitState() != protos.SplitState_PRE_SPLIT_FLUSH_DONE {
+		return errShardWrongSplittingState
+	}
+	splitFiles := changeSet.SplitFiles
+	for _, tbl := range splitFiles.L0Creates {
+		err := sdb.loadFileFromS3(tbl.ID, true)
+		if err != nil {
+			return err
+		}
+	}
+	for _, tbl := range splitFiles.TableCreates {
+		err := sdb.loadFileFromS3(tbl.ID, false)
+		if err != nil {
+			return err
+		}
+	}
+	if err := sdb.manifest.writeChangeSet(changeSet, false); err != nil {
+		return err
+	}
+	oldL0s := shard.loadL0Tables()
+	newL0Tbls := &shardL0Tables{make([]*shardL0Table, 0, len(oldL0s.tables)*2)}
+	del := new(deletions)
+	for _, l0 := range splitFiles.L0Creates {
+		filename := sstable.NewFilename(l0.ID, sdb.opt.Dir)
+		tbl, err := openShardL0Table(filename, l0.ID)
+		if err != nil {
+			return err
+		}
+		newL0Tbls.tables = append(newL0Tbls.tables, tbl)
+	}
+	for _, oldL0 := range oldL0s.tables {
+		if containsUint64(splitFiles.TableDeletes, oldL0.fid) {
+			del.Append(oldL0)
+		} else {
+			newL0Tbls.tables = append(newL0Tbls.tables, oldL0)
+		}
+	}
+	sort.Slice(newL0Tbls, func(i, j int) bool {
+		return newL0Tbls.tables[i].commitTS > newL0Tbls.tables[j].commitTS
+	})
+	y.Assert(atomic.CompareAndSwapPointer(shard.l0s, unsafe.Pointer(oldL0s), unsafe.Pointer(newL0Tbls)))
+	newHandlers := make([][]*levelHandler, sdb.numCFs)
+	for cf := 0; cf < sdb.numCFs; cf++ {
+		newHandlers[cf] = make([]*levelHandler, ShardMaxLevel)
+	}
+	for _, tbl := range splitFiles.TableCreates {
+		newHandler := newHandlers[tbl.CF][tbl.Level-1]
+		if newHandler == nil {
+			newHandler = newLevelHandler(sdb.opt.NumLevelZeroTablesStall, int(tbl.Level), sdb.metrics)
+			newHandlers[tbl.CF][tbl.Level-1] = newHandler
+		}
+		filename := sstable.NewFilename(tbl.ID, sdb.opt.Dir)
+		tbl, err := sstable.OpenMMapTable(filename)
+		if err != nil {
+			return err
+		}
+		newHandler.tables = append(newHandler.tables, tbl)
+	}
+	for cf := 0; cf < sdb.numCFs; cf++ {
+		for level := 1; level < ShardMaxLevel; level++ {
+			newHandler := newHandlers[cf][level-1]
+			if newHandler == nil {
+				continue
+			}
+			oldHandler := shard.cfs[cf].getLevelHandler(level)
+			for _, oldTbl := range oldHandler.tables {
+				if containsUint64(splitFiles.TableDeletes, oldTbl.ID()) {
+					del.Append(oldTbl)
+				} else {
+					newHandler.tables = append(newHandler.tables, oldTbl)
+				}
+			}
+			sort.Slice(newHandler.tables, func(i, j int) bool {
+				return bytes.Compare(newHandler.tables[i].Smallest().UserKey, newHandler.tables[j].Smallest().UserKey) < 0
+			})
+			y.Assert(shard.cfs[cf].casLevelHandler(level, oldHandler, newHandler))
+		}
+	}
+	shard.setSplitState(changeSet.State)
+	guard.Delete(del.resources)
+	return nil
+}
+
+func (sdb *ShardingDB) PassivePreSplit(shard *Shard, changeSet *protos.ShardChangeSet) error {
+	// TODO: implement it.
+	return nil
+}
+
+func containsUint64(slice []uint64, v uint64) bool {
+	for _, sv := range slice {
+		if sv == v {
+			return true
+		}
+	}
+	return false
 }

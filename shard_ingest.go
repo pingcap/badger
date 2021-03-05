@@ -41,8 +41,7 @@ func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
 		return err
 	}
 
-	shardCreate := ingestTree.ChangeSet.ShardCreate
-	shard := newShard(shardCreate.Properties, ingestTree.ChangeSet.ShardVer, shardCreate.StartKey, shardCreate.EndKey, sdb.opt, sdb.metrics)
+	shard := newShardForIngest(ingestTree.ChangeSet, sdb.opt, sdb.metrics)
 	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{tables: ingestTree.Delta}))
 	atomic.StorePointer(shard.l0s, unsafe.Pointer(l0s))
 	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
@@ -51,7 +50,7 @@ func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
 		return false
 	})
 	// Ingest is manually triggered with meta change, so we don't need to notify meta listener.
-	if err = sdb.manifest.writeChangeSet(shard, ingestTree.ChangeSet, false); err != nil {
+	if err = sdb.manifest.writeChangeSet(ingestTree.ChangeSet, false); err != nil {
 		return err
 	}
 	sdb.shardMap.Store(shard.ID, shard)
@@ -67,14 +66,15 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 			newHandlers[cf] = append(newHandlers[cf], newHandler)
 		}
 	}
-	for _, l0Create := range ingestTree.ChangeSet.L0Creates {
+	snap := ingestTree.ChangeSet.Snapshot
+	for _, l0Create := range snap.L0Creates {
 		l0Tbl, err := openShardL0Table(sstable.NewFilename(l0Create.ID, sdb.opt.Dir), l0Create.ID)
 		if err != nil {
 			return nil, nil, err
 		}
 		l0s.tables = append(l0s.tables, l0Tbl)
 	}
-	for _, tblCreate := range ingestTree.ChangeSet.TableCreates {
+	for _, tblCreate := range snap.TableCreates {
 		handler := newHandlers[tblCreate.CF][tblCreate.Level-1]
 		filename := sstable.NewFilename(tblCreate.ID, sdb.opt.Dir)
 		file, err := sstable.NewMMapFile(filename)
@@ -88,7 +88,7 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 		handler.tables = append(handler.tables, tbl)
 	}
 	sort.Slice(l0s.tables, func(i, j int) bool {
-		return l0s.tables[i].fid > l0s.tables[j].fid
+		return l0s.tables[i].commitTS > l0s.tables[j].commitTS
 	})
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		for l := 1; l <= ShardMaxLevel; l++ {
@@ -115,8 +115,8 @@ func (sdb *ShardingDB) IngestBuffer(shardID, shardVer uint64, buffer *memtable.C
 }
 
 func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {
-	changeSet := ingestTree.ChangeSet
-	for _, l0 := range changeSet.L0Creates {
+	snap := ingestTree.ChangeSet.Snapshot
+	for _, l0 := range snap.L0Creates {
 		var err error
 		if ingestTree.LocalPath != "" {
 			err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, l0.ID, true)
@@ -127,7 +127,7 @@ func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {
 			return err
 		}
 	}
-	for _, tbl := range changeSet.TableCreates {
+	for _, tbl := range snap.TableCreates {
 		var err error
 		if ingestTree.LocalPath != "" {
 			err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, tbl.ID, false)
