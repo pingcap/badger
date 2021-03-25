@@ -7,13 +7,13 @@ import (
 
 const (
 	numBuckets = 256
-	page       = 1024
+	pageSize   = 1024
 )
 
 // Buffers contains buckets for sharding.
 type Buffers struct {
-	page    int
-	buckets [numBuckets]bucket
+	pageSize int
+	buckets  [numBuckets]bucket
 }
 
 type bucket struct {
@@ -41,37 +41,42 @@ func (p *Pool) PutBuffer(buf []byte) {
 }
 
 // NewBuffers creates a new Buffers with the given page size.
-func NewBuffers(page int) *Buffers {
+func NewBuffers(pageSize int) *Buffers {
 	b := new(Buffers)
 	for i := range b.buckets {
 		b.buckets[i].pools = make(map[int]*Pool)
 	}
-	b.page = page
+	if pageSize < 1 {
+		b.pageSize = 1
+	} else {
+		b.pageSize = pageSize
+	}
 	return b
 }
 
 // AssignPool assigns a fixed size bytes pool with the given size.
 func (b *Buffers) AssignPool(size int) (p *Pool) {
-	if b.page > 0 && size%b.page > 0 {
-		size = size/b.page*b.page + b.page
+	var alignedSize = size
+	if size%b.pageSize > 0 {
+		alignedSize = size/b.pageSize*b.pageSize + b.pageSize
 	}
-	m := &b.buckets[size%numBuckets]
+	m := &b.buckets[alignedSize/b.pageSize%numBuckets]
 	var ok bool
 	m.lock.RLock()
-	if p, ok = m.pools[size]; ok {
+	if p, ok = m.pools[alignedSize]; ok {
 		m.lock.RUnlock()
 		return
 	}
 	m.lock.RUnlock()
 	m.lock.Lock()
-	if p, ok = m.pools[size]; !ok {
+	if p, ok = m.pools[alignedSize]; !ok {
 		p = &Pool{
 			pool: &sync.Pool{New: func() interface{} {
-				return make([]byte, size)
+				return make([]byte, alignedSize)
 			}},
-			size: size,
+			size: alignedSize,
 		}
-		m.pools[size] = p
+		m.pools[alignedSize] = p
 	}
 	m.lock.Unlock()
 	return
@@ -88,7 +93,7 @@ func (b *Buffers) PutBuffer(buf []byte) {
 }
 
 // defaultBuffers is the default instance of *Buffers.
-var defaultBuffers = NewBuffers(page)
+var defaultBuffers = NewBuffers(pageSize)
 
 // AssignPool assigns a fixed size bytes pool with the given size.
 func AssignPool(size int) *Pool {
