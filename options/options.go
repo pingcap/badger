@@ -17,10 +17,13 @@
 package options
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"io/ioutil"
 
 	"github.com/golang/snappy"
+	"github.com/pingcap/badger/buffer"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -42,12 +45,11 @@ func (c CompressionType) Compress(w io.Writer, data []byte) error {
 		_, err := w.Write(data)
 		return err
 	case Snappy:
-		sw := snappy.NewBufferedWriter(w)
-		_, err := sw.Write(data)
-		if err != nil {
-			return err
-		}
-		return sw.Close()
+		dst := buffer.GetBuffer(snappy.MaxEncodedLen(len(data)))
+		res := snappy.Encode(dst, data)
+		_, err := w.Write(res)
+		buffer.PutBuffer(dst)
+		return err
 	case ZSTD:
 		e, err := zstd.NewWriter(w)
 		if err != nil {
@@ -69,12 +71,13 @@ func (c CompressionType) Decompress(data []byte) ([]byte, error) {
 	case Snappy:
 		return snappy.Decode(nil, data)
 	case ZSTD:
-		r, err := zstd.NewReader(nil)
+		reader := bytes.NewBuffer(data)
+		r, err := zstd.NewReader(reader)
 		if err != nil {
 			return nil, err
 		}
 		defer r.Close()
-		return r.DecodeAll(data, nil)
+		return ioutil.ReadAll(r)
 	}
 	return nil, errors.New("Unsupported compression type")
 }
