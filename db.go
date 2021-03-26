@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/dgryski/go-farm"
-	"github.com/ncw/directio"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
@@ -38,6 +37,7 @@ import (
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
+	"github.com/ncw/directio"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
@@ -284,6 +284,7 @@ func Open(opt Options) (db *DB, err error) {
 			NumCounters: opt.MaxBlockCacheSize / int64(opt.TableBuilderOptions.BlockSize) * 10,
 			MaxCost:     opt.MaxBlockCacheSize,
 			BufferItems: 64,
+			OnEvict:     sstable.OnEvict,
 		})
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create block cache")

@@ -30,6 +30,7 @@ import (
 	"unsafe"
 
 	"github.com/coocood/bbloom"
+	"github.com/pingcap/badger/buffer"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/options"
@@ -279,7 +280,7 @@ func (t *Table) read(off int, sz int) ([]byte, error) {
 		}
 		return t.blocksData[off : off+sz], nil
 	}
-	res := make([]byte, sz)
+	res := buffer.GetBuffer(sz)
 	_, err := t.fd.ReadAt(res, int64(off))
 	return res, err
 }
@@ -410,17 +411,45 @@ type block struct {
 	offset  int
 	data    []byte
 	baseKey []byte
+
+	reference int32
+}
+
+func OnEvict(key uint64, value interface{}) {
+	if b, ok := value.(block); ok {
+		if atomic.CompareAndSwapInt32(&b.reference, 1, 0) && len(b.data) > 0 {
+			buffer.PutBuffer(b.data)
+			b.data = nil
+		}
+	}
+}
+
+func (b *block) add() (ok bool) {
+	for {
+		old := atomic.LoadInt32(&b.reference)
+		if old == 0 {
+			return false
+		}
+		new := old + 1
+		if atomic.CompareAndSwapInt32(&b.reference, old, new) {
+			return true
+		}
+	}
+}
+
+func (b *block) done() {
+	atomic.AddInt32(&b.reference, -1)
 }
 
 func (b *block) size() int64 {
 	return int64(intSize + len(b.data))
 }
 
-func (t *Table) block(idx int, index *tableIndex) (block, error) {
+func (t *Table) block(idx int, index *tableIndex) (*block, error) {
 	y.Assert(idx >= 0)
 
 	if idx >= len(index.blockEndOffsets) {
-		return block{}, io.EOF
+		return &block{}, io.EOF
 	}
 
 	if t.blockCache == nil {
@@ -433,33 +462,38 @@ func (t *Table) block(idx int, index *tableIndex) (block, error) {
 		if e != nil {
 			return nil, 0, e
 		}
+		b.reference = 1
 		return b, int64(len(b.data)), nil
 	})
 	if err != nil {
-		return block{}, err
+		return &block{}, err
 	}
-	return blk.(block), nil
+	b := blk.(*block)
+	if ok := b.add(); !ok {
+		return &block{}, errors.Errorf("block is evicted")
+	}
+	return b, nil
 }
 
-func (t *Table) loadBlock(idx int, index *tableIndex) (block, error) {
+func (t *Table) loadBlock(idx int, index *tableIndex) (*block, error) {
 	var startOffset int
 	if idx > 0 {
 		startOffset = int(index.blockEndOffsets[idx-1])
 	}
-	blk := block{
+	blk := &block{
 		offset: startOffset,
 	}
 	endOffset := int(index.blockEndOffsets[idx])
 	dataLen := endOffset - startOffset
 	var err error
 	if blk.data, err = t.read(blk.offset, dataLen); err != nil {
-		return block{}, errors.Wrapf(err,
+		return &block{}, errors.Wrapf(err,
 			"failed to read from file: %s at offset: %d, len: %d", t.fd.Name(), blk.offset, dataLen)
 	}
 
 	blk.data, err = t.compression.Decompress(blk.data)
 	if err != nil {
-		return block{}, errors.Wrapf(err,
+		return &block{}, errors.Wrapf(err,
 			"failed to decode compressed data in file: %s at offset: %d, len: %d",
 			t.fd.Name(), blk.offset, dataLen)
 	}
