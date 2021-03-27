@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/dgryski/go-farm"
+	"github.com/ncw/directio"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
@@ -37,7 +38,6 @@ import (
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
-	"github.com/ncw/directio"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
@@ -454,6 +454,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 			discardStats.collect(it.Value())
 		}
 		deletes[i] = tbl
+		it.Close()
 	}
 	if len(discardStats.ptrs) > 0 {
 		db.blobManger.discardCh <- &discardStats
@@ -836,6 +837,7 @@ func arenaSize(opt Options) int64 {
 // WriteLevel0Table flushes memtable. It drops deleteValues.
 func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) error {
 	iter := s.NewIterator(false)
+	defer iter.Close()
 	var (
 		bb                   *blobFileBuilder
 		numWrite, bytesWrite int

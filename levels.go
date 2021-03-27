@@ -408,6 +408,7 @@ func (lc *levelsController) compactBuildTables(cd *CompactDef) (newTables []tabl
 func CompactTables(cd *CompactDef, stats *y.CompactionStats, discardStats *DiscardStats) ([]*sstable.BuildResult, error) {
 	var buildResults []*sstable.BuildResult
 	it := cd.buildIterator()
+	defer it.Close()
 
 	skippedTbls := cd.SkippedTbls
 	splitHints := cd.splitHints

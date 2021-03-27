@@ -82,13 +82,14 @@ type blockIterator struct {
 }
 
 func (itr *blockIterator) setBlock(b *block) {
+	itr.block.done()
+	itr.block = b
 	itr.err = nil
 	itr.idx = 0
 	itr.key.Reset()
 	itr.val = itr.val[:0]
 	itr.loadEntries(b.data)
 	itr.key.UserKey = append(itr.key.UserKey[:0], b.baseKey[:itr.baseLen]...)
-	itr.block = b
 }
 
 func (itr *blockIterator) valid() bool {
@@ -172,6 +173,10 @@ func (itr *blockIterator) prev() {
 	itr.setIdx(itr.idx - 1)
 }
 
+func (itr *blockIterator) close() {
+	itr.block.done()
+}
+
 // Iterator is an iterator for a Table.
 type Iterator struct {
 	t    *Table
@@ -238,7 +243,6 @@ func (itr *Iterator) seekToFirst() {
 		itr.err = err
 		return
 	}
-	defer block.done()
 	itr.bi.setBlock(block)
 	itr.bi.seekToFirst()
 	itr.err = itr.bi.Error()
@@ -256,7 +260,6 @@ func (itr *Iterator) seekToLast() {
 		itr.err = err
 		return
 	}
-	defer block.done()
 	itr.bi.setBlock(block)
 	itr.bi.seekToLast()
 	itr.err = itr.bi.Error()
@@ -269,7 +272,6 @@ func (itr *Iterator) seekInBlock(blockIdx int, key []byte) {
 		itr.err = err
 		return
 	}
-	defer block.done()
 	itr.bi.setBlock(block)
 	itr.bi.seek(key)
 	itr.err = itr.bi.Error()
@@ -282,7 +284,6 @@ func (itr *Iterator) seekFromOffset(blockIdx int, offset int, key []byte) {
 		itr.err = err
 		return
 	}
-	defer block.done()
 	itr.bi.setBlock(block)
 	itr.bi.setIdx(offset)
 	if bytes.Compare(itr.bi.key.UserKey, key) >= 0 {
@@ -380,24 +381,11 @@ func (itr *Iterator) next() {
 			itr.err = err
 			return
 		}
-		defer block.done()
-		itr.bi.setBlock(block)
-		itr.bi.seekToFirst()
-		itr.err = itr.bi.Error()
-		return
-	} else if ok := itr.bi.block.add(); !ok {
-		block, err := itr.t.block(itr.bpos, itr.tIdx)
-		if err != nil {
-			itr.err = err
-			return
-		}
-		defer block.done()
 		itr.bi.setBlock(block)
 		itr.bi.seekToFirst()
 		itr.err = itr.bi.Error()
 		return
 	}
-	defer itr.bi.block.done()
 
 	itr.bi.next()
 	if !itr.bi.valid() {
@@ -421,24 +409,11 @@ func (itr *Iterator) prev() {
 			itr.err = err
 			return
 		}
-		defer block.done()
-		itr.bi.setBlock(block)
-		itr.bi.seekToLast()
-		itr.err = itr.bi.Error()
-		return
-	} else if ok := itr.bi.block.add(); !ok {
-		block, err := itr.t.block(itr.bpos, itr.tIdx)
-		if err != nil {
-			itr.err = err
-			return
-		}
-		defer block.done()
 		itr.bi.setBlock(block)
 		itr.bi.seekToLast()
 		itr.err = itr.bi.Error()
 		return
 	}
-	defer itr.bi.block.done()
 
 	itr.bi.prev()
 	if !itr.bi.valid() {
@@ -506,4 +481,10 @@ func (itr *Iterator) Seek(key []byte) {
 	} else {
 		itr.seekForPrev(key)
 	}
+}
+
+// Close closes the iterator (and it must be called).
+func (itr *Iterator) Close() error {
+	itr.bi.close()
+	return nil
 }

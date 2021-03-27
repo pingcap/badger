@@ -713,3 +713,5 @@ func (s *UniIterator) FillValue(vs *y.ValueStruct) { s.iter.FillValue(vs) }
 
 // Valid implements y.Interface
 func (s *UniIterator) Valid() bool { return s.iter.Valid() }
+
+func (s *UniIterator) Close() error { return nil }

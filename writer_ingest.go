@@ -72,6 +72,7 @@ func (w *writeWorker) prepareIngestTask(task *ingestTask) (ts uint64, wg *sync.W
 	mTbls := w.mtbls.Load().(*memTables)
 	y.Assert(mTbls.tables[0] != nil)
 	it := mTbls.getMutable().NewIterator(false)
+	defer it.Close()
 	for _, t := range task.tbls {
 		it.Seek(t.Smallest().UserKey)
 		if it.Valid() && it.Key().Compare(t.Biggest()) <= 0 {

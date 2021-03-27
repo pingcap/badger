@@ -212,6 +212,7 @@ func (t *Table) Get(key y.Key, keyHash uint64) (y.ValueStruct, error) {
 	}
 	if !ok {
 		it := t.NewIterator(false)
+		defer it.Close()
 		it.Seek(key.UserKey)
 		if !it.Valid() {
 			return y.ValueStruct{}, nil
@@ -262,6 +263,7 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 	}
 
 	it := t.newIterator(false)
+	defer it.Close()
 	it.seekFromOffset(int(blkIdx), int(offset), key.UserKey)
 
 	if !it.Valid() || !key.SameUserKey(it.Key()) {
@@ -416,11 +418,8 @@ type block struct {
 }
 
 func OnEvict(key uint64, value interface{}) {
-	if b, ok := value.(block); ok {
-		if atomic.CompareAndSwapInt32(&b.reference, 1, 0) && len(b.data) > 0 {
-			buffer.PutBuffer(b.data)
-			b.data = nil
-		}
+	if b, ok := value.(*block); ok {
+		b.done()
 	}
 }
 
@@ -438,7 +437,10 @@ func (b *block) add() (ok bool) {
 }
 
 func (b *block) done() {
-	atomic.AddInt32(&b.reference, -1)
+	if b != nil && atomic.AddInt32(&b.reference, -1) == 0 {
+		buffer.PutBuffer(b.data)
+		b.data = nil
+	}
 }
 
 func (b *block) size() int64 {
@@ -573,6 +575,7 @@ func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 	// If there are errors occurred during seeking,
 	// we assume the table has overlapped with the range to prevent data loss.
 	it := t.newIteratorWithIdx(false, idx)
+	defer it.Close()
 	it.Seek(start.UserKey)
 	if !it.Valid() {
 		return it.Error() != nil

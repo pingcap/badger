@@ -23,8 +23,8 @@ import (
 	"io/ioutil"
 
 	"github.com/golang/snappy"
-	"github.com/pingcap/badger/buffer"
 	"github.com/klauspost/compress/zstd"
+	"github.com/pingcap/badger/buffer"
 )
 
 // CompressionType specifies how a block should be compressed.
