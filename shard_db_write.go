@@ -1,16 +1,11 @@
 package badger
 
 import (
-	"errors"
-	"os"
-	"sync/atomic"
-	"unsafe"
-
 	"github.com/pingcap/badger/protos"
 	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
-	"github.com/pingcap/log"
+	"os"
 )
 
 type shardingMemTables struct {
@@ -100,12 +95,15 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint
 		return
 	}
 	shard.properties.set(commitTSKey, sstable.U64ToBytes(commitTS))
-	writableMemTbl.SetVersion(commitTS)
+	if writableMemTbl != nil {
+		writableMemTbl.SetVersion(commitTS)
+	}
 	sdb.flushCh <- &shardFlushTask{
 		shard:         shard,
 		tbl:           writableMemTbl,
 		preSplitFlush: preSplitFlush,
 		properties:    shard.properties.toPB(shard.ID),
+		commitTS:      commitTS,
 	}
 }
 
@@ -191,57 +189,6 @@ func (sdb *ShardingDB) createL0File(fid uint64) (fd *os.File, err error) {
 	return y.OpenSyncedFile(filename, false)
 }
 
-func (sdb *ShardingDB) executePreSplitTask(eTask engineTask) {
-	task := eTask.preSplitTask
-	shard := task.shard
-	if !shard.setSplitKeys(task.keys) {
-		eTask.notify <- errors.New("failed to set split keys")
-		return
-	}
-	change := newShardChangeSet(shard)
-	change.State = protos.SplitState_PRE_SPLIT
-	change.PreSplit = &protos.ShardPreSplit{
-		Keys:                 task.keys,
-		MemProps:             shard.properties.toPB(shard.ID),
-	}
-	err := sdb.manifest.writeChangeSet(change, false)
-	if err != nil {
-		eTask.notify <- err
-		return
-	}
-	log.Info("pre-split switch memtable")
-	sdb.switchMemTable(shard, sdb.opt.MaxMemTableSize, sdb.orc.readTs(), true)
-	eTask.notify <- nil
-}
-
-// executeFinishSplitTask write the last entry and finish the WAL.
-func (sdb *ShardingDB) executeFinishSplitTask(eTask engineTask) {
-	task := eTask.finishSplitTask
-	oldShard := task.shard
-	latest := sdb.GetShard(oldShard.ID)
-	if latest.Ver != oldShard.Ver {
-		eTask.notify <- errShardNotMatch
-		return
-	}
-	changeSet := newShardChangeSet(task.shard)
-	changeSet.Split = &protos.ShardSplit{
-		NewShards: task.newProps,
-		Keys:      oldShard.splitKeys,
-		MemProps:  oldShard.properties.toPB(oldShard.ID),
-	}
-	err := sdb.manifest.writeChangeSet(changeSet, false)
-	if err != nil {
-		eTask.notify <- err
-		return
-	}
-	newShards, flushTask := sdb.buildSplitShards(oldShard, task.newProps)
-	// All the mem tables are not flushed, we need to flush them all.
-	sdb.flushCh <- flushTask
-	task.newShards = newShards
-	eTask.notify <- nil
-	return
-}
-
 func (sdb *ShardingDB) executeGetPropertiesTask(eTask engineTask) {
 	task := eTask.getProperties
 	for _, key := range task.keys {
@@ -250,61 +197,4 @@ func (sdb *ShardingDB) executeGetPropertiesTask(eTask engineTask) {
 	}
 	task.snap = sdb.NewSnapshot(task.shard)
 	eTask.notify <- nil
-}
-
-func (sdb *ShardingDB) buildSplitShards(oldShard *Shard, newShardsProps []*protos.ShardProperties) (newShards []*Shard, flushTask *shardFlushTask) {
-	newShards = make([]*Shard, len(oldShard.splittingMemTbls))
-	for i := range oldShard.splittingMemTbls {
-		startKey, endKey := getSplittingStartEnd(oldShard.Start, oldShard.End, oldShard.splitKeys, i)
-		ver := uint64(1)
-		if newShardsProps[i].ShardID == oldShard.ID {
-			ver = oldShard.Ver + uint64(len(newShards)) - 1
-		}
-		shard := newShard(newShardsProps[i], ver, startKey, endKey, sdb.opt, sdb.metrics)
-		shard.memTbls = oldShard.splittingMemTbls[i]
-		shard.l0s = new(unsafe.Pointer)
-		atomic.StorePointer(shard.l0s, unsafe.Pointer(oldShard.splittingL0Tbls[i]))
-		newShards[i] = shard
-	}
-	l0s := oldShard.loadL0Tables()
-	for _, l0 := range l0s.tables {
-		idx := l0.getSplitIndex(oldShard.splitKeys)
-		nShard := newShards[idx]
-		nL0s := nShard.loadL0Tables()
-		nL0s.tables = append(nL0s.tables, l0)
-	}
-	for cf, scf := range oldShard.cfs {
-		for l := 1; l <= ShardMaxLevel; l++ {
-			level := scf.getLevelHandler(l)
-			for _, t := range level.tables {
-				sdb.insertTableToNewShard(t, cf, level.level, newShards, oldShard.splitKeys)
-			}
-		}
-	}
-	for _, nShard := range newShards {
-		sdb.shardMap.Store(nShard.ID, nShard)
-	}
-	flushTask = &shardFlushTask{
-		finishSplitOldShard: oldShard,
-		finishSplitShards:   newShards,
-		finishSplitProps:    newShardsProps,
-		finishSplitMemTbls:  make([]*shardingMemTables, len(newShards)),
-	}
-	commitTS := sdb.orc.allocTs()
-	sdb.orc.doneCommit(commitTS)
-	for i, nShard := range newShards {
-		memTbls := nShard.loadMemTables()
-		if len(memTbls.tables) > 0 {
-			// The old mem-tables already set commitTS, we only need to set commitTS for the latest one.
-			memTbls.tables[0].SetVersion(commitTS)
-		}
-		flushTask.finishSplitMemTbls[i] = memTbls
-		newMemTable := memtable.NewCFTable(sdb.opt.MaxMemTableSize, sdb.numCFs)
-		newMemTbls := &shardingMemTables{}
-		newMemTbls.tables = append(newMemTbls.tables, newMemTable)
-		newMemTbls.tables = append(newMemTbls.tables, memTbls.tables...)
-		atomic.StorePointer(nShard.memTbls, unsafe.Pointer(newMemTbls))
-	}
-	log.S().Infof("shard %d split to %s", oldShard.ID, newShardsProps)
-	return
 }

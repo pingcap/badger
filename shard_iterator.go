@@ -23,7 +23,7 @@ func (s *Snapshot) NewIterator(cf int, reversed, allVersions bool) *Iterator {
 	return iter
 }
 
-func (s *Snapshot) newShardIterator(cf int, reverse bool, minL0ID uint64) y.Iterator {
+func (s *Snapshot) newShardIterator(cf int, reverse bool, sinceCommitTS uint64) y.Iterator {
 	iters := make([]y.Iterator, 0, 12)
 	if s.shard.isSplitting() {
 		for i := 0; i < len(s.shard.splittingMemTbls); i++ {
@@ -34,8 +34,8 @@ func (s *Snapshot) newShardIterator(cf int, reverse bool, minL0ID uint64) y.Iter
 	memTbls := s.shard.loadMemTables()
 	iters = s.appendMemTblIters(iters, memTbls, cf, reverse)
 	l0s := s.shard.loadL0Tables()
-	iters = s.appendL0Iters(iters, l0s, cf, reverse, minL0ID)
-	if minL0ID > 0 {
+	iters = s.appendL0Iters(iters, l0s, cf, reverse, sinceCommitTS)
+	if sinceCommitTS > 0 {
 		// This is a delta iterator, we don't read data >= L1.
 		return table.NewMergeIterator(iters, reverse)
 	}
@@ -60,9 +60,9 @@ func (s *Snapshot) appendMemTblIters(iters []y.Iterator, memTbls *shardingMemTab
 	return iters
 }
 
-func (s *Snapshot) appendL0Iters(iters []y.Iterator, l0s *shardL0Tables, cf int, reverse bool, minID uint64) []y.Iterator {
+func (s *Snapshot) appendL0Iters(iters []y.Iterator, l0s *shardL0Tables, cf int, reverse bool, sinceCommitTS uint64) []y.Iterator {
 	for _, tbl := range l0s.tables {
-		if tbl.fid <= minID {
+		if tbl.commitTS <= sinceCommitTS {
 			continue
 		}
 		it := tbl.newIterator(cf, reverse)
@@ -73,11 +73,11 @@ func (s *Snapshot) appendL0Iters(iters []y.Iterator, l0s *shardL0Tables, cf int,
 	return iters
 }
 
-// NewDeltaIterator creates an iterator that iterates mem-tables and all the l0 tables that has ID greater than minL0FileID.
+// NewDeltaIterator creates an iterator that iterates mem-tables and all the l0 tables that has commitTS greater than sinceCommitTS.
 // It is used to collect new data that doesn't exist in the file meta tree.
-func (s *Snapshot) NewDeltaIterator(cf int, sinceL0FileID uint64) *Iterator {
+func (s *Snapshot) NewDeltaIterator(cf int, sinceCommitTS uint64) *Iterator {
 	iter := &Iterator{
-		iitr: s.newShardIterator(cf, false, sinceL0FileID),
+		iitr: s.newShardIterator(cf, false, sinceCommitTS),
 	}
 	if s.cfs[cf].Managed {
 		// get all versions for managed CF.

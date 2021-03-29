@@ -46,6 +46,7 @@ type ShardInfo struct {
 	preSplit   *protos.ShardPreSplit
 	split      *protos.ShardSplit
 	splitState protos.SplitState
+	commitTS   uint64
 }
 
 // ShardLevel is the struct that contains shard id and level id,
@@ -112,6 +113,7 @@ func (m *ShardingManifest) toChangeSet(shardID uint64) *protos.ShardChangeSet {
 		Start:      shard.Start,
 		End:        shard.End,
 		Properties: shard.properties.toPB(shard.ID),
+		CommitTS:   shard.commitTS,
 	}
 	cs.Snapshot = shardSnap
 	for fid := range shard.files {
@@ -228,6 +230,7 @@ func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
 		files:      map[uint64]struct{}{},
 		properties: newShardProperties().applyPB(snap.Properties),
 		splitState: cs.State,
+		commitTS:   snap.CommitTS,
 	}
 	if len(cs.Snapshot.SplitKeys) > 0 {
 		shard.preSplit = &protos.ShardPreSplit{Keys: cs.Snapshot.SplitKeys}
@@ -242,6 +245,7 @@ func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
 }
 
 func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+	shardInfo.commitTS = cs.Flush.CommitTS
 	for _, create := range cs.Flush.L0Creates {
 		if create.Properties != nil {
 			for i, key := range create.Properties.Keys {
@@ -365,7 +369,7 @@ func (m *ShardingManifest) writeFinishSplitChangeSet(split *protos.ShardChangeSe
 		nShard := task.finishSplitShards[i]
 		l0s := allL0s[i]
 		l0ChangeSet := newShardChangeSet(nShard)
-		l0ChangeSet.Flush = &protos.ShardFlush{}
+		l0ChangeSet.Flush = &protos.ShardFlush{CommitTS: task.commitTS}
 		for _, l0 := range l0s.tables {
 			l0ChangeSet.Flush.L0Creates = append(l0ChangeSet.Flush.L0Creates, &protos.L0Create{
 				ID:    l0.fid,

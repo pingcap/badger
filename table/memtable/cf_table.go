@@ -6,9 +6,9 @@ import (
 )
 
 type CFTable struct {
-	skls    []*skiplist
-	arena   *arena
-	version uint64
+	skls     []*skiplist
+	arena    *arena
+	version  uint64
 	flushing uint32
 }
 

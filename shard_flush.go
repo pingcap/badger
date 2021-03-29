@@ -17,6 +17,7 @@ type shardFlushTask struct {
 	tbl           *memtable.CFTable
 	preSplitFlush bool
 	properties    *protos.ShardProperties
+	commitTS      uint64
 
 	finishSplitOldShard *Shard
 	finishSplitShards   []*Shard
@@ -135,6 +136,7 @@ func (sdb *ShardingDB) addShardL0Table(task *shardFlushTask, l0 *shardL0Table) e
 	changeSet := newShardChangeSet(shard)
 	changeSet.Flush = &protos.ShardFlush{
 		L0Creates: creates,
+		CommitTS:  task.commitTS,
 	}
 	if task.preSplitFlush {
 		changeSet.State = protos.SplitState_PRE_SPLIT_FLUSH_DONE

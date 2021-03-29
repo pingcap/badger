@@ -73,6 +73,7 @@ message ShardCompaction {
 
 message ShardFlush {
   repeated L0Create l0Creates = 1;
+  uint64 commitTS = 2;
 }
 
 message ShardSnapshot {
@@ -82,6 +83,7 @@ message ShardSnapshot {
   repeated bytes splitKeys = 4;
   repeated L0Create l0Creates = 5;
   repeated TableCreate tableCreates = 6;
+  uint64 commitTS = 7;
 }
 
 message ShardSplitFiles {

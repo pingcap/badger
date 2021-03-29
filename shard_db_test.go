@@ -2,7 +2,6 @@ package badger
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -275,7 +274,7 @@ func TestMigration(t *testing.T) {
 	ingestTree := &IngestTree{MaxTS: readTS, LocalPath: dirA}
 	cfTbl := memtable.NewCFTable(opts.MaxMemTableSize, 2)
 	for cf := 0; cf < 2; cf++ {
-		iter := snap.NewDeltaIterator(cf, metaListener.maxL0ID)
+		iter := snap.NewDeltaIterator(cf, metaListener.maxCommitTS)
 		for iter.Rewind(); iter.Valid(); iter.Next() {
 			item := iter.Item()
 			val, _ := item.ValueCopy(nil)
@@ -304,25 +303,17 @@ func TestMigration(t *testing.T) {
 }
 
 type metaListener struct {
-	lock     sync.Mutex
-	commitTS []uint64
-	maxL0ID  uint64
+	lock        sync.Mutex
+	allCommitTS []uint64
+	maxCommitTS uint64
 }
 
 func (l *metaListener) OnChange(e *protos.ShardChangeSet) {
 	l.lock.Lock()
 	if e.Flush != nil {
-		for _, l0 := range e.Flush.L0Creates {
-			if l0.Properties != nil {
-				for i, key := range l0.Properties.Keys {
-					if key == commitTSKey {
-						l.commitTS = append(l.commitTS, binary.LittleEndian.Uint64(l0.Properties.Values[i]))
-					}
-				}
-			}
-			if l0.ID > l.maxL0ID {
-				l.maxL0ID = l0.ID
-			}
+		l.allCommitTS = append(l.allCommitTS, e.Flush.CommitTS)
+		if e.Flush.CommitTS > l.maxCommitTS {
+			l.maxCommitTS = e.Flush.CommitTS
 		}
 	}
 	l.lock.Unlock()
@@ -331,7 +322,7 @@ func (l *metaListener) OnChange(e *protos.ShardChangeSet) {
 func (l *metaListener) getAllCommitTS() []uint64 {
 	var result []uint64
 	l.lock.Lock()
-	result = append(result, l.commitTS...)
+	result = append(result, l.allCommitTS...)
 	l.lock.Unlock()
 	return result
 }
