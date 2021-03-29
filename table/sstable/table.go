@@ -398,7 +398,7 @@ func (t *Table) loadIndexData(useMmap bool) (*metaDecoder, error) {
 		}
 		t.indexData = idxData
 	} else {
-		idxData = make([]byte, fstat.Size())
+		idxData = buffer.GetBuffer(int(fstat.Size()))
 		if _, err = t.indexFd.ReadAt(idxData, 0); err != nil {
 			return nil, err
 		}
