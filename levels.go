@@ -688,12 +688,13 @@ func (lc *levelsController) addLevel0Table(t table.Table, head *protos.HeadInfo)
 		var timeStart time.Time
 		{
 			log.Warn("STALLED STALLED STALLED", zap.Duration("duration", time.Since(lastUnstalled)))
-			lc.cstatus.RLock()
 			for i := 0; i < lc.kv.opt.TableBuilderOptions.MaxLevels; i++ {
-				log.Warn("dump level status", zap.Int("level", i), zap.String("status", lc.cstatus.levels[i].debug()),
+				lc.cstatus.RLock()
+				status := lc.cstatus.levels[i].debug()
+				lc.cstatus.RUnlock()
+				log.Warn("dump level status", zap.Int("level", i), zap.String("status", status),
 					zap.Int64("size", lc.levels[i].getTotalSize()))
 			}
-			lc.cstatus.RUnlock()
 			timeStart = time.Now()
 		}
 		// Before we unstall, we need to make sure that level 0 is healthy. Otherwise, we
