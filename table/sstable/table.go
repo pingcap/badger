@@ -99,7 +99,13 @@ func (t *Table) Delete() error {
 	}
 	if t.blockCache != nil {
 		for blk := 0; blk < t.numBlocks; blk++ {
-			t.blockCache.Del(t.blockCacheKey(blk))
+			key := t.blockCacheKey(blk)
+			if v, ok := t.blockCache.Get(key); ok {
+				if b, ok := v.(*block); ok {
+					b.done()
+				}
+				t.blockCache.Del(key)
+			}
 		}
 	}
 	if t.indexCache != nil {
