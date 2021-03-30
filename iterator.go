@@ -197,6 +197,7 @@ func (opts *IteratorOptions) OverlapMemTable(t *memtable.Table) bool {
 		return true
 	}
 	iter := t.NewIterator(false)
+	defer iter.Close()
 	iter.Seek(opts.StartKey.UserKey)
 	if !iter.Valid() {
 		return false

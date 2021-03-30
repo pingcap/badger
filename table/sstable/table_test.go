@@ -157,6 +157,7 @@ func TestTableIterator(t *testing.T) {
 			require.NoError(t, err)
 			defer table.Delete()
 			it := table.newIterator(false)
+			defer it.Close()
 			count := 0
 			for it.Rewind(); it.Valid(); it.Next() {
 				v := it.Value()
@@ -280,6 +281,7 @@ func TestExternalTable(t *testing.T) {
 	defer table.Delete()
 
 	it := table.newIterator(false)
+	defer it.Close()
 	count := 0
 	for it.Rewind(); it.Valid(); it.Next() {
 		v := it.Value()
@@ -299,6 +301,7 @@ func TestSeekToFirst(t *testing.T) {
 			require.NoError(t, err)
 			defer table.Delete()
 			it := table.newIterator(false)
+			defer it.Close()
 			it.seekToFirst()
 			require.True(t, it.Valid())
 			v := it.Value()
@@ -316,6 +319,7 @@ func TestSeekToLast(t *testing.T) {
 			require.NoError(t, err)
 			defer table.Delete()
 			it := table.newIterator(false)
+			defer it.Close()
 			it.seekToLast()
 			require.True(t, it.Valid())
 			v := it.Value()
@@ -337,6 +341,7 @@ func TestSeekBasic(t *testing.T) {
 	defer table.Delete()
 
 	it := table.newIterator(false)
+	defer it.Close()
 
 	var data = []struct {
 		in    string
@@ -371,6 +376,7 @@ func TestSeekForPrev(t *testing.T) {
 	defer table.Delete()
 
 	it := table.newIterator(false)
+	defer it.Close()
 
 	var data = []struct {
 		in    string
@@ -407,6 +413,7 @@ func TestIterateFromStart(t *testing.T) {
 			require.NoError(t, err)
 			defer table.Delete()
 			ti := table.newIterator(false)
+			defer ti.Close()
 			ti.reset()
 			ti.seekToFirst()
 			require.True(t, ti.Valid())
@@ -433,6 +440,7 @@ func TestIterateFromEnd(t *testing.T) {
 			require.NoError(t, err)
 			defer table.Delete()
 			ti := table.newIterator(false)
+			defer ti.Close()
 			ti.reset()
 			ti.seek([]byte("zzzzzz")) // Seek to end, an invalid element.
 			require.False(t, ti.Valid())
@@ -456,6 +464,7 @@ func TestTable(t *testing.T) {
 	require.NoError(t, err)
 	defer table.Delete()
 	ti := table.newIterator(false)
+	defer ti.Close()
 	kid := 1010
 	seek := y.KeyWithTs([]byte(key("key", kid)), 0)
 	for ti.seek(seek.UserKey); ti.Valid(); ti.next() {
@@ -484,6 +493,7 @@ func TestIterateBackAndForth(t *testing.T) {
 
 	seek := y.KeyWithTs([]byte(key("key", 1010)), 0)
 	it := table.newIterator(false)
+	defer it.Close()
 	it.seek(seek.UserKey)
 	require.True(t, it.Valid())
 	k := it.Key()
@@ -522,6 +532,7 @@ func TestIterateMultiVersion(t *testing.T) {
 	require.NoError(t, err)
 	defer table.Delete()
 	it := table.newIterator(false)
+	defer it.Close()
 	itCnt := 0
 	var lastKey y.Key
 	for it.Rewind(); it.Valid(); it.Next() {
@@ -556,6 +567,7 @@ func TestIterateMultiVersion(t *testing.T) {
 		}
 	}
 	revIt := table.newIterator(true)
+	defer revIt.Close()
 	lastKey.Reset()
 	for revIt.Rewind(); revIt.Valid(); revIt.Next() {
 		if !lastKey.IsEmpty() {
@@ -582,6 +594,7 @@ func TestUniIterator(t *testing.T) {
 	defer table.Delete()
 	{
 		it := table.newIterator(false)
+		defer it.Close()
 		var count int
 		for it.Rewind(); it.Valid(); it.Next() {
 			v := it.Value()
@@ -593,6 +606,7 @@ func TestUniIterator(t *testing.T) {
 	}
 	{
 		it := table.newIterator(true)
+		defer it.Close()
 		var count int
 		for it.Rewind(); it.Valid(); it.Next() {
 			v := it.Value()
@@ -616,6 +630,7 @@ func TestConcatIteratorOneTable(t *testing.T) {
 	defer tbl.Delete()
 
 	it := table.NewConcatIterator([]table.Table{tbl}, false)
+	defer it.Close()
 
 	it.Rewind()
 	require.True(t, it.Valid())
@@ -643,6 +658,7 @@ func TestConcatIterator(t *testing.T) {
 
 	{
 		it := table.NewConcatIterator([]table.Table{tbl, tbl2, tbl3}, false)
+		defer it.Close()
 		it.Rewind()
 		require.True(t, it.Valid())
 		var count int
@@ -674,6 +690,7 @@ func TestConcatIterator(t *testing.T) {
 	}
 	{
 		it := table.NewConcatIterator([]table.Table{tbl, tbl2, tbl3}, true)
+		defer it.Close()
 		it.Rewind()
 		require.True(t, it.Valid())
 		var count int
@@ -724,6 +741,7 @@ func TestMergingIterator(t *testing.T) {
 	it1 := tbl1.newIterator(false)
 	it2 := table.NewConcatIterator([]table.Table{tbl2}, false)
 	it := table.NewMergeIterator([]y.Iterator{it1, it2}, false)
+	defer it.Close()
 
 	it.Rewind()
 	require.True(t, it.Valid())
@@ -764,6 +782,7 @@ func TestMergingIteratorReversed(t *testing.T) {
 	it1 := tbl1.newIterator(true)
 	it2 := table.NewConcatIterator([]table.Table{tbl2}, true)
 	it := table.NewMergeIterator([]y.Iterator{it1, it2}, true)
+	defer it.Close()
 
 	it.Rewind()
 	require.True(t, it.Valid())
@@ -804,6 +823,7 @@ func TestMergingIteratorTakeOne(t *testing.T) {
 	it1 := table.NewConcatIterator([]table.Table{t1}, false)
 	it2 := table.NewConcatIterator([]table.Table{t2}, false)
 	it := table.NewMergeIterator([]y.Iterator{it1, it2}, false)
+	defer it.Close()
 
 	it.Rewind()
 	require.True(t, it.Valid())
@@ -850,6 +870,7 @@ func TestMergingIteratorTakeTwo(t *testing.T) {
 	it1 := table.NewConcatIterator([]table.Table{t1}, false)
 	it2 := table.NewConcatIterator([]table.Table{t2}, false)
 	it := table.NewMergeIterator([]y.Iterator{it1, it2}, false)
+	defer it.Close()
 
 	it.Rewind()
 	require.True(t, it.Valid())
@@ -906,6 +927,7 @@ func TestSeekInvalidIssue(t *testing.T) {
 	require.NoError(t, err)
 	defer t1.Delete()
 	it := t1.NewIterator(false).(*Iterator)
+	defer it.Close()
 	for i := 1; i < it.tIdx.baseKeys.length(); i++ {
 		baseKey := it.tIdx.baseKeys.getEntry(i)
 		idx := sort.Search(len(keys), func(i int) bool {
@@ -929,8 +951,10 @@ func TestOpenImMemoryTable(t *testing.T) {
 	fileTable, err := OpenTable(file.Name(), nil, nil)
 	require.Nil(t, err)
 	inMemIt := inMemTbl.NewIterator(false)
+	defer inMemIt.Close()
 	inMemIt.Rewind()
 	fileIt := fileTable.NewIterator(false)
+	defer fileIt.Close()
 	fileIt.Rewind()
 	for ; fileIt.Valid(); fileIt.Next() {
 		if fileIt.Valid() {
@@ -995,6 +1019,7 @@ func BenchmarkRead(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		func() {
 			it := tbl.newIterator(false)
+			defer it.Close()
 			for it.seekToFirst(); it.Valid(); it.next() {
 			}
 		}()
@@ -1084,6 +1109,7 @@ func BenchmarkPointGet(b *testing.B) {
 				for i := 0; i < n; i++ {
 					k := keys[rand.Intn(n)]
 					it := tbl.newIterator(false)
+					defer it.Close()
 					it.Seek(k.UserKey)
 					if !it.Valid() {
 						continue
@@ -1112,6 +1138,7 @@ func BenchmarkPointGet(b *testing.B) {
 					resultKey, resultVs, ok, _ = tbl.pointGet(k, keyHash)
 					if !ok {
 						it := tbl.newIterator(false)
+						defer it.Close()
 						it.Seek(k.UserKey)
 						if !it.Valid() {
 							continue
@@ -1157,6 +1184,7 @@ func BenchmarkReadAndBuild(b *testing.B) {
 		func() {
 			newBuilder := NewTableBuilder(f, nil, 0, options.TableBuilderOptions{})
 			it := tbl.newIterator(false)
+			defer it.Close()
 			for it.seekToFirst(); it.Valid(); it.next() {
 				vs := it.Value()
 				newBuilder.Add(it.Key(), vs)
@@ -1205,6 +1233,7 @@ func BenchmarkReadMerged(b *testing.B) {
 				iters = append(iters, tbl.newIterator(false))
 			}
 			it := table.NewMergeIterator(iters, false)
+			defer it.Close()
 			for it.Rewind(); it.Valid(); it.Next() {
 			}
 		}()
@@ -1220,6 +1249,7 @@ func BenchmarkRandomRead(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		itr := tbl.newIterator(false)
+		defer itr.Close()
 		no := r.Intn(n)
 		k := []byte(fmt.Sprintf("%016x", no))
 		v := []byte(fmt.Sprintf("%d", no))

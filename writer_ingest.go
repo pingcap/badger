@@ -174,6 +174,7 @@ func (w *writeWorker) overlapWithFlushingMemTables(kr keyRange) bool {
 	imms := tbls.tables[:atomic.LoadUint32(&tbls.length)]
 	for _, mt := range imms {
 		it := mt.NewIterator(false)
+		defer it.Close()
 		it.Seek(kr.left.UserKey)
 		if !it.Valid() || it.Key().Compare(kr.right) <= 0 {
 			return true
@@ -206,6 +207,7 @@ func (w *writeWorker) checkRangeInLevel(kr keyRange, level int) (overlappingTabl
 
 	for i := left; i < right; i++ {
 		it := handler.tables[i].NewIterator(false)
+		defer it.Close()
 		it.Seek(kr.left.UserKey)
 		if it.Valid() && it.Key().Compare(kr.right) <= 0 {
 			overlap = true

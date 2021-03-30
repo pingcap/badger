@@ -109,6 +109,10 @@ func (s *SimpleIterator) Valid() bool {
 	return s.idx >= 0 && s.idx < len(s.latestOffs)
 }
 
+func (s *SimpleIterator) Close() error {
+	return nil
+}
+
 func newSimpleIterator(keys []string, vals []string, reversed bool) *SimpleIterator {
 	k := make([]y.Key, len(keys))
 	v := make([][]byte, len(vals))
@@ -167,6 +171,7 @@ func TestSimpleIterator(t *testing.T) {
 	keys := []string{"1", "2", "3"}
 	vals := []string{"v1", "v2", "v3"}
 	it := newSimpleIterator(keys, vals, false)
+	defer it.Close()
 	it.Rewind()
 	k, v := getAll(it)
 	require.EqualValues(t, keys, k)
@@ -186,6 +191,7 @@ func TestMergeSingle(t *testing.T) {
 	vals := []string{"v1", "v2", "v3"}
 	it := newSimpleIterator(keys, vals, false)
 	mergeIt := NewMergeIterator([]y.Iterator{it}, false)
+	defer mergeIt.Close()
 	mergeIt.Rewind()
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, keys, k)
@@ -197,6 +203,7 @@ func TestMergeSingleReversed(t *testing.T) {
 	vals := []string{"v1", "v2", "v3"}
 	it := newSimpleIterator(keys, vals, true)
 	mergeIt := NewMergeIterator([]y.Iterator{it}, true)
+	defer mergeIt.Close()
 	mergeIt.Rewind()
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, reversed(keys), k)
@@ -210,6 +217,7 @@ func TestMergeMore(t *testing.T) {
 	it4 := newSimpleIterator([]string{"1", "7", "9"}, []string{"d1", "d7", "d9"}, false)
 
 	mergeIt := NewMergeIterator([]y.Iterator{it1, it2, it3, it4}, false)
+	defer mergeIt.Close()
 	expectedKeys := []string{"1", "2", "3", "5", "7", "9"}
 	expectedVals := []string{"a1", "b2", "a3", "b5", "a7", "d9"}
 	mergeIt.Rewind()
@@ -225,6 +233,7 @@ func TestMergeIteratorNested(t *testing.T) {
 	it := newSimpleIterator(keys, vals, false)
 	mergeIt := NewMergeIterator([]y.Iterator{it}, false)
 	mergeIt2 := NewMergeIterator([]y.Iterator{mergeIt}, false)
+	defer mergeIt2.Close()
 	mergeIt2.Rewind()
 	k, v := getAll(mergeIt2)
 	require.EqualValues(t, keys, k)
@@ -237,6 +246,7 @@ func TestMergeIteratorSeek(t *testing.T) {
 	it3 := newSimpleIterator([]string{"1"}, []string{"c1"}, false)
 	it4 := newSimpleIterator([]string{"1", "7", "9"}, []string{"d1", "d7", "d9"}, false)
 	mergeIt := NewMergeIterator([]y.Iterator{it, it2, it3, it4}, false)
+	defer mergeIt.Close()
 	mergeIt.Seek([]byte("4"))
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, []string{"5", "7", "9"}, k)
@@ -249,6 +259,7 @@ func TestMergeIteratorSeekReversed(t *testing.T) {
 	it3 := newSimpleIterator([]string{"1"}, []string{"c1"}, true)
 	it4 := newSimpleIterator([]string{"1", "7", "9"}, []string{"d1", "d7", "d9"}, true)
 	mergeIt := NewMergeIterator([]y.Iterator{it, it2, it3, it4}, true)
+	defer mergeIt.Close()
 	mergeIt.Seek([]byte("5"))
 	k, v := getAll(mergeIt)
 	require.EqualValues(t, []string{"5", "3", "2", "1"}, k)
@@ -261,6 +272,7 @@ func TestMergeIteratorSeekInvalid(t *testing.T) {
 	it3 := newSimpleIterator([]string{"1"}, []string{"c1"}, false)
 	it4 := newSimpleIterator([]string{"1", "7", "9"}, []string{"d1", "d7", "d9"}, false)
 	mergeIt := NewMergeIterator([]y.Iterator{it, it2, it3, it4}, false)
+	defer mergeIt.Close()
 	mergeIt.Seek([]byte("f"))
 	require.False(t, mergeIt.Valid())
 }
@@ -271,6 +283,7 @@ func TestMergeIteratorSeekInvalidReversed(t *testing.T) {
 	it3 := newSimpleIterator([]string{"1"}, []string{"c1"}, true)
 	it4 := newSimpleIterator([]string{"1", "7", "9"}, []string{"d1", "d7", "d9"}, true)
 	mergeIt := NewMergeIterator([]y.Iterator{it, it2, it3, it4}, true)
+	defer mergeIt.Close()
 	mergeIt.Seek([]byte("0"))
 	require.False(t, mergeIt.Valid())
 }
@@ -280,7 +293,7 @@ func TestMergeIteratorDuplicate(t *testing.T) {
 	it2 := newSimpleIterator([]string{"1"}, []string{"1"}, false)
 	it3 := newSimpleIterator([]string{"2"}, []string{"2"}, false)
 	it := NewMergeIterator([]y.Iterator{it3, it2, it1}, false)
-
+	defer it.Close()
 	var cnt int
 	for it.Rewind(); it.Valid(); it.Next() {
 		require.EqualValues(t, cnt+48, it.Key().UserKey[0])
@@ -322,6 +335,7 @@ func TestMultiVersionMergeIterator(t *testing.T) {
 			}
 			require.True(t, curVer <= 70)
 		}
+		it.Close()
 	}
 }
 
@@ -338,6 +352,7 @@ func BenchmarkMergeIterator(b *testing.B) {
 		}
 	}
 	mergeIter := NewMergeIterator(simpleIters, false)
+	defer mergeIter.Close()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		mergeIter.Rewind()
