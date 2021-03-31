@@ -632,7 +632,6 @@ func TestIterateDeleted(t *testing.T) {
 
 		txn := db.NewTransaction(false)
 		idxIt := txn.NewIterator(DefaultIteratorOptions)
-		defer idxIt.Close()
 
 		count := 0
 		txn2 := db.NewTransaction(true)
@@ -646,11 +645,10 @@ func TestIterateDeleted(t *testing.T) {
 		}
 		require.Equal(t, 2, count)
 		require.NoError(t, txn2.Commit())
-
+		idxIt.Close()
 		t.Run(fmt.Sprintf("Prefetch=%t", false), func(t *testing.T) {
 			txn := db.NewTransaction(false)
-			idxIt = txn.NewIterator(DefaultIteratorOptions)
-
+			idxIt := txn.NewIterator(DefaultIteratorOptions)
 			var estSize int64
 			var idxKeys []string
 			for idxIt.Seek(prefix); idxIt.Valid(); idxIt.Next() {
@@ -665,6 +663,7 @@ func TestIterateDeleted(t *testing.T) {
 			}
 			require.Equal(t, 0, len(idxKeys))
 			require.Equal(t, int64(0), estSize)
+			idxIt.Close()
 		})
 	})
 }
@@ -762,6 +761,7 @@ func TestSetIfAbsentAsync(t *testing.T) {
 	txn := kv.NewTransaction(false)
 	var count int
 	it := txn.NewIterator(DefaultIteratorOptions)
+	defer it.Close()
 	{
 		t.Log("Starting first basic iteration")
 		for it.Rewind(); it.Valid(); it.Next() {

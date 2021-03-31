@@ -289,3 +289,5 @@ func (it *listNodeIterator) Value() y.ValueStruct { return it.n.entries[it.idx].
 func (it *listNodeIterator) FillValue(vs *y.ValueStruct) { *vs = it.Value() }
 
 func (it *listNodeIterator) Valid() bool { return it.idx >= 0 && it.idx < len(it.n.latestOffs) }
+
+func (it *listNodeIterator) Close() error { return nil }

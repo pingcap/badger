@@ -123,3 +123,16 @@ func (s *ConcatIterator) Next() {
 func (s *ConcatIterator) NextVersion() bool {
 	return s.cur.NextVersion()
 }
+
+// Close implements y.Interface.
+func (s *ConcatIterator) Close() error {
+	for _, it := range s.iters {
+		if it == nil {
+			continue
+		}
+		if err := it.Close(); err != nil {
+			return y.Wrapf(err, "ConcatIterator")
+		}
+	}
+	return nil
+}

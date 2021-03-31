@@ -655,6 +655,10 @@ func (s *Iterator) SeekToLast() {
 	s.loadNode()
 }
 
+func (s *Iterator) Close() error {
+	return nil
+}
+
 // UniIterator is a unidirectional memtable iterator. It is a thin wrapper around
 // Iterator. We like to keep Iterator as before, because it is more powerful and
 // we might support bidirectional iterators in the future.
@@ -713,3 +717,5 @@ func (s *UniIterator) FillValue(vs *y.ValueStruct) { s.iter.FillValue(vs) }
 
 // Valid implements y.Interface
 func (s *UniIterator) Valid() bool { return s.iter.Valid() }
+
+func (s *UniIterator) Close() error { return s.iter.Close() }

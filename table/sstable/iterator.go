@@ -77,9 +77,13 @@ type blockIterator struct {
 
 	baseLen uint16
 	ski     singleKeyIterator
+
+	block *block
 }
 
-func (itr *blockIterator) setBlock(b block) {
+func (itr *blockIterator) setBlock(b *block) {
+	itr.block.done()
+	itr.block = b
 	itr.err = nil
 	itr.idx = 0
 	itr.key.Reset()
@@ -167,6 +171,10 @@ func (itr *blockIterator) next() {
 
 func (itr *blockIterator) prev() {
 	itr.setIdx(itr.idx - 1)
+}
+
+func (itr *blockIterator) close() {
+	itr.block.done()
 }
 
 // Iterator is an iterator for a Table.
@@ -473,4 +481,10 @@ func (itr *Iterator) Seek(key []byte) {
 	} else {
 		itr.seekForPrev(key)
 	}
+}
+
+// Close closes the iterator (and it must be called).
+func (itr *Iterator) Close() error {
+	itr.bi.close()
+	return nil
 }

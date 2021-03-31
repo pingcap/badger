@@ -23,8 +23,8 @@ import (
 	"io/ioutil"
 
 	"github.com/golang/snappy"
-	"github.com/pingcap/badger/buffer"
 	"github.com/klauspost/compress/zstd"
+	"github.com/pingcap/badger/buffer"
 )
 
 // CompressionType specifies how a block should be compressed.
@@ -69,8 +69,19 @@ func (c CompressionType) Decompress(data []byte) ([]byte, error) {
 	case None:
 		return data, nil
 	case Snappy:
-		return snappy.Decode(nil, data)
+		defer buffer.PutBuffer(data)
+		length, err := snappy.DecodedLen(data)
+		if err != nil {
+			return nil, err
+		}
+		dst := buffer.GetBuffer(length)
+		res, err := snappy.Decode(dst, data)
+		if &res[0] != &dst[0] {
+			buffer.PutBuffer(dst)
+		}
+		return res, err
 	case ZSTD:
+		defer buffer.PutBuffer(data)
 		reader := bytes.NewBuffer(data)
 		r, err := zstd.NewReader(reader)
 		if err != nil {

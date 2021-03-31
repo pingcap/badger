@@ -180,6 +180,19 @@ func (mt *MergeIterator) FillValue(vs *y.ValueStruct) {
 	}
 }
 
+// Close implements y.Iterator.
+func (mt *MergeIterator) Close() error {
+	smallerErr := mt.smaller.iter.Close()
+	biggerErr := mt.bigger.iter.Close()
+	if smallerErr != nil {
+		return y.Wrapf(smallerErr, "MergeIterator")
+	}
+	if biggerErr != nil {
+		return y.Wrapf(biggerErr, "MergeIterator")
+	}
+	return nil
+}
+
 // NewMergeIterator creates a merge iterator
 func NewMergeIterator(iters []y.Iterator, reverse bool) y.Iterator {
 	if len(iters) == 0 {
@@ -225,4 +238,8 @@ func (e *EmptyIterator) FillValue(vs *y.ValueStruct) {}
 
 func (e *EmptyIterator) Valid() bool {
 	return false
+}
+
+func (e *EmptyIterator) Close() error {
+	return nil
 }
