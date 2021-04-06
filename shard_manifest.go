@@ -298,13 +298,12 @@ func (m *ShardingManifest) applySplitFiles(cs *protos.ShardChangeSet, shardInfo 
 func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) {
 	old := m.shards[shardID]
 	newShards := make([]*ShardInfo, len(split.NewShards))
+	newVer := old.Ver + uint64(len(newShards)) - 1
 	for i := 0; i < len(split.NewShards); i++ {
 		startKey, endKey := getSplittingStartEnd(old.Start, old.End, split.Keys, i)
 		id := split.NewShards[i].ShardID
-		ver := uint64(1)
 		var properties *shardProperties
 		if id == old.ID {
-			ver = old.Ver + 1
 			// inherit old shard properties.
 			properties = m.shards[id].properties
 		} else {
@@ -312,7 +311,7 @@ func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) 
 		}
 		shardInfo := &ShardInfo{
 			ID:         id,
-			Ver:        ver,
+			Ver:        newVer,
 			Start:      startKey,
 			End:        endKey,
 			files:      map[uint64]struct{}{},

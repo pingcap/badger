@@ -244,7 +244,7 @@ func helpRewrite(dir string, m *Manifest) (*os.File, int, error) {
 
 func appendMagicHeader(buf []byte) []byte {
 	buf = append(buf, magicText[:]...)
-	return append(buf, magicVersion, 0, 0, 0)
+	return append(buf, 0, 0, 0, magicVersion)
 }
 
 func appendChecksumPacket(buf, packet []byte) []byte {
@@ -262,6 +262,7 @@ func rewriteManifest(changeBuf []byte, dir string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	y.Assert(binary.BigEndian.Uint32(changeBuf[4:]) == magicVersion)
 	if _, err := fp.Write(changeBuf); err != nil {
 		fp.Close()
 		return nil, err
@@ -385,6 +386,9 @@ func readChangeSet(r io.Reader) (*protos.ManifestChangeSet, error) {
 	buf, err := readChecksumPacket(r)
 	if err != nil {
 		return nil, err
+	}
+	if len(buf) == 0 {
+		return nil, nil
 	}
 	var changeSet protos.ManifestChangeSet
 	if err := changeSet.Unmarshal(buf); err != nil {

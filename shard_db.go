@@ -128,14 +128,14 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	} else {
 		db.idAlloc = &localIDAllocator{latest: manifest.lastID}
 	}
-	if err = db.loadShards(); err != nil {
-		return nil, err
-	}
+	db.closers.resourceManager = y.NewCloser(0)
+	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
 	if opt.S3Options.EndPoint != "" {
 		db.s3c = s3util.NewS3Client(opt.S3Options)
 	}
-	db.closers.resourceManager = y.NewCloser(0)
-	db.resourceMgr = epoch.NewResourceManager(db.closers.resourceManager, &db.safeTsTracker)
+	if err = db.loadShards(); err != nil {
+		return nil, err
+	}
 	db.closers.memtable = y.NewCloser(1)
 	go db.runFlushMemTable(db.closers.memtable)
 	db.closers.writes = y.NewCloser(1)
@@ -166,7 +166,10 @@ func (sdb *ShardingDB) loadShards() error {
 					}
 					shard.setSplitKeys(mShard.preSplit.Keys)
 				}
-				err = sdb.opt.RecoverHandler.Recover(sdb, shard, nil)
+			}
+			err = sdb.opt.RecoverHandler.Recover(sdb, shard, nil)
+			if err != nil {
+				return err
 			}
 		}
 		// When a shard's split meta is persisted, there are some volatile data.
@@ -240,7 +243,7 @@ func (sdb *ShardingDB) loadShard(shardInfo *ShardInfo) (*Shard, error) {
 		}
 	}
 	sdb.shardMap.Store(shard.ID, shard)
-	log.S().Infof("load shard %d", shard.ID)
+	log.S().Infof("load shard %d ver %d", shard.ID, shard.Ver)
 	return shard, nil
 }
 

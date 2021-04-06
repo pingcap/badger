@@ -36,7 +36,11 @@ func (cft *CFTable) PutEntries(cf int, entries []*Entry) {
 	var h hint
 	skl := cft.skls[cf]
 	for _, entry := range entries {
-		skl.PutWithHint(entry.Key, entry.Value, &h)
+		if len(entry.Value.Value) == 0 && len(entry.Value.UserMeta) == 0 {
+			skl.DeleteKey(entry.Key)
+		} else {
+			skl.PutWithHint(entry.Key, entry.Value, &h)
+		}
 	}
 }
 
