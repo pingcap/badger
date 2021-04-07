@@ -45,7 +45,7 @@ message ManifestChange {
 message ShardChangeSet {
   uint64 shardID = 1;
   uint64 shardVer = 2;
-  uint64 version = 3;
+  uint64 dataVer = 3;
   ShardCompaction compaction = 4;
   ShardFlush flush = 5;
   ShardSnapshot snapshot = 6;

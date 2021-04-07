@@ -99,8 +99,8 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 
 	orc := &oracle{
 		isManaged:  opt.ManagedTxns,
-		curRead:    manifest.version,
-		nextCommit: manifest.version + 1,
+		curRead:    manifest.dataVersion,
+		nextCommit: manifest.dataVersion + 1,
 		commits:    make(map[uint64]uint64),
 	}
 	manifest.orc = orc

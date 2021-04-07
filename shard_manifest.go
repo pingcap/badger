@@ -20,7 +20,7 @@ type ShardingManifest struct {
 	shards      map[uint64]*ShardInfo
 	globalFiles map[uint64]fileMeta
 	lastID      uint64
-	version     uint64
+	dataVersion uint64
 	fd          *os.File
 	deletions   int
 	creations   int
@@ -104,7 +104,7 @@ func (m *ShardingManifest) toChangeSets() []*protos.ShardChangeSet {
 func (m *ShardingManifest) toChangeSet(shardID uint64) *protos.ShardChangeSet {
 	shard := m.shards[shardID]
 	cs := &protos.ShardChangeSet{
-		Version:  m.version,
+		DataVer:  m.dataVersion,
 		ShardID:  shard.ID,
 		ShardVer: shard.Ver,
 		State:    shard.splitState,
@@ -169,8 +169,8 @@ func (m *ShardingManifest) Close() error {
 }
 
 func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
-	if m.version < cs.Version {
-		m.version = cs.Version
+	if m.dataVersion < cs.DataVer {
+		m.dataVersion = cs.DataVer
 	}
 	if cs.Snapshot != nil {
 		m.applySnapshot(cs)
@@ -331,7 +331,7 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet, noti
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
-	changeSet.Version = m.orc.commitTs()
+	changeSet.DataVer = m.orc.commitTs()
 	buf, err := changeSet.Marshal()
 	if err != nil {
 		return err
@@ -386,7 +386,7 @@ func (m *ShardingManifest) writeFinishSplitChangeSet(split *protos.ShardChangeSe
 	data, _ := split.Marshal()
 	buf = appendChecksumPacket(buf, data)
 	for _, l0 := range l0ChangeSets {
-		l0.Version = commitTS
+		l0.DataVer = commitTS
 		data, _ = l0.Marshal()
 		buf = appendChecksumPacket(buf, data)
 	}
