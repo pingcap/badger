@@ -283,7 +283,8 @@ func TestMigration(t *testing.T) {
 	}
 	snap.Discard()
 	ingestTree.Delta = []*memtable.CFTable{cfTbl}
-	ingestTree.ChangeSet = db.manifest.toChangeSet(1)
+	ingestTree.ChangeSet, err = db.manifest.toChangeSet(1)
+	require.Nil(t, err)
 	opts = getTestOptions(dirB)
 	opts.IDAllocator = allocator
 	opts.NumCompactors = 2

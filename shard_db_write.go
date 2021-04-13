@@ -78,25 +78,28 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) []engineTask {
 }
 
 func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint64, preSplitFlush bool) {
-	writableMemTbl := shard.loadWritableMemTable()
-	if writableMemTbl != nil && writableMemTbl.Empty() {
-		return
-	}
 	newTableSize := sdb.opt.MaxMemTableSize
 	if newTableSize < minSize {
 		newTableSize = minSize
 	}
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
-	atomicAddMemTable(shard.memTbls, newMemTable)
-	if writableMemTbl == nil && !preSplitFlush {
+	writableMemTbl := shard.loadWritableMemTable()
+	if writableMemTbl == nil {
+		writableMemTbl = memtable.NewCFTable(newTableSize, sdb.numCFs)
+		atomicAddMemTable(shard.memTbls, writableMemTbl)
+	}
+	empty := writableMemTbl.Empty()
+	if empty && !preSplitFlush {
 		return
+	}
+	if !empty {
+		writableMemTbl.SetVersion(commitTS)
+		newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
+		atomicAddMemTable(shard.memTbls, newMemTable)
+	} else {
+		writableMemTbl = nil
 	}
 	if shard.IsPassive() {
 		return
-	}
-	shard.properties.set(commitTSKey, sstable.U64ToBytes(commitTS))
-	if writableMemTbl != nil {
-		writableMemTbl.SetVersion(commitTS)
 	}
 	sdb.flushCh <- &shardFlushTask{
 		shard:         shard,
@@ -175,7 +178,6 @@ func (sdb *ShardingDB) writeSplitting(batch *WriteBatch, commitTS uint64) uint64
 				memTbl = batch.shard.loadSplittingWritableMemTable(idx)
 			}
 			memTbl.Put(cf, entry.Key, entry.Value)
-			batch.shard.splittingCnt++
 		}
 	}
 	for key, val := range batch.properties {

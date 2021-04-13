@@ -17,6 +17,7 @@ type IngestTree struct {
 	MaxTS     uint64
 	Delta     []*memtable.CFTable
 	LocalPath string
+	Passive   bool
 }
 
 func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
@@ -42,6 +43,7 @@ func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
 	}
 
 	shard := newShardForIngest(ingestTree.ChangeSet, sdb.opt, sdb.metrics)
+	shard.SetPassive(ingestTree.Passive)
 	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{tables: ingestTree.Delta}))
 	atomic.StorePointer(shard.l0s, unsafe.Pointer(l0s))
 	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {

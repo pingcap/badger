@@ -322,12 +322,16 @@ func (sdb *ShardingDB) CompactShard(pri CompactionPriority) error {
 	shard.lock.Lock()
 	defer shard.lock.Unlock()
 	if shard.isSplitting() {
-		log.S().Infof("avoid compaction for splitting shard.")
+		log.S().Debugf("avoid compaction for splitting shard.")
 		return nil
 	}
 	latest := sdb.GetShard(shard.ID)
 	if latest.Ver != shard.Ver {
 		log.S().Infof("avoid compaction for shard version change.")
+		return nil
+	}
+	if shard.IsPassive() {
+		log.S().Warn("avoid active shard compaction.")
 		return nil
 	}
 	if pri.CF == -1 {
@@ -625,6 +629,7 @@ func (sdb *ShardingDB) applyPassiveFlush(shard *Shard, changeSet *protos.ShardCh
 		}
 		newL0Tbls = append(newL0Tbls, tbl)
 	}
+	shard.setSplitState(changeSet.State)
 	atomicAddL0(shard.l0s, newL0Tbls...)
 	atomicRemoveMemTable(shard.memTbls, len(newL0Tbls))
 	return nil
@@ -729,7 +734,7 @@ func (sdb *ShardingDB) applyPassiveSplitFiles(shard *Shard, changeSet *protos.Sh
 			newL0Tbls.tables = append(newL0Tbls.tables, oldL0)
 		}
 	}
-	sort.Slice(newL0Tbls, func(i, j int) bool {
+	sort.Slice(newL0Tbls.tables, func(i, j int) bool {
 		return newL0Tbls.tables[i].commitTS > newL0Tbls.tables[j].commitTS
 	})
 	y.Assert(atomic.CompareAndSwapPointer(shard.l0s, unsafe.Pointer(oldL0s), unsafe.Pointer(newL0Tbls)))

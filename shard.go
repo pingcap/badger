@@ -33,10 +33,6 @@ type Shard struct {
 	splitState       int32
 	splitKeys        [][]byte
 	splittingMemTbls []*unsafe.Pointer
-	splittingCnt     int
-
-	// Only written by PreSplit, used By FinishSplit.
-	splittingL0Tbls  []*shardL0Tables
 	estimatedSize    int64
 	removeFilesOnDel bool
 
@@ -80,7 +76,10 @@ func newShardForLoading(shardInfo *ShardInfo, opt Options, metrics *y.MetricsSet
 		}
 		shard.setSplitKeys(shardInfo.preSplit.Keys)
 	}
-	y.Assert(shardInfo.split == nil || shardInfo.split.MemProps != nil)
+	if shardInfo.split != nil {
+		// Loading a parent shard info.
+		shard.setSplitKeys(shardInfo.split.Keys)
+	}
 	shard.setSplitState(shardInfo.splitState)
 	return shard
 }
@@ -143,13 +142,11 @@ func (s *Shard) setSplitKeys(keys [][]byte) bool {
 			*memPtr = unsafe.Pointer(&shardingMemTables{})
 			s.splittingMemTbls[i] = memPtr
 		}
-		s.splittingL0Tbls = make([]*shardL0Tables, len(keys)+1)
-		for i := range s.splittingL0Tbls {
-			s.splittingL0Tbls[i] = &shardL0Tables{}
-		}
 		s.setSplitState(protos.SplitState_PRE_SPLIT)
+		log.S().Debugf("shard %d:%d pre-split", s.ID, s.Ver)
 		return true
 	}
+	log.S().Warnf("shard %d:%d failed to set split key got state %s", s.ID, s.Ver, s.GetSplitState())
 	return false
 }
 
@@ -359,8 +356,6 @@ type deletions struct {
 func (d *deletions) Append(res epoch.Resource) {
 	d.resources = append(d.resources, res)
 }
-
-const commitTSKey = "commitTS"
 
 type shardProperties struct {
 	m map[string][]byte

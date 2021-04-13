@@ -84,7 +84,7 @@ func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
 		atomicAddL0(nShard.l0s, newL0s.tables...)
 		atomicRemoveMemTable(nShard.memTbls, len(newL0s.tables))
 	}
-	return sdb.manifest.writeFinishSplitChangeSet(splitChangeSet, allL0s, task, true)
+	return sdb.manifest.writeFlushFinishSplitChangeSet(allL0s, task, true)
 }
 
 func (sdb *ShardingDB) flushMemTable(m *memtable.CFTable) (*shardL0Table, error) {

@@ -47,6 +47,8 @@ type ShardInfo struct {
 	split      *protos.ShardSplit
 	splitState protos.SplitState
 	commitTS   uint64
+	parent     *ShardInfo
+	recovered  bool
 }
 
 // ShardLevel is the struct that contains shard id and level id,
@@ -92,22 +94,33 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 	return m, nil
 }
 
-func (m *ShardingManifest) toChangeSets() []*protos.ShardChangeSet {
+func (m *ShardingManifest) toChangeSets() ([]*protos.ShardChangeSet, error) {
 	var shards []*protos.ShardChangeSet
 	for id := range m.shards {
-		cs := m.toChangeSet(id)
+		cs, err := m.toChangeSet(id)
+		if err != nil {
+			return nil, err
+		}
 		shards = append(shards, cs)
 	}
-	return shards
+	return shards, nil
 }
 
-func (m *ShardingManifest) toChangeSet(shardID uint64) *protos.ShardChangeSet {
+var ErrHasParent = errors.New("has parent")
+
+func (m *ShardingManifest) toChangeSet(shardID uint64) (*protos.ShardChangeSet, error) {
 	shard := m.shards[shardID]
+	if shard.parent != nil {
+		return nil, ErrHasParent
+	}
 	cs := &protos.ShardChangeSet{
 		DataVer:  m.dataVersion,
 		ShardID:  shard.ID,
 		ShardVer: shard.Ver,
 		State:    shard.splitState,
+	}
+	if shard.preSplit != nil {
+		cs.PreSplit = shard.preSplit
 	}
 	shardSnap := &protos.ShardSnapshot{
 		Start:      shard.Start,
@@ -133,28 +146,30 @@ func (m *ShardingManifest) toChangeSet(shardID uint64) *protos.ShardChangeSet {
 			})
 		}
 	}
-	return cs
+	return cs, nil
 }
 
 func (m *ShardingManifest) rewrite() error {
 	log.Info("rewrite manifest")
-	changeSets := m.toChangeSets()
+	changeSets, err := m.toChangeSets()
+	if err != nil {
+		if err == ErrHasParent {
+			return nil
+		}
+		return err
+	}
 	changeSetsBuf := make([]byte, 8)
 	copy(changeSetsBuf, magicText[:])
 	binary.BigEndian.PutUint32(changeSetsBuf[4:], magicVersion)
 	var creations int
 	for _, cs := range changeSets {
-		data, err := cs.Marshal()
-		if err != nil {
-			return err
-		}
+		data, _ := cs.Marshal()
 		creations += len(cs.Snapshot.L0Creates) + len(cs.Snapshot.TableCreates)
 		changeSetsBuf = appendChecksumPacket(changeSetsBuf, data)
 	}
 	if m.fd != nil {
 		m.fd.Close()
 	}
-	var err error
 	m.fd, err = rewriteManifest(changeSetsBuf, m.dir)
 	if err != nil {
 		return err
@@ -180,6 +195,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
 	if shardInfo == nil {
 		return errors.WithStack(errShardNotFound)
 	}
+	y.Assert(shardInfo.Ver == cs.ShardVer)
 	if cs.Flush != nil {
 		m.applyFlush(cs, shardInfo)
 		if cs.State == protos.SplitState_PRE_SPLIT_FLUSH_DONE {
@@ -206,12 +222,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
 		return nil
 	}
 	if cs.Split != nil {
-		if cs.Split.MemProps != nil {
-			// It's a unstable Split, we need to recover before execute split.
-			shardInfo.split = cs.Split
-		} else {
-			m.applySplit(cs.ShardID, cs.Split)
-		}
+		m.applySplit(cs.ShardID, cs.Split)
 		return nil
 	}
 	if cs.ShardDelete {
@@ -246,6 +257,8 @@ func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
 
 func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
 	shardInfo.commitTS = cs.Flush.CommitTS
+	// The first time a shard is flushed, the parent doesn't need to recover, we can simply set parent to nil.
+	shardInfo.parent = nil
 	for _, create := range cs.Flush.L0Creates {
 		if create.Properties != nil {
 			for i, key := range create.Properties.Keys {
@@ -302,12 +315,8 @@ func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) 
 	for i := 0; i < len(split.NewShards); i++ {
 		startKey, endKey := getSplittingStartEnd(old.Start, old.End, split.Keys, i)
 		id := split.NewShards[i].ShardID
-		var properties *shardProperties
 		if id == old.ID {
-			// inherit old shard properties.
-			properties = m.shards[id].properties
-		} else {
-			properties = newShardProperties()
+			old.split = split
 		}
 		shardInfo := &ShardInfo{
 			ID:         id,
@@ -315,7 +324,8 @@ func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) 
 			Start:      startKey,
 			End:        endKey,
 			files:      map[uint64]struct{}{},
-			properties: properties.applyPB(split.NewShards[i]),
+			properties: newShardProperties().applyPB(split.NewShards[i]),
+			parent:     old,
 		}
 		m.shards[id] = shardInfo
 		newShards[i] = shardInfo
@@ -362,7 +372,7 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet, noti
 	return nil
 }
 
-func (m *ShardingManifest) writeFinishSplitChangeSet(split *protos.ShardChangeSet, allL0s []*shardL0Tables, task *shardFlushTask, notifyMetaListener bool) error {
+func (m *ShardingManifest) writeFlushFinishSplitChangeSet(allL0s []*shardL0Tables, task *shardFlushTask, notifyMetaListener bool) error {
 	l0ChangeSets := make([]*protos.ShardChangeSet, len(task.finishSplitMemTbls))
 	for i := range allL0s {
 		nShard := task.finishSplitShards[i]
@@ -383,21 +393,17 @@ func (m *ShardingManifest) writeFinishSplitChangeSet(split *protos.ShardChangeSe
 	defer m.appendLock.Unlock()
 	commitTS := m.orc.commitTs()
 	var buf []byte
-	data, _ := split.Marshal()
-	buf = appendChecksumPacket(buf, data)
 	for _, l0 := range l0ChangeSets {
 		l0.DataVer = commitTS
-		data, _ = l0.Marshal()
+		data, _ := l0.Marshal()
 		buf = appendChecksumPacket(buf, data)
 	}
+	// TODO: this is not atomic, we need to make sure all the new split shards are atomically written to meta.
 	if _, err := m.fd.Write(buf); err != nil {
 		return err
 	}
 	err := m.fd.Sync()
 	if err != nil {
-		return err
-	}
-	if err = m.ApplyChangeSet(split); err != nil {
 		return err
 	}
 	for _, l0 := range l0ChangeSets {
@@ -459,5 +465,6 @@ func newShardChangeSet(shard *Shard) *protos.ShardChangeSet {
 	return &protos.ShardChangeSet{
 		ShardID:  shard.ID,
 		ShardVer: shard.Ver,
+		State:    shard.GetSplitState(),
 	}
 }

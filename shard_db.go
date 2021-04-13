@@ -149,9 +149,20 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 
 func (sdb *ShardingDB) loadShards() error {
 	log.Info("load shards")
-	var needSplitShards []*Shard
-	var splitMetas []*protos.ShardSplit
 	for _, mShard := range sdb.manifest.shards {
+		parent := mShard.parent
+		mShard.parent = nil
+		if parent != nil && !parent.recovered && sdb.opt.RecoverHandler != nil {
+			parentShard, err := sdb.loadShard(mShard.parent)
+			if err != nil {
+				return err
+			}
+			err = sdb.opt.RecoverHandler.Recover(sdb, parentShard, mShard.parent.split.MemProps)
+			if err != nil {
+				return err
+			}
+			parent.recovered = true
+		}
 		shard, err := sdb.loadShard(mShard)
 		if err != nil {
 			return err
@@ -171,28 +182,6 @@ func (sdb *ShardingDB) loadShards() error {
 			if err != nil {
 				return err
 			}
-		}
-		// When a shard's split meta is persisted, there are some volatile data.
-		// We need to recover it.
-		if mShard.split != nil && mShard.split.MemProps != nil {
-			// We need to finish the split process after recovered.
-			needSplitShards = append(needSplitShards, shard)
-			splitMetas = append(splitMetas, mShard.split)
-		}
-	}
-	for i := 0; i < len(needSplitShards); i++ {
-		shard := needSplitShards[i]
-		sdb.manifest.applySplit(shard.ID, splitMetas[i])
-		newShards, _ := sdb.buildSplitShards(shard, splitMetas[i].NewShards)
-		for _, nShard := range newShards {
-			// After split meta is persisted, the new shards may have more volatile data to recover.
-			if sdb.opt.RecoverHandler != nil {
-				err := sdb.opt.RecoverHandler.Recover(sdb, nShard, nil)
-				if err != nil {
-					return err
-				}
-			}
-			sdb.shardMap.Store(nShard.ID, nShard)
 		}
 	}
 	return nil
@@ -583,7 +572,7 @@ func (sdb *ShardingDB) GetOpt() Options {
 	return sdb.opt
 }
 
-func (sdb *ShardingDB) GetShardChangeSet(shardID uint64) *protos.ShardChangeSet {
+func (sdb *ShardingDB) GetShardChangeSet(shardID uint64) (*protos.ShardChangeSet, error) {
 	sdb.manifest.appendLock.Lock()
 	defer sdb.manifest.appendLock.Unlock()
 	return sdb.manifest.toChangeSet(shardID)
