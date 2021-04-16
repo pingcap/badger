@@ -74,6 +74,8 @@ type ShardingDB struct {
 	idAlloc       IDAllocator
 	s3c           *s3util.S3Client
 	closed        uint32
+
+	metaChangeListener MetaChangeListener
 }
 
 func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
@@ -104,7 +106,6 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 	manifest.orc = orc
-	manifest.metaListener = opt.MetaChangeListener
 
 	blkCache, idxCache, err := createCache(opt)
 	if err != nil {
@@ -112,16 +113,17 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 	}
 	metrics := y.NewMetricSet(opt.Dir)
 	db = &ShardingDB{
-		opt:      opt,
-		numCFs:   len(opt.CFs),
-		orc:      orc,
-		dirLock:  dirLockGuard,
-		metrics:  metrics,
-		blkCache: blkCache,
-		idxCache: idxCache,
-		flushCh:  make(chan *shardFlushTask, opt.NumMemtables),
-		writeCh:  make(chan engineTask, kvWriteChCapacity),
-		manifest: manifest,
+		opt:                opt,
+		numCFs:             len(opt.CFs),
+		orc:                orc,
+		dirLock:            dirLockGuard,
+		metrics:            metrics,
+		blkCache:           blkCache,
+		idxCache:           idxCache,
+		flushCh:            make(chan *shardFlushTask, opt.NumMemtables),
+		writeCh:            make(chan engineTask, kvWriteChCapacity),
+		manifest:           manifest,
+		metaChangeListener: opt.MetaChangeListener,
 	}
 	if opt.IDAllocator != nil {
 		db.idAlloc = opt.IDAllocator
@@ -134,7 +136,7 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		db.s3c = s3util.NewS3Client(opt.S3Options)
 	}
 	if err = db.loadShards(); err != nil {
-		return nil, err
+		return nil, errors.AddStack(err)
 	}
 	db.closers.memtable = y.NewCloser(1)
 	go db.runFlushMemTable(db.closers.memtable)
@@ -151,18 +153,18 @@ func (sdb *ShardingDB) loadShards() error {
 	log.Info("load shards")
 	for _, mShard := range sdb.manifest.shards {
 		parent := mShard.parent
-		mShard.parent = nil
 		if parent != nil && !parent.recovered && sdb.opt.RecoverHandler != nil {
-			parentShard, err := sdb.loadShard(mShard.parent)
+			parentShard, err := sdb.loadShard(parent)
 			if err != nil {
-				return err
+				return errors.AddStack(err)
 			}
-			err = sdb.opt.RecoverHandler.Recover(sdb, parentShard, mShard.parent.split.MemProps)
+			err = sdb.opt.RecoverHandler.Recover(sdb, parentShard, parent.split.MemProps)
 			if err != nil {
-				return err
+				return errors.AddStack(err)
 			}
 			parent.recovered = true
 		}
+		mShard.parent = nil
 		shard, err := sdb.loadShard(mShard)
 		if err != nil {
 			return err
@@ -173,14 +175,14 @@ func (sdb *ShardingDB) loadShards() error {
 					// Recover to the state before PreSplit.
 					err = sdb.opt.RecoverHandler.Recover(sdb, shard, mShard.preSplit.MemProps)
 					if err != nil {
-						return err
+						return errors.AddStack(err)
 					}
 					shard.setSplitKeys(mShard.preSplit.Keys)
 				}
 			}
 			err = sdb.opt.RecoverHandler.Recover(sdb, shard, nil)
 			if err != nil {
-				return err
+				return errors.AddStack(err)
 			}
 		}
 	}
@@ -191,7 +193,7 @@ func (sdb *ShardingDB) loadShard(shardInfo *ShardInfo) (*Shard, error) {
 	shard := newShardForLoading(shardInfo, sdb.opt, sdb.metrics)
 	for fid := range shardInfo.files {
 		cfLevel, ok := sdb.manifest.globalFiles[fid]
-		y.Assert(ok)
+		y.AssertTruef(ok, "%d:%d global file %d not found", shardInfo.ID, shardInfo.Ver, fid)
 		cf := cfLevel.cf
 		if cf == -1 {
 			filename := sstable.NewFilename(fid, sdb.opt.Dir)
@@ -514,6 +516,10 @@ func (sdb *ShardingDB) NewSnapshot(shard *Shard) *Snapshot {
 	}
 }
 
+func (sdb *ShardingDB) GetReadTS() uint64 {
+	return sdb.orc.readTs()
+}
+
 func (sdb *ShardingDB) RemoveShard(shardID uint64, removeFile bool) error {
 	shardVal, ok := sdb.shardMap.Load(shardID)
 	if !ok {
@@ -522,7 +528,7 @@ func (sdb *ShardingDB) RemoveShard(shardID uint64, removeFile bool) error {
 	shard := shardVal.(*Shard)
 	change := newShardChangeSet(shard)
 	change.ShardDelete = true
-	err := sdb.manifest.writeChangeSet(change, false)
+	err := sdb.manifest.writeChangeSet(change)
 	if err != nil {
 		return err
 	}
@@ -547,7 +553,7 @@ func (sdb *ShardingDB) GetSplitSuggestion(shardID uint64, splitSize int64) [][]b
 	var keys [][]byte
 	if atomic.LoadInt64(&shard.estimatedSize) > splitSize {
 		log.S().Infof("shard(%x, %x) size %d", shard.Start, shard.End, shard.estimatedSize)
-		keys = append(keys, shard.getSplitKeys(splitSize)...)
+		keys = append(keys, shard.getSuggestSplitKeys(splitSize)...)
 	}
 	return keys
 }
@@ -578,10 +584,17 @@ func (sdb *ShardingDB) GetShardChangeSet(shardID uint64) (*protos.ShardChangeSet
 	return sdb.manifest.toChangeSet(shardID)
 }
 
-func (sdb *ShardingDB) GetPropertiesWithSnap(shard *Shard, keys []string) (values [][]byte, snap *Snapshot) {
+func (sdb *ShardingDB) GetProperties(shard *Shard, keys []string) (values [][]byte) {
 	notify := make(chan error, 1)
 	task := &getPropertyTask{shard: shard, keys: keys}
 	sdb.writeCh <- engineTask{getProperties: task, notify: notify}
-	<-notify
-	return task.values, task.snap
+	y.Assert(<-notify == nil)
+	return task.values
+}
+
+func (sdb *ShardingDB) TriggerFlush(shard *Shard) {
+	notify := make(chan error, 1)
+	task := &triggerFlushTask{shard: shard}
+	sdb.writeCh <- engineTask{triggerFlush: task, notify: notify}
+	y.Assert(<-notify == nil)
 }

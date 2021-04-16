@@ -194,11 +194,19 @@ func (st *shardTester) runWriter() {
 			if err != nil {
 				x.resp <- err
 			} else {
-				x.resp <- st.db.SplitShardFiles(x.shardID, x.ver)
+				changeSet, err1 := st.db.SplitShardFiles(x.shardID, x.ver)
+				if err1 != nil {
+					x.resp <- err1
+				} else {
+					x.resp <- st.db.ApplyChangeSet(changeSet)
+				}
 			}
 		case *testerFinishSplitRequest:
 			newShards, err := st.db.FinishSplit(x.shardID, x.ver, x.newProps)
 			if err == nil {
+				for _, nShard := range newShards {
+					st.db.TriggerFlush(nShard)
+				}
 				log.S().Info("tester finish split")
 				st.split(x.shardID, newShards)
 			}

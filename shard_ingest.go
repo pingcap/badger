@@ -2,7 +2,6 @@ package badger
 
 import (
 	"github.com/pingcap/badger/protos"
-	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
@@ -15,7 +14,6 @@ import (
 type IngestTree struct {
 	ChangeSet *protos.ShardChangeSet
 	MaxTS     uint64
-	Delta     []*memtable.CFTable
 	LocalPath string
 	Passive   bool
 }
@@ -43,16 +41,20 @@ func (sdb *ShardingDB) Ingest(ingestTree *IngestTree) error {
 	}
 
 	shard := newShardForIngest(ingestTree.ChangeSet, sdb.opt, sdb.metrics)
+	for _, l0 := range l0s.tables {
+		shard.addEstimatedSize(l0.size)
+	}
 	shard.SetPassive(ingestTree.Passive)
-	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{tables: ingestTree.Delta}))
+	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
 	atomic.StorePointer(shard.l0s, unsafe.Pointer(l0s))
 	shard.foreachLevel(func(cf int, level *levelHandler) (stop bool) {
+		shard.addEstimatedSize(level.totalSize)
 		scf := shard.cfs[cf]
 		y.Assert(scf.casLevelHandler(level.level, level, levelHandlers[cf][level.level-1]))
 		return false
 	})
 	// Ingest is manually triggered with meta change, so we don't need to notify meta listener.
-	if err = sdb.manifest.writeChangeSet(ingestTree.ChangeSet, false); err != nil {
+	if err = sdb.manifest.writeChangeSet(ingestTree.ChangeSet); err != nil {
 		return err
 	}
 	sdb.shardMap.Store(shard.ID, shard)
@@ -101,19 +103,6 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 		}
 	}
 	return l0s, newHandlers, nil
-}
-
-func (sdb *ShardingDB) IngestBuffer(shardID, shardVer uint64, buffer *memtable.CFTable) error {
-	shard := sdb.GetShard(shardID)
-	if shard == nil {
-		return errShardNotFound
-	}
-	if shard.Ver != shardVer {
-		return errShardNotMatch
-	}
-	memTbls := (*shardingMemTables)(atomic.LoadPointer(shard.memTbls))
-	memTbls.tables = append([]*memtable.CFTable{buffer}, memTbls.tables...)
-	return nil
 }
 
 func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {

@@ -30,7 +30,6 @@ type ShardingManifest struct {
 	// We make this configurable so that unit tests can hit rewrite() code quickly
 	deletionsRewriteThreshold int
 	orc                       *oracle
-	metaListener              MetaChangeListener
 }
 
 type ShardInfo struct {
@@ -232,6 +231,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
 }
 
 func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
+	log.S().Infof("%d:%d apply snapshot", cs.ShardID, cs.ShardVer)
 	snap := cs.Snapshot
 	shard := &ShardInfo{
 		ID:         cs.ShardID,
@@ -256,8 +256,8 @@ func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
 }
 
 func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+	log.S().Infof("%d:%d apply flush", cs.ShardID, cs.ShardVer)
 	shardInfo.commitTS = cs.Flush.CommitTS
-	// The first time a shard is flushed, the parent doesn't need to recover, we can simply set parent to nil.
 	shardInfo.parent = nil
 	for _, create := range cs.Flush.L0Creates {
 		if create.Properties != nil {
@@ -270,6 +270,7 @@ func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *Shar
 }
 
 func (m *ShardingManifest) addFile(fid uint64, cf int32, level uint32, smallest, biggest []byte, shardInfo *ShardInfo) {
+	log.S().Infof("manifest add file %d l%d smalleset %v biggest %v", fid, level, smallest, biggest)
 	if fid > m.lastID {
 		m.lastID = fid
 	}
@@ -279,12 +280,14 @@ func (m *ShardingManifest) addFile(fid uint64, cf int32, level uint32, smallest,
 }
 
 func (m *ShardingManifest) deleteFile(fid uint64, shardInfo *ShardInfo) {
+	log.S().Infof("%d:%d manifest del file %d", shardInfo.ID, shardInfo.Ver, fid)
 	m.deletions++
 	delete(shardInfo.files, fid)
 	delete(m.globalFiles, fid)
 }
 
 func (m *ShardingManifest) applyCompaction(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+	log.S().Infof("%d:%d apply compaction", cs.ShardID, cs.ShardVer)
 	for _, id := range cs.Compaction.TopDeletes {
 		m.deleteFile(id, shardInfo)
 	}
@@ -297,6 +300,7 @@ func (m *ShardingManifest) applyCompaction(cs *protos.ShardChangeSet, shardInfo 
 }
 
 func (m *ShardingManifest) applySplitFiles(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+	log.S().Infof(" %d:%d apply split files", shardInfo.ID, shardInfo.Ver)
 	for _, id := range cs.SplitFiles.TableDeletes {
 		m.deleteFile(id, shardInfo)
 	}
@@ -310,6 +314,7 @@ func (m *ShardingManifest) applySplitFiles(cs *protos.ShardChangeSet, shardInfo 
 
 func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) {
 	old := m.shards[shardID]
+	log.S().Infof("%d:%d apply split, files %v", old.ID, old.Ver, old.files)
 	newShards := make([]*ShardInfo, len(split.NewShards))
 	newVer := old.Ver + uint64(len(newShards)) - 1
 	for i := 0; i < len(split.NewShards); i++ {
@@ -335,9 +340,13 @@ func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) 
 		shardIdx := getSplitShardIndex(split.Keys, fileMeta.smallest)
 		newShards[shardIdx].files[fid] = struct{}{}
 	}
+	for _, nShard := range newShards {
+		log.S().Infof("new shard %d:%d smallest %v biggest %v files %v",
+			nShard.ID, nShard.Ver, nShard.Start, nShard.End, nShard.files)
+	}
 }
 
-func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet, notifyMetaListener bool) error {
+func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet) error {
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
@@ -365,56 +374,6 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet, noti
 	}
 	if err = m.ApplyChangeSet(changeSet); err != nil {
 		return err
-	}
-	if m.metaListener != nil && notifyMetaListener {
-		m.metaListener.OnChange(changeSet)
-	}
-	return nil
-}
-
-func (m *ShardingManifest) writeFlushFinishSplitChangeSet(allL0s []*shardL0Tables, task *shardFlushTask, notifyMetaListener bool) error {
-	l0ChangeSets := make([]*protos.ShardChangeSet, len(task.finishSplitMemTbls))
-	for i := range allL0s {
-		nShard := task.finishSplitShards[i]
-		l0s := allL0s[i]
-		l0ChangeSet := newShardChangeSet(nShard)
-		l0ChangeSet.Flush = &protos.ShardFlush{CommitTS: task.commitTS}
-		for _, l0 := range l0s.tables {
-			l0ChangeSet.Flush.L0Creates = append(l0ChangeSet.Flush.L0Creates, &protos.L0Create{
-				ID:    l0.fid,
-				Start: nShard.Start,
-				End:   nShard.End,
-			})
-		}
-		l0ChangeSets[i] = l0ChangeSet
-	}
-	// Maybe we could use O_APPEND instead (on certain file systems)
-	m.appendLock.Lock()
-	defer m.appendLock.Unlock()
-	commitTS := m.orc.commitTs()
-	var buf []byte
-	for _, l0 := range l0ChangeSets {
-		l0.DataVer = commitTS
-		data, _ := l0.Marshal()
-		buf = appendChecksumPacket(buf, data)
-	}
-	// TODO: this is not atomic, we need to make sure all the new split shards are atomically written to meta.
-	if _, err := m.fd.Write(buf); err != nil {
-		return err
-	}
-	err := m.fd.Sync()
-	if err != nil {
-		return err
-	}
-	for _, l0 := range l0ChangeSets {
-		if err = m.ApplyChangeSet(l0); err != nil {
-			return err
-		}
-	}
-	if m.metaListener != nil && notifyMetaListener {
-		for _, changeSet := range l0ChangeSets {
-			m.metaListener.OnChange(changeSet)
-		}
 	}
 	return nil
 }

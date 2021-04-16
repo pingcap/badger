@@ -29,7 +29,7 @@ type Shard struct {
 	l0s     *unsafe.Pointer
 	flushCh chan *shardFlushTask
 
-	// split state transition: initial(0) -> pre-split (1) -> split-file-done (2)
+	// split state transition: initial(0) -> pre-split (1) -> pre-split-flush-done (2) -> split-file-done (3)
 	splitState       int32
 	splitKeys        [][]byte
 	splittingMemTbls []*unsafe.Pointer
@@ -39,7 +39,9 @@ type Shard struct {
 	// If the shard is passive, flush mem table and do compaction will ignore this shard.
 	passive int32
 
-	properties *shardProperties
+	properties     *shardProperties
+	compacting     int32
+	initialFlushed int32
 }
 
 func newShard(props *protos.ShardProperties, ver uint64, start, end []byte, opt Options, metrics *y.MetricsSet) *Shard {
@@ -54,7 +56,7 @@ func newShard(props *protos.ShardProperties, ver uint64, start, end []byte, opt 
 	shard.memTbls = new(unsafe.Pointer)
 	atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{}))
 	shard.l0s = new(unsafe.Pointer)
-	atomic.StorePointer(shard.l0s, unsafe.Pointer(&shardingMemTables{}))
+	atomic.StorePointer(shard.l0s, unsafe.Pointer(&shardL0Tables{}))
 	for i := 0; i < len(opt.CFs); i++ {
 		sCF := &shardCF{
 			levels: make([]unsafe.Pointer, ShardMaxLevel),
@@ -88,6 +90,7 @@ func newShardForIngest(changeSet *protos.ShardChangeSet, opt Options, metrics *y
 	shardSnap := changeSet.Snapshot
 	shard := newShard(shardSnap.Properties, changeSet.ShardVer, shardSnap.Start, shardSnap.End, opt, metrics)
 	if changeSet.PreSplit != nil {
+		log.S().Infof("shard %d:%d set pre-split keys by ingest", changeSet.ShardID, changeSet.ShardVer)
 		shard.setSplitKeys(changeSet.PreSplit.Keys)
 	}
 	shard.setSplitState(changeSet.State)
@@ -239,7 +242,7 @@ func (s *Shard) loadL0Tables() *shardL0Tables {
 	return (*shardL0Tables)(atomic.LoadPointer(s.l0s))
 }
 
-func (s *Shard) getSplitKeys(targetSize int64) [][]byte {
+func (s *Shard) getSuggestSplitKeys(targetSize int64) [][]byte {
 	if s.GetEstimatedSize() < targetSize {
 		return nil
 	}
@@ -264,6 +267,13 @@ func (s *Shard) getSplitKeys(targetSize int64) [][]byte {
 		}
 	}
 	return keys
+}
+
+func (s *Shard) GetPreSplitKeys() [][]byte {
+	if s.GetSplitState() == protos.SplitState_INITIAL {
+		return nil
+	}
+	return s.splitKeys
 }
 
 func (s *Shard) Delete() error {
@@ -311,14 +321,34 @@ func (s *Shard) setSplitState(state protos.SplitState) {
 		return
 	}
 	if int32(oldState) > int32(state) {
-		log.Error("shard split state regression")
 		return
 	}
 	atomic.CompareAndSwapInt32(&s.splitState, int32(oldState), int32(state))
+	log.S().Infof("shard %d:%d set split state %s", s.ID, s.Ver, state)
 }
 
 func (s *Shard) RecoverGetProperty(key string) ([]byte, bool) {
 	return s.properties.get(key)
+}
+
+func (s *Shard) markCompacting(b bool) {
+	if b {
+		atomic.StoreInt32(&s.compacting, 1)
+	} else {
+		atomic.StoreInt32(&s.compacting, 0)
+	}
+}
+
+func (s *Shard) isCompacting() bool {
+	return atomic.LoadInt32(&s.compacting) == 1
+}
+
+func (s *Shard) IsInitialFlushed() bool {
+	return atomic.LoadInt32(&s.initialFlushed) == 1
+}
+
+func (s *Shard) setInitialFlushed() {
+	atomic.StoreInt32(&s.initialFlushed, 1)
 }
 
 type shardCF struct {

@@ -17,6 +17,7 @@ type engineTask struct {
 	preSplitTask    *preSplitTask
 	finishSplitTask *finishSplitTask
 	getProperties   *getPropertyTask
+	triggerFlush    *triggerFlushTask
 	notify          chan error
 }
 
@@ -34,8 +35,11 @@ type finishSplitTask struct {
 type getPropertyTask struct {
 	shard  *Shard
 	keys   []string
-	snap   *Snapshot
 	values [][]byte
+}
+
+type triggerFlushTask struct {
+	shard *Shard
 }
 
 func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
@@ -58,6 +62,9 @@ func (sdb *ShardingDB) runWriteLoop(closer *y.Closer) {
 			if task.getProperties != nil {
 				sdb.executeGetPropertiesTask(task)
 			}
+			if task.triggerFlush != nil {
+				sdb.executeTriggerFlushTask(task)
+			}
 		}
 	}
 }
@@ -77,7 +84,7 @@ func (sdb *ShardingDB) collectTasks(c *y.Closer) []engineTask {
 	return engineTasks
 }
 
-func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint64, preSplitFlush bool) {
+func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint64) *memtable.CFTable {
 	newTableSize := sdb.opt.MaxMemTableSize
 	if newTableSize < minSize {
 		newTableSize = minSize
@@ -88,26 +95,13 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint
 		atomicAddMemTable(shard.memTbls, writableMemTbl)
 	}
 	empty := writableMemTbl.Empty()
-	if empty && !preSplitFlush {
-		return
+	if empty {
+		return nil
 	}
-	if !empty {
-		writableMemTbl.SetVersion(commitTS)
-		newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
-		atomicAddMemTable(shard.memTbls, newMemTable)
-	} else {
-		writableMemTbl = nil
-	}
-	if shard.IsPassive() {
-		return
-	}
-	sdb.flushCh <- &shardFlushTask{
-		shard:         shard,
-		tbl:           writableMemTbl,
-		preSplitFlush: preSplitFlush,
-		properties:    shard.properties.toPB(shard.ID),
-		commitTS:      commitTS,
-	}
+	writableMemTbl.SetVersion(commitTS)
+	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
+	atomicAddMemTable(shard.memTbls, newMemTable)
+	return writableMemTbl
 }
 
 func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize int64) {
@@ -141,7 +135,10 @@ func (sdb *ShardingDB) executeWriteTask(eTask engineTask) {
 	}
 	memTbl := shard.loadWritableMemTable()
 	if memTbl == nil || memTbl.Size()+task.estimatedSize > sdb.opt.MaxMemTableSize {
-		sdb.switchMemTable(shard, task.estimatedSize, commitTS, false)
+		oldMemTbl := sdb.switchMemTable(shard, task.estimatedSize, commitTS)
+		if oldMemTbl != nil {
+			sdb.scheduleFlushTask(shard, oldMemTbl, commitTS, false)
+		}
 		memTbl = shard.loadWritableMemTable()
 		// Update the commitTS so that the new memTable has a new commitTS, then
 		// the old commitTS can be used as a snapshot at the memTable-switching time.
@@ -197,6 +194,28 @@ func (sdb *ShardingDB) executeGetPropertiesTask(eTask engineTask) {
 		val, _ := task.shard.properties.get(key)
 		task.values = append(task.values, val)
 	}
-	task.snap = sdb.NewSnapshot(task.shard)
 	eTask.notify <- nil
+}
+
+func (sdb *ShardingDB) executeTriggerFlushTask(eTask engineTask) {
+	task := eTask.triggerFlush
+	shard := task.shard
+	commitTS := sdb.orc.allocTs()
+	// TODO: currently we can not make sure the writable mem-table is only one, will support dynamic mem-table soon.
+	memTbl := sdb.switchMemTable(shard, 0, commitTS)
+	sdb.scheduleFlushTask(shard, memTbl, commitTS, shard.GetSplitState() == protos.SplitState_PRE_SPLIT)
+	sdb.orc.doneCommit(commitTS)
+	eTask.notify <- nil
+}
+
+func (sdb *ShardingDB) scheduleFlushTask(shard *Shard, memTbl *memtable.CFTable, commitTS uint64, preSplitFlush bool) {
+	if !shard.IsPassive() {
+		sdb.flushCh <- &shardFlushTask{
+			shard:         shard,
+			tbl:           memTbl,
+			preSplitFlush: preSplitFlush,
+			properties:    shard.properties.toPB(shard.ID),
+			commitTS:      commitTS,
+		}
+	}
 }

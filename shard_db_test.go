@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/pingcap/badger/protos"
-	"github.com/pingcap/badger/table/memtable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
@@ -251,8 +250,6 @@ func TestMigration(t *testing.T) {
 	opts.IDAllocator = allocator
 	opts.NumCompactors = 2
 	opts.NumLevelZeroTables = 1
-	metaListener := &metaListener{}
-	opts.MetaChangeListener = metaListener
 	opts.CFs = []CFConfig{{Managed: true}, {Managed: false}}
 	db, err := OpenShardingDB(opts)
 	require.NoError(t, err)
@@ -267,22 +264,7 @@ func TestMigration(t *testing.T) {
 	end := 5899
 	sc.loadData(5000, end)
 	time.Sleep(time.Millisecond * 100)
-	shard := db.GetShard(1)
-	snap := db.NewSnapshot(shard)
-	readTS := snap.GetReadTS()
-	require.True(t, readTS > 0)
-	ingestTree := &IngestTree{MaxTS: readTS, LocalPath: dirA}
-	cfTbl := memtable.NewCFTable(opts.MaxMemTableSize, 2)
-	for cf := 0; cf < 2; cf++ {
-		iter := snap.NewDeltaIterator(cf, metaListener.maxCommitTS)
-		for iter.Rewind(); iter.Valid(); iter.Next() {
-			item := iter.Item()
-			val, _ := item.ValueCopy(nil)
-			cfTbl.Put(cf, y.Copy(item.key.UserKey), y.ValueStruct{Value: val, Version: item.Version()})
-		}
-	}
-	snap.Discard()
-	ingestTree.Delta = []*memtable.CFTable{cfTbl}
+	ingestTree := &IngestTree{MaxTS: db.orc.readTs(), LocalPath: dirA}
 	ingestTree.ChangeSet, err = db.manifest.toChangeSet(1)
 	require.Nil(t, err)
 	opts = getTestOptions(dirB)
@@ -294,13 +276,13 @@ func TestMigration(t *testing.T) {
 	require.Nil(t, err)
 	err = dbB.Ingest(ingestTree)
 	require.Nil(t, err)
-	readTS = dbB.orc.readTs()
+	readTS := dbB.orc.readTs()
 	require.True(t, readTS == ingestTree.MaxTS)
 	scB := &shardingCase{
 		t:      t,
 		tester: newShardTester(dbB),
 	}
-	scB.checkData(2500, end)
+	scB.checkData(2500, 5500)
 }
 
 type metaListener struct {
