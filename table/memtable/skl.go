@@ -53,6 +53,7 @@ const (
 )
 
 type node struct {
+	addr arenaAddr
 	// Multiple parts of the value are encoded as a single uint64 so that it
 	// can be atomically loaded and stored:
 	//   value offset: uint32 (bits 0-31)
@@ -60,8 +61,7 @@ type node struct {
 	valueAddr uint64
 
 	// A byte slice is 24 bytes. We are trying to save space here.
-	keyOffset uint32 // Immutable. No need to lock to access key.
-	keySize   uint16 // Immutable. No need to lock to access key.
+	keyAddr arenaAddr // Immutable. No need to lock to access key.
 
 	// Height of the tower.
 	height uint16
@@ -73,7 +73,7 @@ type node struct {
 	// is deliberately truncated to not include unneeded tower elements.
 	//
 	// All accesses to elements should use CAS operations, with no need to lock.
-	tower [maxHeight]uint32
+	tower [maxHeight]uint64
 }
 
 // skiplist maps keys to values (in memory)
@@ -101,19 +101,11 @@ func newNode(a *arena, key []byte, v y.ValueStruct, height int) *node {
 	// The base level is already allocated in the node struct.
 	offset := a.putNode(height)
 	node := a.getNode(offset)
-	node.keyOffset = a.putKey(key)
-	node.keySize = uint16(len(key))
+	node.addr = offset
+	node.keyAddr = a.putKey(key)
 	node.height = uint16(height)
-	node.valueAddr = encodeValueAddr(a.putVal(v), v.EncodedSize())
+	node.valueAddr = uint64(a.putVal(v))
 	return node
-}
-
-func encodeValueAddr(valOffset uint32, valSize uint32) uint64 {
-	return uint64(valSize)<<32 | uint64(valOffset)
-}
-
-func decodeValueAddr(value uint64) (valOffset uint32, valSize uint32) {
-	return uint32(value), uint32(value >> 32)
 }
 
 // newSkiplist makes a new empty skiplist, with a given arena size
@@ -128,50 +120,48 @@ func newSkiplist(arenaSize int64) *skiplist {
 	}
 }
 
-func (n *node) getValueAddr() (uint32, uint32) {
-	value := atomic.LoadUint64(&n.valueAddr)
-	return decodeValueAddr(value)
+func (n *node) getValueAddr() arenaAddr {
+	return arenaAddr(atomic.LoadUint64(&n.valueAddr))
 }
 
 func (n *node) key(arena *arena) []byte {
-	return arena.getKey(n.keyOffset, n.keySize)
+	return arena.getKey(n.keyAddr)
 }
 
 func (n *node) setValue(arena *arena, v y.ValueStruct) {
 	for {
 		oldValueAddr := atomic.LoadUint64(&n.valueAddr)
-		oldValOff, size := n.getValueAddr()
-		if size == 0 {
+		oldValOff := n.getValueAddr()
+		if isValueNodeAddr(oldValOff) {
 			vn := arena.getValueNode(oldValOff)
-			oldValOff, size = decodeValueAddr(vn.valAddr)
+			oldValOff = arenaAddr(vn.valAddr)
 		}
-		oldV := arena.getVal(oldValOff, size)
+		oldV := arena.getVal(oldValOff)
 		if v.Version <= oldV.Version {
 			// Only happens in Restore backup, do nothing.
 			return
 		}
-		newValueOff := arena.putVal(v)
-		newValueAddr := encodeValueAddr(newValueOff, v.EncodedSize())
+		newValueAddr := arena.putVal(v)
 		vn := valueNode{
-			valAddr:     newValueAddr,
+			valAddr:     uint64(newValueAddr),
 			nextValAddr: oldValueAddr,
 		}
-		valueNodeOff := arena.putValueNode(vn)
+		valueNodeAddr := arena.putValueNode(vn)
+		markValueNodeAddr(&valueNodeAddr)
 		// value node has fixed size, so we can use 0 size to represent a value node.
-		valueNodeAddr := encodeValueAddr(valueNodeOff, 0)
-		if !atomic.CompareAndSwapUint64(&n.valueAddr, oldValueAddr, valueNodeAddr) {
+		if !atomic.CompareAndSwapUint64(&n.valueAddr, oldValueAddr, uint64(valueNodeAddr)) {
 			continue
 		}
 		break
 	}
 }
 
-func (n *node) getNextOffset(h int) uint32 {
-	return atomic.LoadUint32(&n.tower[h])
+func (n *node) getNextOffset(h int) arenaAddr {
+	return arenaAddr(atomic.LoadUint64(&n.tower[h]))
 }
 
-func (n *node) casNextOffset(h int, old, val uint32) bool {
-	return atomic.CompareAndSwapUint32(&n.tower[h], old, val)
+func (n *node) casNextOffset(h int, old, val arenaAddr) bool {
+	return atomic.CompareAndSwapUint64(&n.tower[h], uint64(old), uint64(val))
 }
 
 // Returns true if key is strictly > n.key.
@@ -421,7 +411,7 @@ func (s *skiplist) PutWithHint(key []byte, v y.ValueStruct, h *hint) {
 	for i := 0; i < height; i++ {
 		for {
 			nextOffset := s.arena.getNodeOffset(h.next[i])
-			x.tower[i] = nextOffset
+			x.tower[i] = uint64(nextOffset)
 			if h.prev[i].casNextOffset(i, nextOffset, s.arena.getNodeOffset(x)) {
 				// Managed to insert x between prev[i] and next[i]. Go to the next level.
 				break
@@ -471,25 +461,24 @@ func (s *skiplist) GetWithHint(key []byte, version uint64, h *hint) y.ValueStruc
 	if n == nil {
 		return y.ValueStruct{}
 	}
-	nextKey := s.arena.getKey(n.keyOffset, n.keySize)
+	nextKey := s.arena.getKey(n.keyAddr)
 	if !bytes.Equal(key, nextKey) {
 		return y.ValueStruct{}
 	}
-	valOffset, size := n.getValueAddr()
+	valOffset := n.getValueAddr()
 	var v y.ValueStruct
-	for size == 0 {
+	for isValueNodeAddr(valOffset) {
 		vn := s.arena.getValueNode(valOffset)
-		valOffset, size = decodeValueAddr(vn.valAddr)
-		s.arena.fillVal(&v, valOffset, size)
+		s.arena.fillVal(&v, arenaAddr(vn.valAddr))
 		if v.Version <= version {
 			return v
 		}
 		if vn.nextValAddr == 0 {
 			return y.ValueStruct{}
 		}
-		valOffset, size = decodeValueAddr(vn.nextValAddr)
+		valOffset = arenaAddr(vn.nextValAddr)
 	}
-	vs := s.arena.getVal(valOffset, size)
+	vs := s.arena.getVal(valOffset)
 	return vs
 }
 
@@ -527,22 +516,21 @@ func (s *skiplist) Get(key []byte, version uint64) y.ValueStruct {
 		return y.ValueStruct{}
 	}
 
-	nextKey := s.arena.getKey(n.keyOffset, n.keySize)
+	nextKey := s.arena.getKey(n.keyAddr)
 	if !bytes.Equal(key, nextKey) {
 		return y.ValueStruct{}
 	}
-	valOffset, valSize := n.getValueAddr()
+	valOffset := n.getValueAddr()
 	var v y.ValueStruct
-	for valSize == 0 {
+	for isValueNodeAddr(valOffset) {
 		vn := s.arena.getValueNode(valOffset)
-		valOffset, valSize = decodeValueAddr(vn.valAddr)
-		s.arena.fillVal(&v, valOffset, valSize)
+		s.arena.fillVal(&v, arenaAddr(vn.valAddr))
 		if version >= v.Version {
 			return v
 		}
-		valOffset, valSize = decodeValueAddr(vn.nextValAddr)
+		valOffset = arenaAddr(vn.nextValAddr)
 	}
-	s.arena.fillVal(&v, valOffset, valSize)
+	s.arena.fillVal(&v, valOffset)
 	if version >= v.Version {
 		return v
 	}
@@ -653,16 +641,16 @@ func (s *Iterator) loadNode() {
 		s.valListIdx = 0
 	}
 	s.uk = s.n.key(s.list.arena)
-	off, size := s.n.getValueAddr()
-	if size > 0 {
-		s.list.arena.fillVal(&s.v, off, size)
+	off := s.n.getValueAddr()
+	if !isValueNodeAddr(off) {
+		s.list.arena.fillVal(&s.v, off)
 		return
 	}
 	for {
 		vn := s.list.arena.getValueNode(off)
 		s.valList = append(s.valList, vn.valAddr)
-		off, size = decodeValueAddr(vn.nextValAddr)
-		if size != 0 {
+		off = arenaAddr(vn.nextValAddr)
+		if !isValueNodeAddr(off) {
 			s.valList = append(s.valList, vn.nextValAddr)
 			break
 		}
@@ -672,8 +660,8 @@ func (s *Iterator) loadNode() {
 
 func (s *Iterator) setValueListIdx(idx int) {
 	s.valListIdx = idx
-	off, size := decodeValueAddr(s.valList[idx])
-	s.list.arena.fillVal(&s.v, off, size)
+	off := arenaAddr(s.valList[idx])
+	s.list.arena.fillVal(&s.v, off)
 }
 
 // SeekForPrev finds an entry with key <= target.
@@ -694,6 +682,10 @@ func (s *Iterator) SeekToFirst() {
 func (s *Iterator) SeekToLast() {
 	s.n = s.list.findLast()
 	s.loadNode()
+}
+
+func (s *Iterator) Close() error {
+	return nil
 }
 
 // UniIterator is a unidirectional memtable iterator. It is a thin wrapper around
@@ -754,3 +746,5 @@ func (s *UniIterator) FillValue(vs *y.ValueStruct) { s.iter.FillValue(vs) }
 
 // Valid implements y.Interface
 func (s *UniIterator) Valid() bool { return s.iter.Valid() }
+
+func (s *UniIterator) Close() error { return s.iter.Close() }

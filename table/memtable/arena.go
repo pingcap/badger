@@ -25,19 +25,15 @@ import (
 )
 
 const (
-	offsetSize = int(unsafe.Sizeof(uint32(0)))
+	offsetSize = int(unsafe.Sizeof(uint64(0)))
 
-	// Always align nodes on 64-bit boundaries, even on 32-bit architectures,
-	// so that the node.value field is 64-bit aligned. This is necessary because
-	// node.getValueAddr uses atomic.LoadUint64, which expects its input
-	// pointer to be 64-bit aligned.
-	nodeAlign = int(unsafe.Sizeof(uint64(0))) - 1
+	valueNodeShift uint64 = 63
+	valueNodeMask  uint64 = 1 << valueNodeShift
 )
 
 // Arena should be lock-free.
 type arena struct {
-	n   uint32
-	buf []byte
+	arenaPtr unsafe.Pointer
 }
 
 // newArena returns a new arena.
@@ -45,93 +41,106 @@ func newArena(n int64) *arena {
 	// Don't store data at position 0 in order to reserve offset=0 as a kind
 	// of nil pointer.
 	out := &arena{
-		n:   1,
-		buf: make([]byte, n),
+		arenaPtr: unsafe.Pointer(newArenaLocator()),
 	}
 	return out
 }
 
+func (s *arena) getArenaLocator() *arenaLocator {
+	return (*arenaLocator)(atomic.LoadPointer(&s.arenaPtr))
+}
+
+func (s *arena) setArenaLocator(al *arenaLocator) {
+	atomic.StorePointer(&s.arenaPtr, unsafe.Pointer(al))
+}
+
+func (s *arena) alloc(size int) arenaAddr {
+	al := s.getArenaLocator()
+	addr := al.alloc(size)
+	if addr == nullArenaAddr {
+		al = al.grow()
+		s.setArenaLocator(al)
+		// The new arena block must have enough memory to alloc.
+		addr = al.alloc(size)
+	}
+	return addr
+}
+
+func (s *arena) get(addr arenaAddr) []byte {
+	al := s.getArenaLocator()
+	return al.blocks[addr.blockIdx()].get(addr.blockOffset(), addr.size())
+}
+
 func (s *arena) size() int64 {
-	return int64(atomic.LoadUint32(&s.n))
+	al := s.getArenaLocator()
+	return int64(len(al.blocks) * al.blockSize)
 }
 
 func (s *arena) reset() {
-	atomic.StoreUint32(&s.n, 0)
 }
 
 // putNode allocates a node in the arena. The node is aligned on a pointer-sized
 // boundary. The arena offset of the node is returned.
-func (s *arena) putNode(height int) uint32 {
+func (s *arena) putNode(height int) arenaAddr {
 	// Compute the amount of the tower that will never be used, since the height
 	// is less than maxHeight.
 	unusedSize := (maxHeight - height) * offsetSize
 
-	// Pad the allocation with enough bytes to ensure pointer alignment.
-	l := uint32(MaxNodeSize - unusedSize + nodeAlign)
-	n := atomic.AddUint32(&s.n, l)
-	y.Assert(int(n) <= len(s.buf))
-
-	// Return the aligned offset.
-	m := (n - l + uint32(nodeAlign)) & ^uint32(nodeAlign)
-	return m
+	nodeSize := uint32(MaxNodeSize - unusedSize)
+	return s.alloc(int(nodeSize))
 }
 
 // Put will *copy* val into arena. To make better use of this, reuse your input
 // val buffer. Returns an offset into buf. User is responsible for remembering
 // size of val. We could also store this size inside arena but the encoding and
 // decoding will incur some overhead.
-func (s *arena) putVal(v y.ValueStruct) uint32 {
-	l := v.EncodedSize()
-	n := atomic.AddUint32(&s.n, l)
-	y.AssertTruef(int(n) <= len(s.buf), "n:%d, l:%d", n, len(s.buf))
-	m := n - l
-	v.Encode(s.buf[m:])
-	return m
+func (s *arena) putVal(v y.ValueStruct) arenaAddr {
+	size := v.EncodedSize()
+	addr := s.alloc(int(size))
+	v.Encode(s.get(addr))
+	return addr
 }
 
-func (s *arena) putKey(key []byte) uint32 {
-	l := uint32(len(key))
-	n := atomic.AddUint32(&s.n, l)
-	y.Assert(int(n) <= len(s.buf))
-	m := n - l
-	copy(s.buf[m:], key)
-	return m
+func (s *arena) putKey(key []byte) arenaAddr {
+	size := uint32(len(key))
+	addr := s.alloc(int(size))
+	copy(s.get(addr), key)
+	return addr
 }
 
 // getNode returns a pointer to the node located at offset. If the offset is
 // zero, then the nil node pointer is returned.
-func (s *arena) getNode(offset uint32) *node {
+func (s *arena) getNode(offset arenaAddr) *node {
 	if offset == 0 {
 		return nil
 	}
-
-	return (*node)(unsafe.Pointer(&s.buf[offset]))
+	data := s.get(offset)
+	return (*node)(unsafe.Pointer(&data[0]))
 }
 
 // getKey returns byte slice at offset.
-func (s *arena) getKey(offset uint32, size uint16) (k []byte) {
-	return s.buf[offset : offset+uint32(size)]
+func (s *arena) getKey(addr arenaAddr) (k []byte) {
+	return s.get(addr)
 }
 
 // getVal returns byte slice at offset. The given size should be just the value
 // size and should NOT include the meta bytes.
-func (s *arena) getVal(offset uint32, size uint32) (ret y.ValueStruct) {
-	ret.Decode(s.buf[offset : offset+size])
+func (s *arena) getVal(addr arenaAddr) (ret y.ValueStruct) {
+	ret.Decode(s.get(addr))
 	return
 }
 
-func (s *arena) fillVal(vs *y.ValueStruct, offset uint32, size uint32) {
-	vs.Decode(s.buf[offset : offset+size])
+func (s *arena) fillVal(vs *y.ValueStruct, addr arenaAddr) {
+	vs.Decode(s.get(addr))
 }
 
 // getNodeOffset returns the offset of node in the arena. If the node pointer is
 // nil, then the zero offset is returned.
-func (s *arena) getNodeOffset(nd *node) uint32 {
+func (s *arena) getNodeOffset(nd *node) arenaAddr {
 	if nd == nil {
 		return 0
 	}
-
-	return uint32(uintptr(unsafe.Pointer(nd)) - uintptr(unsafe.Pointer(&s.buf[0])))
+	return nd.addr
 }
 
 const valueNodeSize = uint32(unsafe.Sizeof(valueNode{}))
@@ -154,16 +163,22 @@ func (vn *valueNode) decode(b []byte) {
 	vn.nextValAddr = binary.LittleEndian.Uint64(b[8:])
 }
 
-func (s *arena) putValueNode(vn valueNode) uint32 {
-	n := atomic.AddUint32(&s.n, valueNodeSize)
-	y.Assert(int(n) <= len(s.buf))
-	m := n - valueNodeSize
-	vn.encode(s.buf[m:])
-	return m
+func (s *arena) putValueNode(vn valueNode) arenaAddr {
+	addr := s.alloc(int(valueNodeSize))
+	vn.encode(s.get(addr))
+	return addr
 }
 
-func (s *arena) getValueNode(offset uint32) valueNode {
+func (s *arena) getValueNode(addr arenaAddr) valueNode {
 	var vl valueNode
-	vl.decode(s.buf[offset : offset+valueNodeSize])
+	vl.decode(s.get(addr))
 	return vl
+}
+
+func markValueNodeAddr(addr *arenaAddr) {
+	*addr = arenaAddr(1<<valueNodeShift | uint64(*addr))
+}
+
+func isValueNodeAddr(addr arenaAddr) bool {
+	return uint64(addr)&valueNodeMask>>valueNodeShift == 1
 }
