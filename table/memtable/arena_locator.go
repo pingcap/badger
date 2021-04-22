@@ -48,8 +48,8 @@ const (
 
 	sizeMask = -1 ^ -1<<24
 
-	blockSize        = 1<<24 - 1
-	alignedBlockSize = (blockSize + blockAlign) & alignMask
+	maxSize   = 1<<24 - 1
+	blockSize = 1 << 23
 )
 
 func (addr arenaAddr) blockIdx() int {
@@ -82,8 +82,8 @@ type pendingBlock struct {
 
 func newArenaLocator() *arenaLocator {
 	return &arenaLocator{
-		blockSize:     alignedBlockSize,
-		blocks:        []*arenaBlock{newArenaBlock(alignedBlockSize)},
+		blockSize:     blockSize,
+		blocks:        []*arenaBlock{newArenaBlock(blockSize)},
 		writableQueue: []int{0},
 	}
 }
@@ -96,6 +96,9 @@ func (a *arenaLocator) get(addr arenaAddr) []byte {
 }
 
 func (a *arenaLocator) alloc(size int) arenaAddr {
+	if size > maxSize {
+		panic("size too big")
+	}
 	for {
 		if len(a.writableQueue) == 0 {
 			if len(a.pendingBlocks) > 0 {
