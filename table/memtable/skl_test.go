@@ -114,7 +114,8 @@ func TestBasic(t *testing.T) {
 }
 
 // TestConcurrentBasic tests concurrent writes followed by concurrent reads.
-func TestConcurrentBasic(t *testing.T) {
+// The concurrent write operation is not supported.
+func testConcurrentBasic(t *testing.T) {
 	const n = 1000
 	l := newSkiplist(arenaSize)
 	var wg sync.WaitGroup
@@ -416,6 +417,20 @@ func TestPutLargeValue(t *testing.T) {
 	l.Put(key, y.ValueStruct{Value: val})
 	result := l.Get(key, 0)
 	require.Equal(t, val, result.Value)
+}
+
+func TestMemoryGrow(t *testing.T) {
+	l := newSkiplist(arenaSize)
+	for size := 0; size < 2*blockSize; {
+		key := randomKey()
+		val := make([]byte, 128*1024)
+		vs := y.ValueStruct{Value: val}
+		l.Put(key, vs)
+		result := l.Get(key, 0)
+		require.Equal(t, val, result.Value)
+		size += len(key) + int(vs.EncodedSize())
+	}
+	require.True(t, true, l.MemSize() > blockSize)
 }
 
 func key(prefix string, i int) string {
