@@ -114,7 +114,8 @@ func TestBasic(t *testing.T) {
 }
 
 // TestConcurrentBasic tests concurrent writes followed by concurrent reads.
-func TestConcurrentBasic(t *testing.T) {
+// The concurrent write operation is not supported.
+func testConcurrentBasic(t *testing.T) {
 	const n = 1000
 	l := newSkiplist(arenaSize)
 	var wg sync.WaitGroup
