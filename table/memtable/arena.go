@@ -27,6 +27,11 @@ import (
 const (
 	offsetSize = int(unsafe.Sizeof(uint64(0)))
 
+	// Always align nodes on 64-bit boundaries, even on 32-bit architectures,
+	// so that the node.value field is 64-bit aligned. This is necessary because
+	// node.getValueAddr uses atomic.LoadUint64, which expects its input
+	// pointer to be 64-bit aligned.
+	nodeAlign             = int(unsafe.Sizeof(uint64(0))) - 1
 	valueNodeShift uint64 = 63
 	valueNodeMask  uint64 = 1 << valueNodeShift
 )
@@ -102,8 +107,8 @@ func (s *arena) putVal(v y.ValueStruct) arenaAddr {
 }
 
 func (s *arena) putKey(key []byte) arenaAddr {
-	size := uint32(len(key))
-	addr := s.alloc(int(size))
+	size := len(key)
+	addr := s.alloc(size)
 	copy(s.get(addr), key)
 	return addr
 }

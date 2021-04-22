@@ -148,7 +148,6 @@ func (n *node) setValue(arena *arena, v y.ValueStruct) {
 		}
 		valueNodeAddr := arena.putValueNode(vn)
 		markValueNodeAddr(&valueNodeAddr)
-		// value node has fixed size, so we can use 0 size to represent a value node.
 		if !atomic.CompareAndSwapUint64(&n.valueAddr, oldValueAddr, uint64(valueNodeAddr)) {
 			continue
 		}

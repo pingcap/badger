@@ -24,13 +24,7 @@ import (
 type arenaAddr uint64
 
 const (
-
-	// Always align nodes on 64-bit boundaries, even on 32-bit architectures,
-	// so that the node.value field is 64-bit aligned. This is necessary because
-	// node.getValueAddr uses atomic.LoadUint64, which expects its input
-	// pointer to be 64-bit aligned.
-	nodeAlign = int(unsafe.Sizeof(uint64(0))) - 1
-
+	blockAlign                = int(unsafe.Sizeof(uint64(0))) - 1
 	alignMask                 = 1<<32 - int(unsafe.Sizeof(uint64(0))) // 29 bit 1 and 3 bit 0.
 	nullBlockOffset           = math.MaxUint32
 	nullArenaAddr   arenaAddr = 0
@@ -54,7 +48,8 @@ const (
 
 	sizeMask = -1 ^ -1<<24
 
-	blockSize = 1<<24 - 1
+	blockSize        = 1<<24 - 1
+	alignedBlockSize = (blockSize + blockAlign) & alignMask
 )
 
 func (addr arenaAddr) blockIdx() int {
@@ -87,8 +82,8 @@ type pendingBlock struct {
 
 func newArenaLocator() *arenaLocator {
 	return &arenaLocator{
-		blockSize:     blockSize,
-		blocks:        []*arenaBlock{newArenaBlock(blockSize)},
+		blockSize:     alignedBlockSize,
+		blocks:        []*arenaBlock{newArenaBlock(alignedBlockSize)},
 		writableQueue: []int{0},
 	}
 }
@@ -173,7 +168,7 @@ func (a *arenaBlock) get(offset uint32, size int) []byte {
 
 func (a *arenaBlock) alloc(size int) uint32 {
 	// The returned addr should be aligned in 8 bytes.
-	offset := (a.length + nodeAlign) & alignMask
+	offset := (a.length + blockAlign) & alignMask
 	a.length = offset + size
 	if a.length > len(a.buf) {
 		return nullBlockOffset
