@@ -132,7 +132,7 @@ func (n *node) setValue(arena *arena, v y.ValueStruct) {
 	for {
 		oldValueAddr := atomic.LoadUint64(&n.valueAddr)
 		oldValOff := n.getValueAddr()
-		if isValueNodeAddr(oldValOff) {
+		if oldValOff.isValueNodeAddr() {
 			vn := arena.getValueNode(oldValOff)
 			oldValOff = arenaAddr(vn.valAddr)
 		}
@@ -147,7 +147,6 @@ func (n *node) setValue(arena *arena, v y.ValueStruct) {
 			nextValAddr: oldValueAddr,
 		}
 		valueNodeAddr := arena.putValueNode(vn)
-		markValueNodeAddr(&valueNodeAddr)
 		if !atomic.CompareAndSwapUint64(&n.valueAddr, oldValueAddr, uint64(valueNodeAddr)) {
 			continue
 		}
@@ -466,7 +465,7 @@ func (s *skiplist) GetWithHint(key []byte, version uint64, h *hint) y.ValueStruc
 	}
 	valOffset := n.getValueAddr()
 	var v y.ValueStruct
-	for isValueNodeAddr(valOffset) {
+	for valOffset.isValueNodeAddr() {
 		vn := s.arena.getValueNode(valOffset)
 		s.arena.fillVal(&v, arenaAddr(vn.valAddr))
 		if v.Version <= version {
@@ -521,7 +520,7 @@ func (s *skiplist) Get(key []byte, version uint64) y.ValueStruct {
 	}
 	valOffset := n.getValueAddr()
 	var v y.ValueStruct
-	for isValueNodeAddr(valOffset) {
+	for valOffset.isValueNodeAddr() {
 		vn := s.arena.getValueNode(valOffset)
 		s.arena.fillVal(&v, arenaAddr(vn.valAddr))
 		if version >= v.Version {
@@ -641,7 +640,7 @@ func (s *Iterator) loadNode() {
 	}
 	s.uk = s.n.key(s.list.arena)
 	off := s.n.getValueAddr()
-	if !isValueNodeAddr(off) {
+	if !off.isValueNodeAddr() {
 		s.list.arena.fillVal(&s.v, off)
 		return
 	}
@@ -649,7 +648,7 @@ func (s *Iterator) loadNode() {
 		vn := s.list.arena.getValueNode(off)
 		s.valList = append(s.valList, vn.valAddr)
 		off = arenaAddr(vn.nextValAddr)
-		if !isValueNodeAddr(off) {
+		if !off.isValueNodeAddr() {
 			s.valList = append(s.valList, vn.nextValAddr)
 			break
 		}

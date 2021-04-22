@@ -28,13 +28,11 @@ const (
 	nullBlockOffset           = math.MaxUint32
 	nullArenaAddr   arenaAddr = 0
 
-	blockIdxShift uint64 = 48
-	blockIdxMask  uint64 = -1 ^ -1<<15<<blockIdxShift
-
+	blockIdxShift    uint64 = 48
+	blockIdxMask     uint64 = 0x7fff000000000000
 	blockOffsetShift uint64 = 24
-	blockOffsetMask  uint64 = -1 ^ -1<<24<<blockOffsetShift
-
-	sizeMask = -1 ^ -1<<24
+	blockOffsetMask  uint64 = 0x0000ffffff000000
+	sizeMask         uint64 = 0x0000000000ffffff
 
 	maxSize   = 1<<24 - 1
 	blockSize = 1 << 23
@@ -127,9 +125,10 @@ func (a *arenaBlock) get(offset uint32, size int) []byte {
 func (a *arenaBlock) alloc(size int) uint32 {
 	// The returned addr should be aligned in 8 bytes.
 	offset := (a.length + blockAlign) & alignMask
-	a.length = offset + size
-	if a.length > len(a.buf) {
+	length := offset + size
+	if length > len(a.buf) {
 		return nullBlockOffset
 	}
+	a.length = length
 	return uint32(offset)
 }

@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	offsetSize = int(unsafe.Sizeof(uint64(0)))
+	offsetSize = int(unsafe.Sizeof(arenaAddr(0)))
 
 	// Always align nodes on 64-bit boundaries, even on 32-bit architectures,
 	// so that the node.value field is 64-bit aligned. This is necessary because
@@ -33,7 +33,7 @@ const (
 	// pointer to be 64-bit aligned.
 	nodeAlign             = int(unsafe.Sizeof(uint64(0))) - 1
 	valueNodeShift uint64 = 63
-	valueNodeMask  uint64 = 1 << valueNodeShift
+	valueNodeMask  uint64 = 0x8000000000000000
 )
 
 // Arena should be lock-free.
@@ -171,6 +171,7 @@ func (vn *valueNode) decode(b []byte) {
 func (s *arena) putValueNode(vn valueNode) arenaAddr {
 	addr := s.alloc(int(valueNodeSize))
 	vn.encode(s.get(addr))
+	addr.markValueNodeAddr()
 	return addr
 }
 
@@ -180,10 +181,10 @@ func (s *arena) getValueNode(addr arenaAddr) valueNode {
 	return vl
 }
 
-func markValueNodeAddr(addr *arenaAddr) {
+func (addr *arenaAddr) markValueNodeAddr() {
 	*addr = arenaAddr(1<<valueNodeShift | uint64(*addr))
 }
 
-func isValueNodeAddr(addr arenaAddr) bool {
-	return uint64(addr)&valueNodeMask>>valueNodeShift == 1
+func (addr arenaAddr) isValueNodeAddr() bool {
+	return uint64(addr)&valueNodeMask != 0
 }
