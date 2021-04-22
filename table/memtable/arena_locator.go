@@ -57,16 +57,14 @@ func newArenaAddr(blockIdx int, blockOffset uint32, size int) arenaAddr {
 }
 
 type arenaLocator struct {
-	blockSize     int
-	blocks        []*arenaBlock
-	writableQueue []int
+	blockSize int
+	blocks    []*arenaBlock
 }
 
 func newArenaLocator() *arenaLocator {
 	return &arenaLocator{
-		blockSize:     blockSize,
-		blocks:        []*arenaBlock{newArenaBlock(blockSize)},
-		writableQueue: []int{0},
+		blockSize: blockSize,
+		blocks:    []*arenaBlock{newArenaBlock(blockSize)},
 	}
 }
 
@@ -89,16 +87,13 @@ func (a *arenaLocator) alloc(size int) arenaAddr {
 		panic("size too big")
 	}
 	for {
-		if len(a.writableQueue) == 0 {
-			return nullArenaAddr
-		}
-		availIdx := a.writableQueue[len(a.writableQueue)-1]
-		block := a.blocks[availIdx]
+		idx := len(a.blocks) - 1
+		block := a.blocks[idx]
 		blockOffset := block.alloc(size)
 		if blockOffset != nullBlockOffset {
-			return newArenaAddr(availIdx, blockOffset, size)
+			return newArenaAddr(idx, blockOffset, size)
 		}
-		a.writableQueue = a.writableQueue[:len(a.writableQueue)-1]
+		return nullArenaAddr
 	}
 }
 
@@ -107,9 +102,7 @@ func (a *arenaLocator) grow() *arenaLocator {
 	newLoc.blockSize = a.blockSize
 	newLoc.blocks = make([]*arenaBlock, 0, len(a.blocks)+1)
 	newLoc.blocks = append(newLoc.blocks, a.blocks...)
-	availIdx := len(newLoc.blocks)
 	newLoc.blocks = append(newLoc.blocks, newArenaBlock(a.blockSize))
-	newLoc.writableQueue = append(newLoc.writableQueue, availIdx)
 	return newLoc
 }
 
