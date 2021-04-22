@@ -31,9 +31,7 @@ const (
 	// so that the node.value field is 64-bit aligned. This is necessary because
 	// node.getValueAddr uses atomic.LoadUint64, which expects its input
 	// pointer to be 64-bit aligned.
-	nodeAlign             = int(unsafe.Sizeof(uint64(0))) - 1
-	valueNodeShift uint64 = 63
-	valueNodeMask  uint64 = 0x8000000000000000
+	nodeAlign = int(unsafe.Sizeof(uint64(0))) - 1
 )
 
 // Arena should be lock-free.
@@ -179,12 +177,4 @@ func (s *arena) getValueNode(addr arenaAddr) valueNode {
 	var vl valueNode
 	vl.decode(s.get(addr))
 	return vl
-}
-
-func (addr *arenaAddr) markValueNodeAddr() {
-	*addr = arenaAddr(1<<valueNodeShift | uint64(*addr))
-}
-
-func (addr arenaAddr) isValueNodeAddr() bool {
-	return uint64(addr)&valueNodeMask != 0
 }

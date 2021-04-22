@@ -28,6 +28,8 @@ const (
 	nullBlockOffset           = math.MaxUint32
 	nullArenaAddr   arenaAddr = 0
 
+	valueNodeShift   uint64 = 63
+	valueNodeMask    uint64 = 0x8000000000000000
 	blockIdxShift    uint64 = 48
 	blockIdxMask     uint64 = 0x7fff000000000000
 	blockOffsetShift uint64 = 24
@@ -48,6 +50,14 @@ func (addr arenaAddr) blockOffset() uint32 {
 
 func (addr arenaAddr) size() int {
 	return int(uint64(addr) & sizeMask)
+}
+
+func (addr *arenaAddr) markValueNodeAddr() {
+	*addr = arenaAddr(1<<valueNodeShift | uint64(*addr))
+}
+
+func (addr arenaAddr) isValueNodeAddr() bool {
+	return uint64(addr)&valueNodeMask != 0
 }
 
 func newArenaAddr(blockIdx int, blockOffset uint32, size int) arenaAddr {
