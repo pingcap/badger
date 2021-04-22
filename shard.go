@@ -380,11 +380,23 @@ func (scf *shardCF) setHasOverlapping(cd *CompactDef) {
 }
 
 type deletions struct {
-	resources []epoch.Resource
+	resources map[uint64]epoch.Resource
 }
 
-func (d *deletions) Append(res epoch.Resource) {
-	d.resources = append(d.resources, res)
+func (d *deletions) add(fid uint64, res epoch.Resource) {
+	d.resources[fid] = res
+}
+
+func (d *deletions) remove(fid uint64) {
+	delete(d.resources, fid)
+}
+
+func (d *deletions) collect() []epoch.Resource {
+	resources := make([]epoch.Resource, 0, len(d.resources))
+	for _, res := range d.resources {
+		resources = append(resources, res)
+	}
+	return resources
 }
 
 type shardProperties struct {

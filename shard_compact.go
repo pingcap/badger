@@ -612,7 +612,7 @@ func (sdb *ShardingDB) applyCompaction(shard *Shard, changeSet *protos.ShardChan
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
 		return err
 	}
-	del := new(deletions)
+	del := &deletions{resources: map[uint64]epoch.Resource{}}
 	if comp.Level == 0 {
 		for cf := 0; cf < sdb.numCFs; cf++ {
 			err := sdb.compactionUpdateLevelHandler(shard, cf, 1, comp.TableCreates, comp.BottomDeletes, del)
@@ -622,16 +622,20 @@ func (sdb *ShardingDB) applyCompaction(shard *Shard, changeSet *protos.ShardChan
 		}
 		shard.addEstimatedSize(-atomicRemoveL0(shard, len(comp.TopDeletes)))
 	} else {
-		err := sdb.compactionUpdateLevelHandler(shard, int(comp.Cf), int(comp.Level), comp.TableCreates, comp.BottomDeletes, del)
+		err := sdb.compactionUpdateLevelHandler(shard, int(comp.Cf), int(comp.Level), nil, comp.TopDeletes, del)
 		if err != nil {
 			return err
 		}
-		err = sdb.compactionUpdateLevelHandler(shard, int(comp.Cf), int(comp.Level+1), nil, comp.TopDeletes, del)
+		// For move down operation, the TableCreates may contains TopDeletes, we don't want to delete them.
+		for _, create := range comp.TableCreates {
+			del.remove(create.ID)
+		}
+		err = sdb.compactionUpdateLevelHandler(shard, int(comp.Cf), int(comp.Level+1), comp.TableCreates, comp.BottomDeletes, del)
 		if err != nil {
 			return err
 		}
 	}
-	guard.Delete(del.resources)
+	guard.Delete(del.collect())
 	return nil
 }
 
@@ -653,12 +657,14 @@ func (sdb *ShardingDB) compactionUpdateLevelHandler(shard *Shard, cf, level int,
 	}
 	for _, oldTbl := range oldLevel.tables {
 		if containsUint64(delIDs, oldTbl.ID()) {
-			del.Append(oldTbl)
+			del.add(oldTbl.ID(), oldTbl)
 		} else {
 			newLevel.tables = append(newLevel.tables, oldTbl)
 			newLevel.totalSize += oldTbl.Size()
 		}
 	}
+	sortTables(newLevel.tables)
+	assertTablesOrder(level, newLevel.tables, nil)
 	shard.cfs[cf].casLevelHandler(level, oldLevel, newLevel)
 	shard.addEstimatedSize(newLevel.totalSize - oldLevel.totalSize)
 	return nil
@@ -687,7 +693,7 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 	}
 	oldL0s := shard.loadL0Tables()
 	newL0Tbls := &shardL0Tables{make([]*shardL0Table, 0, len(oldL0s.tables)*2)}
-	del := new(deletions)
+	del := &deletions{resources: map[uint64]epoch.Resource{}}
 	for _, l0 := range splitFiles.L0Creates {
 		filename := sstable.NewFilename(l0.ID, sdb.opt.Dir)
 		tbl, err := openShardL0Table(filename, l0.ID)
@@ -698,7 +704,7 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 	}
 	for _, oldL0 := range oldL0s.tables {
 		if containsUint64(splitFiles.TableDeletes, oldL0.fid) {
-			del.Append(oldL0)
+			del.add(oldL0.fid, oldL0)
 		} else {
 			newL0Tbls.tables = append(newL0Tbls.tables, oldL0)
 		}
@@ -733,7 +739,7 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 			oldHandler := shard.cfs[cf].getLevelHandler(level)
 			for _, oldTbl := range oldHandler.tables {
 				if containsUint64(splitFiles.TableDeletes, oldTbl.ID()) {
-					del.Append(oldTbl)
+					del.add(oldTbl.ID(), oldTbl)
 				} else {
 					newHandler.tables = append(newHandler.tables, oldTbl)
 				}
@@ -745,7 +751,7 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 		}
 	}
 	shard.setSplitState(changeSet.State)
-	guard.Delete(del.resources)
+	guard.Delete(del.collect())
 	return nil
 }
 

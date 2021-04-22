@@ -130,7 +130,7 @@ func assertTablesOrder(level int, tables []table.Table, cd *CompactDef) {
 				if idx == i {
 					tag = "->"
 				}
-				fmt.Fprintf(&sb, "%s %v %v\n", tag, tbl.Smallest(), tbl.Biggest())
+				fmt.Fprintf(&sb, "%s id:%d smallest:%v biggest:%v\n", tag, tbl.ID(), tbl.Smallest(), tbl.Biggest())
 			}
 			panic(sb.String())
 		}
