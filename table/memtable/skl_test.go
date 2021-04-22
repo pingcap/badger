@@ -418,6 +418,20 @@ func TestPutLargeValue(t *testing.T) {
 	require.Equal(t, val, result.Value)
 }
 
+func TestMemoryGrow(t *testing.T) {
+	l := newSkiplist(arenaSize)
+	for size := 0; size < 2*blockSize; {
+		key := randomKey()
+		val := make([]byte, 128*1024)
+		vs := y.ValueStruct{Value: val}
+		l.Put(key, vs)
+		result := l.Get(key, 0)
+		require.Equal(t, val, result.Value)
+		size += len(key) + int(vs.EncodedSize())
+	}
+	require.True(t, true, l.MemSize() > blockSize)
+}
+
 func key(prefix string, i int) string {
 	return prefix + fmt.Sprintf("%04d", i)
 }
