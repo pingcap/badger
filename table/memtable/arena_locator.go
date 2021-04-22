@@ -95,8 +95,15 @@ func (a *arenaLocator) get(addr arenaAddr) []byte {
 	return a.blocks[addr.blockIdx()].get(addr.blockOffset(), addr.size())
 }
 
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func (a *arenaLocator) alloc(size int) arenaAddr {
-	if size > maxSize {
+	if size > min(a.blockSize, maxSize) {
 		panic("size too big")
 	}
 	for {
