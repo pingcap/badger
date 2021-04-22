@@ -15,7 +15,6 @@ package memtable
 
 import (
 	"math"
-	"time"
 	"unsafe"
 
 	"github.com/pingcap/log"
@@ -28,17 +27,6 @@ const (
 	alignMask                 = 1<<32 - int(unsafe.Sizeof(uint64(0))) // 29 bit 1 and 3 bit 0.
 	nullBlockOffset           = math.MaxUint32
 	nullArenaAddr   arenaAddr = 0
-
-	// Time waited until we reuse the empty block.
-	// Data corruption can happen under this time sequence.
-	// 1. a reader reads a node.
-	// 2. a writer delete the node, then free the block, put it into the writable queue
-	// 	and this block become the first writable block.
-	// 3. The writer insert another node, overwrite the block we just freed.
-	// 4. The reader reads the key/value of that delete node.
-	// But because the time between 1 and 4 is very short, this is very unlikely to happen but it can happen.
-	// So we wait for a while so the reader can finish reading before we overwrite the empty block.
-	reuseSafeDuration = time.Millisecond * 100
 
 	blockIdxShift uint64 = 48
 	blockIdxMask  uint64 = -1 ^ -1<<15<<blockIdxShift
@@ -72,12 +60,6 @@ type arenaLocator struct {
 	blockSize     int
 	blocks        []*arenaBlock
 	writableQueue []int
-	pendingBlocks []pendingBlock
-}
-
-type pendingBlock struct {
-	blockIdx     int
-	reusableTime time.Time
 }
 
 func newArenaLocator() *arenaLocator {
@@ -108,14 +90,6 @@ func (a *arenaLocator) alloc(size int) arenaAddr {
 	}
 	for {
 		if len(a.writableQueue) == 0 {
-			if len(a.pendingBlocks) > 0 {
-				pending := a.pendingBlocks[0]
-				if time.Now().After(pending.reusableTime) {
-					a.writableQueue = append(a.writableQueue, pending.blockIdx)
-					a.pendingBlocks = a.pendingBlocks[1:]
-					continue
-				}
-			}
 			return nullArenaAddr
 		}
 		availIdx := a.writableQueue[len(a.writableQueue)-1]
@@ -128,23 +102,6 @@ func (a *arenaLocator) alloc(size int) arenaAddr {
 	}
 }
 
-// free decrease the arena block reference and makes the block reusable.
-// We don't know if there is concurrent reader who may reference the deleted entry.
-// So we must make sure the old data is not referenced for long time, and we only overwrite
-// it after a safe amount of time.
-func (a *arenaLocator) free(addr arenaAddr) {
-	arena := a.blocks[addr.blockIdx()]
-	arena.ref--
-	// No reference, the arenaBlock can be reused.
-	if arena.ref == 0 && arena.length > len(arena.buf) {
-		a.pendingBlocks = append(a.pendingBlocks, pendingBlock{
-			blockIdx:     addr.blockIdx(),
-			reusableTime: time.Now().Add(reuseSafeDuration),
-		})
-		arena.length = 0
-	}
-}
-
 func (a *arenaLocator) grow() *arenaLocator {
 	newLoc := new(arenaLocator)
 	newLoc.blockSize = a.blockSize
@@ -153,13 +110,11 @@ func (a *arenaLocator) grow() *arenaLocator {
 	availIdx := len(newLoc.blocks)
 	newLoc.blocks = append(newLoc.blocks, newArenaBlock(a.blockSize))
 	newLoc.writableQueue = append(newLoc.writableQueue, availIdx)
-	newLoc.pendingBlocks = a.pendingBlocks
 	return newLoc
 }
 
 type arenaBlock struct {
 	buf    []byte
-	ref    uint64
 	length int
 }
 
@@ -183,6 +138,5 @@ func (a *arenaBlock) alloc(size int) uint32 {
 	if a.length > len(a.buf) {
 		return nullBlockOffset
 	}
-	a.ref++
 	return uint32(offset)
 }
