@@ -135,7 +135,7 @@ func (a *arenaBlock) get(offset uint32, size int) []byte {
 
 func (a *arenaBlock) alloc(size int) uint32 {
 	// The returned addr should be aligned in 8 bytes.
-	offset := (int(a.length) + blockAlign) & alignMask
+	offset := (int(atomic.LoadUint32(&a.length)) + blockAlign) & alignMask
 	length := offset + size
 	if length > len(a.buf) {
 		return nullBlockOffset
