@@ -17,7 +17,7 @@ import (
 // The manifest file is used to restore the tree
 type ShardingManifest struct {
 	dir         string
-	shards      map[uint64]*ShardInfo
+	shards      map[uint64]*ShardMeta
 	globalFiles map[uint64]fileMeta
 	lastID      uint64
 	dataVersion uint64
@@ -32,22 +32,27 @@ type ShardingManifest struct {
 	orc                       *oracle
 }
 
-type ShardInfo struct {
+type ShardMeta struct {
 	ID    uint64
 	Ver   uint64
 	Start []byte
 	End   []byte
 	// fid -> level
-	files map[uint64]struct{}
-	// properties in ShardInfo is only updated on every mem-table flush, it's different than properties in the shard
+	files map[uint64]int
+	// properties in ShardMeta is only updated on every mem-table flush, it's different than properties in the shard
 	// which is updated on every write operation.
 	properties *shardProperties
 	preSplit   *protos.ShardPreSplit
 	split      *protos.ShardSplit
 	splitState protos.SplitState
 	commitTS   uint64
-	parent     *ShardInfo
+	parent     *ShardMeta
 	recovered  bool
+}
+
+func (si *ShardMeta) FileLevel(fid uint64) (int, bool) {
+	level, ok := si.files[fid]
+	return level, ok
 }
 
 // ShardLevel is the struct that contains shard id and level id,
@@ -67,7 +72,7 @@ func OpenShardingManifest(dir string) (*ShardingManifest, error) {
 		}
 		m := &ShardingManifest{
 			dir:         dir,
-			shards:      map[uint64]*ShardInfo{},
+			shards:      map[uint64]*ShardMeta{},
 			lastID:      1,
 			globalFiles: map[uint64]fileMeta{},
 		}
@@ -199,7 +204,7 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
 		m.applyFlush(cs, shardInfo)
 		if cs.State == protos.SplitState_PRE_SPLIT_FLUSH_DONE {
 			shardInfo.splitState = protos.SplitState_PRE_SPLIT_FLUSH_DONE
-			if shardInfo.preSplit.MemProps != nil {
+			if shardInfo.preSplit != nil && shardInfo.preSplit.MemProps != nil {
 				shardInfo.preSplit.MemProps = nil
 			}
 		}
@@ -233,12 +238,12 @@ func (m *ShardingManifest) ApplyChangeSet(cs *protos.ShardChangeSet) error {
 func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
 	log.S().Infof("%d:%d apply snapshot", cs.ShardID, cs.ShardVer)
 	snap := cs.Snapshot
-	shard := &ShardInfo{
+	shard := &ShardMeta{
 		ID:         cs.ShardID,
 		Ver:        cs.ShardVer,
 		Start:      snap.Start,
 		End:        snap.End,
-		files:      map[uint64]struct{}{},
+		files:      map[uint64]int{},
 		properties: newShardProperties().applyPB(snap.Properties),
 		splitState: cs.State,
 		commitTS:   snap.CommitTS,
@@ -255,7 +260,7 @@ func (m *ShardingManifest) applySnapshot(cs *protos.ShardChangeSet) {
 	m.shards[cs.ShardID] = shard
 }
 
-func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *ShardMeta) {
 	log.S().Infof("%d:%d apply flush", cs.ShardID, cs.ShardVer)
 	shardInfo.commitTS = cs.Flush.CommitTS
 	shardInfo.parent = nil
@@ -269,24 +274,24 @@ func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *Shar
 	}
 }
 
-func (m *ShardingManifest) addFile(fid uint64, cf int32, level uint32, smallest, biggest []byte, shardInfo *ShardInfo) {
+func (m *ShardingManifest) addFile(fid uint64, cf int32, level uint32, smallest, biggest []byte, shardInfo *ShardMeta) {
 	log.S().Infof("manifest add file %d l%d smalleset %v biggest %v", fid, level, smallest, biggest)
 	if fid > m.lastID {
 		m.lastID = fid
 	}
 	m.creations++
-	shardInfo.files[fid] = struct{}{}
+	shardInfo.files[fid] = int(level)
 	m.globalFiles[fid] = fileMeta{cf: cf, level: level, smallest: smallest, biggest: biggest}
 }
 
-func (m *ShardingManifest) deleteFile(fid uint64, shardInfo *ShardInfo) {
+func (m *ShardingManifest) deleteFile(fid uint64, shardInfo *ShardMeta) {
 	log.S().Infof("%d:%d manifest del file %d", shardInfo.ID, shardInfo.Ver, fid)
 	m.deletions++
 	delete(shardInfo.files, fid)
 	delete(m.globalFiles, fid)
 }
 
-func (m *ShardingManifest) applyCompaction(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+func (m *ShardingManifest) applyCompaction(cs *protos.ShardChangeSet, shardInfo *ShardMeta) {
 	log.S().Infof("%d:%d apply compaction", cs.ShardID, cs.ShardVer)
 	for _, id := range cs.Compaction.TopDeletes {
 		m.deleteFile(id, shardInfo)
@@ -299,7 +304,7 @@ func (m *ShardingManifest) applyCompaction(cs *protos.ShardChangeSet, shardInfo 
 	}
 }
 
-func (m *ShardingManifest) applySplitFiles(cs *protos.ShardChangeSet, shardInfo *ShardInfo) {
+func (m *ShardingManifest) applySplitFiles(cs *protos.ShardChangeSet, shardInfo *ShardMeta) {
 	log.S().Infof(" %d:%d apply split files", shardInfo.ID, shardInfo.Ver)
 	for _, id := range cs.SplitFiles.TableDeletes {
 		m.deleteFile(id, shardInfo)
@@ -315,7 +320,7 @@ func (m *ShardingManifest) applySplitFiles(cs *protos.ShardChangeSet, shardInfo 
 func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) {
 	old := m.shards[shardID]
 	log.S().Infof("%d:%d apply split, files %v", old.ID, old.Ver, old.files)
-	newShards := make([]*ShardInfo, len(split.NewShards))
+	newShards := make([]*ShardMeta, len(split.NewShards))
 	newVer := old.Ver + uint64(len(newShards)) - 1
 	for i := 0; i < len(split.NewShards); i++ {
 		startKey, endKey := getSplittingStartEnd(old.Start, old.End, split.Keys, i)
@@ -323,12 +328,12 @@ func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) 
 		if id == old.ID {
 			old.split = split
 		}
-		shardInfo := &ShardInfo{
+		shardInfo := &ShardMeta{
 			ID:         id,
 			Ver:        newVer,
 			Start:      startKey,
 			End:        endKey,
-			files:      map[uint64]struct{}{},
+			files:      map[uint64]int{},
 			properties: newShardProperties().applyPB(split.NewShards[i]),
 			parent:     old,
 		}
@@ -338,7 +343,7 @@ func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) 
 	for fid := range old.files {
 		fileMeta := m.globalFiles[fid]
 		shardIdx := getSplitShardIndex(split.Keys, fileMeta.smallest)
-		newShards[shardIdx].files[fid] = struct{}{}
+		newShards[shardIdx].files[fid] = int(fileMeta.level)
 	}
 	for _, nShard := range newShards {
 		log.S().Infof("new shard %d:%d smallest %v biggest %v files %v",
@@ -392,7 +397,7 @@ func ReplayShardingManifestFile(fp *os.File) (ret *ShardingManifest, truncOffset
 		return nil, 0, err
 	}
 	ret = &ShardingManifest{
-		shards:      map[uint64]*ShardInfo{},
+		shards:      map[uint64]*ShardMeta{},
 		globalFiles: map[uint64]fileMeta{},
 		fd:          fp,
 	}

@@ -158,7 +158,7 @@ func (sdb *ShardingDB) loadShards() error {
 			if err != nil {
 				return errors.AddStack(err)
 			}
-			err = sdb.opt.RecoverHandler.Recover(sdb, parentShard, parent.split.MemProps)
+			err = sdb.opt.RecoverHandler.Recover(sdb, parentShard, parent, parent.split.MemProps)
 			if err != nil {
 				return errors.AddStack(err)
 			}
@@ -173,14 +173,14 @@ func (sdb *ShardingDB) loadShards() error {
 			if mShard.preSplit != nil {
 				if mShard.preSplit.MemProps != nil {
 					// Recover to the state before PreSplit.
-					err = sdb.opt.RecoverHandler.Recover(sdb, shard, mShard.preSplit.MemProps)
+					err = sdb.opt.RecoverHandler.Recover(sdb, shard, mShard, mShard.preSplit.MemProps)
 					if err != nil {
 						return errors.AddStack(err)
 					}
 					shard.setSplitKeys(mShard.preSplit.Keys)
 				}
 			}
-			err = sdb.opt.RecoverHandler.Recover(sdb, shard, nil)
+			err = sdb.opt.RecoverHandler.Recover(sdb, shard, mShard, nil)
 			if err != nil {
 				return errors.AddStack(err)
 			}
@@ -189,7 +189,7 @@ func (sdb *ShardingDB) loadShards() error {
 	return nil
 }
 
-func (sdb *ShardingDB) loadShard(shardInfo *ShardInfo) (*Shard, error) {
+func (sdb *ShardingDB) loadShard(shardInfo *ShardMeta) (*Shard, error) {
 	shard := newShardForLoading(shardInfo, sdb.opt, sdb.metrics)
 	for fid := range shardInfo.files {
 		cfLevel, ok := sdb.manifest.globalFiles[fid]
@@ -243,7 +243,7 @@ type RecoverHandler interface {
 	// Recover recovers from the shard's state to the state that is stored in the toState property.
 	// So the DB has a chance to execute pre-split command.
 	// If toState is nil, the implementation should recovers to the latest state.
-	Recover(db *ShardingDB, shard *Shard, toState *protos.ShardProperties) error
+	Recover(db *ShardingDB, shard *Shard, info *ShardMeta, toState *protos.ShardProperties) error
 }
 
 type localIDAllocator struct {

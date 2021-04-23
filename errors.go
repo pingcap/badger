@@ -18,8 +18,9 @@ package badger
 
 import (
 	"encoding/hex"
+	"fmt"
 
-	"github.com/pingcap/errors"
+	"errors"
 )
 
 var (
@@ -101,11 +102,11 @@ var (
 const maxKeySize = 1<<16 - 8 // 8 bytes are for storing timestamp
 
 func exceedsMaxKeySizeError(key []byte) error {
-	return errors.Errorf("Key with size %d exceeded %d limit. Key:\n%s",
+	return fmt.Errorf("Key with size %d exceeded %d limit. Key:\n%s",
 		len(key), maxKeySize, hex.Dump(key[:1<<10]))
 }
 
 func exceedsMaxValueSizeError(value []byte, maxValueSize int64) error {
-	return errors.Errorf("Value with size %d exceeded ValueLogFileSize (%d). Key:\n%s",
+	return fmt.Errorf("Value with size %d exceeded ValueLogFileSize (%d). Key:\n%s",
 		len(value), maxValueSize, hex.Dump(value[:1<<10]))
 }

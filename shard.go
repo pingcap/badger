@@ -69,7 +69,7 @@ func newShard(props *protos.ShardProperties, ver uint64, start, end []byte, opt 
 	return shard
 }
 
-func newShardForLoading(shardInfo *ShardInfo, opt Options, metrics *y.MetricsSet) *Shard {
+func newShardForLoading(shardInfo *ShardMeta, opt Options, metrics *y.MetricsSet) *Shard {
 	shard := newShard(shardInfo.properties.toPB(shardInfo.ID), shardInfo.Ver, shardInfo.Start, shardInfo.End, opt, metrics)
 	if shardInfo.preSplit != nil {
 		if shardInfo.preSplit.MemProps != nil {
@@ -329,6 +329,10 @@ func (s *Shard) setSplitState(state protos.SplitState) {
 
 func (s *Shard) RecoverGetProperty(key string) ([]byte, bool) {
 	return s.properties.get(key)
+}
+
+func (s *Shard) RecoverSetProperty(key string, val []byte) {
+	s.properties.set(key, val)
 }
 
 func (s *Shard) markCompacting(b bool) {

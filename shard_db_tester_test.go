@@ -394,7 +394,7 @@ func (st *shardTester) close() {
 	st.wg.Wait()
 }
 
-func (st *shardTester) Recover(db *ShardingDB, shard *Shard, toState *protos.ShardProperties) error {
+func (st *shardTester) Recover(db *ShardingDB, shard *Shard, meta *ShardMeta, toState *protos.ShardProperties) error {
 	val, ok := shard.RecoverGetProperty(appliedIndex)
 	if !ok {
 		return errors.New("no applied index")
