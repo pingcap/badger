@@ -88,7 +88,6 @@ const randSeed = 410958445
 
 // DecrRef decrements the refcount, deallocating the Skiplist when done using it
 func (s *skiplist) Delete() {
-	s.arena.reset()
 	// Indicate we are closed. Good for testing.  Also, lets GC reclaim memory. Race condition
 	// here would suggest we are accessing skiplist when we are supposed to have no reference!
 	s.arena = nil

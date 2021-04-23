@@ -76,10 +76,7 @@ func (s *arena) get(addr arenaAddr) []byte {
 
 func (s *arena) size() int64 {
 	al := s.getArenaLocator()
-	return int64(len(al.blocks) * al.blockSize)
-}
-
-func (s *arena) reset() {
+	return int64((len(al.blocks)-1)*al.blockSize) + int64(atomic.LoadUint32(&al.blocks[len(al.blocks)-1].length))
 }
 
 // putNode allocates a node in the arena. The node is aligned on a pointer-sized
