@@ -82,9 +82,6 @@ func (s *arena) size() int64 {
 	return int64((len(al.blocks)-1)*al.blockSize) + int64(atomic.LoadUint32(&al.blocks[len(al.blocks)-1].length))
 }
 
-func (s *arena) reset() {
-}
-
 // putNode allocates a node in the arena. The node is aligned on a pointer-sized
 // boundary. The arena offset of the node is returned.
 func (s *arena) putNode(height int) arenaAddr {
