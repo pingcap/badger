@@ -76,7 +76,11 @@ func (s *arena) get(addr arenaAddr) []byte {
 
 func (s *arena) size() int64 {
 	al := s.getArenaLocator()
-	return int64(len(al.blocks) * al.blockSize)
+	size := int64(0)
+	for _, block := range al.blocks {
+		size += int64(atomic.LoadUint32(&block.length))
+	}
+	return size
 }
 
 func (s *arena) reset() {
