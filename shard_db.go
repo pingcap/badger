@@ -150,7 +150,8 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 }
 
 func (sdb *ShardingDB) loadShards() error {
-	log.Info("load shards")
+	log.Info("before load shards")
+	sdb.PrintStructure()
 	for _, mShard := range sdb.manifest.shards {
 		parent := mShard.parent
 		if parent != nil && !parent.recovered && sdb.opt.RecoverHandler != nil {
@@ -186,6 +187,8 @@ func (sdb *ShardingDB) loadShards() error {
 			}
 		}
 	}
+	log.Info("after load shards")
+	sdb.PrintStructure()
 	return nil
 }
 
@@ -277,7 +280,16 @@ func (sdb *ShardingDB) PrintStructure() {
 		allShards = append(allShards, value.(*Shard))
 		return true
 	})
+	var strs []string
 	for _, shard := range allShards {
+		mems := shard.loadMemTables()
+		var memSizes []int64
+		for _, mem := range mems.tables {
+			memSizes = append(memSizes, mem.Size())
+		}
+		if len(memSizes) > 0 {
+			strs = append(strs, fmt.Sprintf("shard %d mem sizes %v", shard.ID, memSizes))
+		}
 		l0s := shard.loadL0Tables()
 		var l0IDs []uint64
 		for _, tbl := range l0s.tables {
@@ -291,13 +303,20 @@ func (sdb *ShardingDB) PrintStructure() {
 			}
 			return false
 		})
-		log.S().Infof("shard %d l0 tables %v", shard.ID, l0IDs)
+		if len(l0IDs) > 0 {
+			strs = append(strs, fmt.Sprintf("shard %d l0 tables %v", shard.ID, l0IDs))
+		}
 		for cf, scf := range shard.cfs {
 			var tableIDs [][]uint64
+			var tableCnt int
 			for l := 1; l <= ShardMaxLevel; l++ {
-				tableIDs = append(tableIDs, getTblIDs(scf.getLevelHandler(l).tables))
+				levelTblIDs := getTblIDs(scf.getLevelHandler(l).tables)
+				tableIDs = append(tableIDs, levelTblIDs)
+				tableCnt += len(levelTblIDs)
 			}
-			log.S().Infof("shard %d cf %d tables %v", shard.ID, cf, tableIDs)
+			if tableCnt > 0 {
+				strs = append(strs, fmt.Sprintf("shard %d cf %d tables %v", shard.ID, cf, tableIDs))
+			}
 		}
 	}
 	for id, fi := range sdb.manifest.shards {
@@ -314,10 +333,18 @@ func (sdb *ShardingDB) PrintStructure() {
 				cfs[cfLevel.cf] = append(cfs[cfLevel.cf], fid)
 			}
 		}
-		log.S().Infof("manifest shard %d l0 tables %v", id, l0s)
-		for cf, cfIDs := range cfs {
-			log.S().Infof("manifest shard %d cf %d tables %v", id, cf, cfIDs)
+		if len(l0s) > 0 {
+			strs = append(strs, fmt.Sprintf("manifest shard %d l0 tables %v", id, l0s))
 		}
+		for cf, cfIDs := range cfs {
+			if len(cfIDs) > 0 {
+				strs = append(strs, fmt.Sprintf("manifest shard %d cf %d tables %v", id, cf, cfIDs))
+			}
+		}
+	}
+	sort.Strings(strs)
+	for _, str := range strs {
+		log.Info(str)
 	}
 }
 
