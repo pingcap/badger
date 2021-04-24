@@ -83,6 +83,7 @@ func newShardForLoading(shardInfo *ShardMeta, opt Options, metrics *y.MetricsSet
 		shard.setSplitKeys(shardInfo.split.Keys)
 	}
 	shard.setSplitState(shardInfo.splitState)
+	shard.setInitialFlushed()
 	return shard
 }
 
@@ -94,6 +95,7 @@ func newShardForIngest(changeSet *protos.ShardChangeSet, opt Options, metrics *y
 		shard.setSplitKeys(changeSet.PreSplit.Keys)
 	}
 	shard.setSplitState(changeSet.State)
+	shard.setInitialFlushed()
 	return shard
 }
 
