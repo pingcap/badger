@@ -23,6 +23,7 @@ func NewCFTable(arenaSize int64, numCFs int) *CFTable {
 			height: 1,
 			head:   head,
 			arena:  t.arena,
+			randX:  randSeed,
 		}
 	}
 	return t
