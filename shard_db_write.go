@@ -124,7 +124,7 @@ func (sdb *ShardingDB) executeWriteTask(eTask engineTask) {
 		return
 	}
 	memTbl := shard.loadWritableMemTable()
-	if memTbl == nil || memTbl.Size()+task.estimatedSize > sdb.opt.MaxMemTableSize {
+	if memTbl == nil || (shard.IsInitialFlushed() && memTbl.Size()+task.estimatedSize > sdb.opt.MaxMemTableSize) {
 		oldMemTbl := sdb.switchMemTable(shard, task.estimatedSize, commitTS)
 		if oldMemTbl != nil {
 			sdb.scheduleFlushTask(shard, oldMemTbl, commitTS, false)
@@ -185,7 +185,6 @@ func (sdb *ShardingDB) executeTriggerFlushTask(eTask engineTask) {
 	task := eTask.triggerFlush
 	shard := task.shard
 	commitTS := sdb.orc.allocTs()
-	// TODO: currently we can not make sure the writable mem-table is only one, will support dynamic mem-table soon.
 	memTbl := sdb.switchMemTable(shard, 0, commitTS)
 	sdb.scheduleFlushTask(shard, memTbl, commitTS, shard.GetSplitState() == protos.SplitState_PRE_SPLIT)
 	sdb.orc.doneCommit(commitTS)
