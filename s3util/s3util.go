@@ -143,7 +143,7 @@ func (c *S3Client) ListFiles() (map[uint64]struct{}, error) {
 		}
 		for _, objInfo := range output.Contents {
 			var fid uint64
-			_, err = fmt.Sscanf((*objInfo.Key)[10:18], "%08x", &fid)
+			_, err = fmt.Sscanf((*objInfo.Key)[10:26], "%016x", &fid)
 			if err != nil {
 				return nil, err
 			}
