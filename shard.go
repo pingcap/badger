@@ -32,7 +32,7 @@ type Shard struct {
 	// split state transition: initial(0) -> pre-split (1) -> pre-split-flush-done (2) -> split-file-done (3)
 	splitState       int32
 	splitKeys        [][]byte
-	splittingMemTbls []*unsafe.Pointer
+	splittingMemTbls []unsafe.Pointer
 	estimatedSize    int64
 	removeFilesOnDel bool
 
@@ -141,11 +141,9 @@ func (s *Shard) addEstimatedSize(size int64) int64 {
 func (s *Shard) setSplitKeys(keys [][]byte) bool {
 	if s.GetSplitState() == protos.SplitState_INITIAL {
 		s.splitKeys = keys
-		s.splittingMemTbls = make([]*unsafe.Pointer, len(keys)+1)
+		s.splittingMemTbls = make([]unsafe.Pointer, len(keys)+1)
 		for i := range s.splittingMemTbls {
-			memPtr := new(unsafe.Pointer)
-			*memPtr = unsafe.Pointer(&shardingMemTables{})
-			s.splittingMemTbls[i] = memPtr
+			atomic.StorePointer(&s.splittingMemTbls[i], unsafe.Pointer(memtable.NewCFTable(0, len(s.cfs))))
 		}
 		s.setSplitState(protos.SplitState_PRE_SPLIT)
 		log.S().Debugf("shard %d:%d pre-split", s.ID, s.Ver)
@@ -170,12 +168,10 @@ func (s *Shard) Get(cf int, key y.Key) y.ValueStruct {
 	keyHash := farm.Fingerprint64(key.UserKey)
 	if s.isSplitting() {
 		idx := s.getSplittingIndex(key.UserKey)
-		memTbls := s.loadSplittingMemTables(idx)
-		for _, tbl := range memTbls.tables {
-			v := tbl.Get(cf, key.UserKey, key.Version)
-			if v.Valid() {
-				return v
-			}
+		memTbl := s.loadSplittingMemTable(idx)
+		v := memTbl.Get(cf, key.UserKey, key.Version)
+		if v.Valid() {
+			return v
 		}
 	}
 	memTbls := s.loadMemTables()
@@ -216,16 +212,8 @@ func (s *Shard) getSplittingIndex(key []byte) int {
 	return i
 }
 
-func (s *Shard) loadSplittingMemTables(i int) *shardingMemTables {
-	return (*shardingMemTables)(atomic.LoadPointer(s.splittingMemTbls[i]))
-}
-
-func (s *Shard) loadSplittingWritableMemTable(i int) *memtable.CFTable {
-	tbls := s.loadSplittingMemTables(i)
-	if tbls != nil && len(tbls.tables) > 0 {
-		return tbls.tables[0]
-	}
-	return nil
+func (s *Shard) loadSplittingMemTable(i int) *memtable.CFTable {
+	return (*memtable.CFTable)(atomic.LoadPointer(&s.splittingMemTbls[i]))
 }
 
 func (s *Shard) loadMemTables() *shardingMemTables {

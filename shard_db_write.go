@@ -104,16 +104,6 @@ func (sdb *ShardingDB) switchMemTable(shard *Shard, minSize int64, commitTS uint
 	return writableMemTbl
 }
 
-func (sdb *ShardingDB) switchSplittingMemTable(shard *Shard, idx int, minSize int64) {
-	newTableSize := sdb.opt.MaxMemTableSize
-	if newTableSize < minSize {
-		newTableSize = minSize
-	}
-	newMemTable := memtable.NewCFTable(newTableSize, sdb.numCFs)
-	atomicAddMemTable(shard.splittingMemTbls[idx], newMemTable)
-	// Splitting MemTable is never flushed, we will flush the mem tables after finish split.
-}
-
 func (sdb *ShardingDB) executeWriteTask(eTask engineTask) {
 	task := eTask.writeTask
 	commitTS := sdb.orc.allocTs()
@@ -167,13 +157,7 @@ func (sdb *ShardingDB) writeSplitting(batch *WriteBatch, commitTS uint64) uint64
 		}
 		for _, entry := range entries {
 			idx := getSplitShardIndex(batch.shard.splitKeys, entry.Key)
-			memTbl := batch.shard.loadSplittingWritableMemTable(idx)
-			if memTbl == nil || memTbl.Size()+int64(batch.estimatedSize) > sdb.opt.MaxMemTableSize {
-				sdb.switchSplittingMemTable(batch.shard, idx, int64(batch.estimatedSize))
-				sdb.orc.doneCommit(commitTS)
-				commitTS = sdb.orc.allocTs()
-				memTbl = batch.shard.loadSplittingWritableMemTable(idx)
-			}
+			memTbl := batch.shard.loadSplittingMemTable(idx)
 			memTbl.Put(cf, entry.Key, entry.Value)
 		}
 	}

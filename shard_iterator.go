@@ -27,8 +27,11 @@ func (s *Snapshot) newShardIterator(cf int, reverse bool, sinceCommitTS uint64) 
 	iters := make([]y.Iterator, 0, 12)
 	if s.shard.isSplitting() {
 		for i := 0; i < len(s.shard.splittingMemTbls); i++ {
-			memTbls := s.shard.loadSplittingMemTables(i)
-			iters = s.appendMemTblIters(iters, memTbls, cf, reverse)
+			memTbl := s.shard.loadSplittingMemTable(i)
+			it := memTbl.NewIterator(cf, reverse)
+			if it != nil {
+				iters = append(iters, it)
+			}
 		}
 	}
 	memTbls := s.shard.loadMemTables()

@@ -3,6 +3,7 @@ package badger
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap/badger/table/memtable"
 	"math"
 	"sync/atomic"
 	"time"
@@ -350,7 +351,8 @@ func (sdb *ShardingDB) buildSplitShards(oldShard *Shard, newShardsProps []*proto
 			shard.SetPassive(true)
 		}
 		log.S().Infof("new shard %d:%d state %s", shard.ID, shard.Ver, shard.GetSplitState())
-		shard.memTbls = oldShard.splittingMemTbls[i]
+		shard.memTbls = new(unsafe.Pointer)
+		atomic.StorePointer(shard.memTbls, unsafe.Pointer(&shardingMemTables{tables: []*memtable.CFTable{oldShard.loadSplittingMemTable(i)}}))
 		shard.l0s = new(unsafe.Pointer)
 		atomic.StorePointer(shard.l0s, unsafe.Pointer(new(shardL0Tables)))
 		newShards[i] = shard

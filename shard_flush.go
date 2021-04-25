@@ -93,7 +93,7 @@ func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
 func (sdb *ShardingDB) flushMemTable(shard *Shard, m *memtable.CFTable, props *protos.ShardProperties) (*protos.L0Create, error) {
 	y.Assert(sdb.idAlloc != nil)
 	id := sdb.idAlloc.AllocID()
-	log.S().Infof("flush memtable %d", id)
+	log.S().Infof("flush memtable id:%d, size:%d", id, m.Size())
 	fd, err := sdb.createL0File(id)
 	if err != nil {
 		return nil, err
