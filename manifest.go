@@ -133,6 +133,7 @@ func helpOpenOrCreateManifestFile(dir string, readOnly bool, deletionsThreshold 
 			return nil, Manifest{}, fmt.Errorf("no manifest found, required for read-only db")
 		}
 		m := createManifest()
+		m.Head = &protos.HeadInfo{Version: 1}
 		fp, netCreations, err := helpRewrite(dir, &m)
 		if err != nil {
 			return nil, Manifest{}, err
@@ -203,11 +204,7 @@ func (mf *manifestFile) addChanges(changesParam []*protos.ManifestChange, head *
 			return err
 		}
 	} else {
-		var lenCrcBuf [8]byte
-		binary.BigEndian.PutUint32(lenCrcBuf[0:4], uint32(len(buf)))
-		binary.BigEndian.PutUint32(lenCrcBuf[4:8], crc32.Checksum(buf, y.CastagnoliCrcTable))
-		buf = append(lenCrcBuf[:], buf...)
-		if _, err := mf.fp.Write(buf); err != nil {
+		if _, err := mf.fp.Write(appendChecksumPacket(nil, buf)); err != nil {
 			mf.appendLock.Unlock()
 			return err
 		}
