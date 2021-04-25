@@ -27,12 +27,14 @@ type Options struct {
 
 type S3Client struct {
 	Options
+	*scheduler
 	cli *s3.S3
 }
 
 func NewS3Client(opts Options) *S3Client {
 	s3c := &S3Client{
-		Options: opts,
+		Options:   opts,
+		scheduler: newScheduler(256),
 	}
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{

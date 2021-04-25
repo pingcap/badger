@@ -2,6 +2,7 @@ package badger
 
 import (
 	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/s3util"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
@@ -107,29 +108,39 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 
 func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {
 	snap := ingestTree.ChangeSet.Snapshot
-	for _, l0 := range snap.L0Creates {
-		var err error
-		if ingestTree.LocalPath != "" {
-			err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, l0.ID, true)
-		} else {
-			err = sdb.loadFileFromS3(l0.ID, true)
-		}
-		if err != nil {
+	batch := s3util.NewBatchTasks()
+	for i := range snap.L0Creates {
+		l0 := snap.L0Creates[i]
+		batch.AppendTask(func() error {
+			var err error
+			if ingestTree.LocalPath != "" {
+				err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, l0.ID, true)
+			} else {
+				err = sdb.loadFileFromS3(l0.ID, true)
+			}
 			return err
-		}
+		})
 	}
-	for _, tbl := range snap.TableCreates {
-		var err error
-		if ingestTree.LocalPath != "" {
-			err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, tbl.ID, false)
-		} else {
-			err = sdb.loadFileFromS3(tbl.ID, false)
-		}
+	if err := sdb.s3c.BatchSchedule(batch); err != nil {
+		return err
+	}
+	batch = s3util.NewBatchTasks()
+	for i := range snap.TableCreates {
+		tbl := snap.TableCreates[i]
+		batch.AppendTask(func() error {
+			var err error
+			if ingestTree.LocalPath != "" {
+				err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, tbl.ID, false)
+			} else {
+				err = sdb.loadFileFromS3(tbl.ID, false)
+			}
+			return err
+		})
+	}
+	if err := sdb.s3c.BatchSchedule(batch); err != nil {
+		return err
+	}
 
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
