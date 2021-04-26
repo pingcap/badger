@@ -2,7 +2,7 @@ package s3util
 
 type task struct {
 	taskFunc func() error
-	done     chan *task
+	done     chan struct{}
 	errs     chan error
 }
 
@@ -33,7 +33,7 @@ func newScheduler(numWorkers int) *scheduler {
 }
 
 func (s *scheduler) BatchSchedule(b *BatchTasks) error {
-	done := make(chan *task, len(b.tasks))
+	done := make(chan struct{}, len(b.tasks))
 	errs := make(chan error, len(b.tasks))
 	for i := range b.tasks {
 		t := b.tasks[i]
@@ -54,6 +54,10 @@ func (s *scheduler) BatchSchedule(b *BatchTasks) error {
 		case <-done:
 		}
 	}
+	if len(errs) > 0 {
+		err := <-errs
+		return err
+	}
 	return nil
 }
 
@@ -63,7 +67,7 @@ func (w *scheduler) worker(t *task) {
 		if err != nil {
 			t.errs <- err
 		}
-		t.done <- t
+		t.done <- struct{}{}
 		select {
 		case t = <-w.tasks:
 		default:
