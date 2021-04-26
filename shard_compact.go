@@ -574,7 +574,7 @@ func (sdb *ShardingDB) ApplyChangeSet(changeSet *protos.ShardChangeSet) error {
 func (sdb *ShardingDB) applyFlush(shard *Shard, changeSet *protos.ShardChangeSet) error {
 	flush := changeSet.Flush
 	bt := s3util.NewBatchTasks()
-	for i,  := range flush.L0Creates {
+	for i := range flush.L0Creates {
 		l0 := flush.L0Creates[i]
 		bt.AppendTask(func() error {
 			return sdb.loadFileFromS3(l0.ID, true)
