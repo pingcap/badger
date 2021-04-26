@@ -573,14 +573,14 @@ func (sdb *ShardingDB) ApplyChangeSet(changeSet *protos.ShardChangeSet) error {
 
 func (sdb *ShardingDB) applyFlush(shard *Shard, changeSet *protos.ShardChangeSet) error {
 	flush := changeSet.Flush
-	batch := s3util.NewBatchTasks()
+	bt := s3util.NewBatchTasks()
 	for i,  := range flush.L0Creates {
 		l0 := flush.L0Creates[i]
-		batch.AppendTask(func() error {
+		bt.AppendTask(func() error {
 			return sdb.loadFileFromS3(l0.ID, true)
 		})
 	}
-	if err := sdb.s3c.BatchSchedule(batch); err != nil {
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
 		return err
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
@@ -607,14 +607,14 @@ func (sdb *ShardingDB) applyCompaction(shard *Shard, changeSet *protos.ShardChan
 	defer shard.markCompacting(false)
 	comp := changeSet.Compaction
 	if sdb.s3c != nil {
-		batch := s3util.NewBatchTasks()
+		bt := s3util.NewBatchTasks()
 		for i := range comp.TableCreates {
 			tbl := comp.TableCreates[i]
-			batch.AppendTask(func() error {
+			bt.AppendTask(func() error {
 				return sdb.loadFileFromS3(tbl.ID, false)
 			})
 		}
-		if err := sdb.s3c.BatchSchedule(batch); err != nil {
+		if err := sdb.s3c.BatchSchedule(bt); err != nil {
 			return err
 		}
 	}
@@ -685,24 +685,24 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 		return errShardWrongSplittingState
 	}
 	splitFiles := changeSet.SplitFiles
-	batch := s3util.NewBatchTasks()
+	bt := s3util.NewBatchTasks()
 	for i := range splitFiles.L0Creates {
 		l0 := splitFiles.L0Creates[i]
-		batch.AppendTask(func() error {
+		bt.AppendTask(func() error {
 			return sdb.loadFileFromS3(l0.ID, true)
 		})
 	}
-	if err := sdb.s3c.BatchSchedule(batch); err != nil {
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
 		return err
 	}
-	batch = s3util.NewBatchTasks()
+	bt = s3util.NewBatchTasks()
 	for i := range splitFiles.TableCreates {
 		tbl := splitFiles.TableCreates[i]
-		batch.AppendTask(func() error {
+		bt.AppendTask(func() error {
 			return sdb.loadFileFromS3(tbl.ID, false)
 		})
 	}
-	if err := sdb.s3c.BatchSchedule(batch); err != nil {
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
 		return err
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {

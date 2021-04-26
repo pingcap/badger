@@ -108,10 +108,10 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 
 func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {
 	snap := ingestTree.ChangeSet.Snapshot
-	batch := s3util.NewBatchTasks()
+	bt := s3util.NewBatchTasks()
 	for i := range snap.L0Creates {
 		l0 := snap.L0Creates[i]
-		batch.AppendTask(func() error {
+		bt.AppendTask(func() error {
 			var err error
 			if ingestTree.LocalPath != "" {
 				err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, l0.ID, true)
@@ -121,13 +121,13 @@ func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {
 			return err
 		})
 	}
-	if err := sdb.s3c.BatchSchedule(batch); err != nil {
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
 		return err
 	}
-	batch = s3util.NewBatchTasks()
+	bt = s3util.NewBatchTasks()
 	for i := range snap.TableCreates {
 		tbl := snap.TableCreates[i]
-		batch.AppendTask(func() error {
+		bt.AppendTask(func() error {
 			var err error
 			if ingestTree.LocalPath != "" {
 				err = sdb.loadFileFromLocalPath(ingestTree.LocalPath, tbl.ID, false)
@@ -137,7 +137,7 @@ func (sdb *ShardingDB) loadFiles(ingestTree *IngestTree) error {
 			return err
 		})
 	}
-	if err := sdb.s3c.BatchSchedule(batch); err != nil {
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
 		return err
 	}
 
