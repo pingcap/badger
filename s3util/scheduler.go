@@ -2,8 +2,7 @@ package s3util
 
 type task struct {
 	taskFunc func() error
-	done     chan struct{}
-	errs     chan error
+	done     chan error
 }
 
 type BatchTasks struct {
@@ -33,45 +32,50 @@ func newScheduler(numWorkers int) *scheduler {
 }
 
 func (s *scheduler) BatchSchedule(b *BatchTasks) error {
-	done := make(chan struct{}, len(b.tasks))
-	errs := make(chan error, len(b.tasks))
+	done := make(chan error, len(b.tasks))
+	count := 0
 	for i := range b.tasks {
 		t := b.tasks[i]
 		t.done = done
-		t.errs = errs
-		select {
-		case err := <-errs:
+		if err := s.schedule(t, &count); err != nil {
 			return err
-		case s.tasks <- t:
-		case s.workers <- struct{}{}:
-			go s.worker(t)
 		}
 	}
-	for i := 0; i < len(b.tasks); i++ {
-		select {
-		case err := <-errs:
+	for count < len(b.tasks) {
+		err := <-done
+		count++
+		if err != nil {
 			return err
-		case <-done:
 		}
-	}
-	if len(errs) > 0 {
-		err := <-errs
-		return err
 	}
 	return nil
 }
 
-func (w *scheduler) worker(t *task) {
+func (s *scheduler) schedule(t *task, count *int) error {
+	for {
+		select {
+		case err := <-t.done:
+			*count++
+			if err != nil {
+				return err
+			}
+		case s.tasks <- t:
+			return nil
+		case s.workers <- struct{}{}:
+			go s.worker(t)
+			return nil
+		}
+	}
+}
+
+func (s *scheduler) worker(t *task) {
 	for {
 		err := t.taskFunc()
-		if err != nil {
-			t.errs <- err
-		}
-		t.done <- struct{}{}
+		t.done <- err
 		select {
-		case t = <-w.tasks:
+		case t = <-s.tasks:
 		default:
-			<-w.workers
+			<-s.workers
 			return
 		}
 	}
