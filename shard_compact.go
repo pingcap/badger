@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/protos"
+	"github.com/pingcap/badger/s3util"
 	"github.com/pingcap/badger/table"
 	"github.com/pingcap/badger/table/sstable"
 	"github.com/pingcap/badger/y"
@@ -572,11 +573,15 @@ func (sdb *ShardingDB) ApplyChangeSet(changeSet *protos.ShardChangeSet) error {
 
 func (sdb *ShardingDB) applyFlush(shard *Shard, changeSet *protos.ShardChangeSet) error {
 	flush := changeSet.Flush
-	for _, l0 := range flush.L0Creates {
-		err := sdb.loadFileFromS3(l0.ID, true)
-		if err != nil {
-			return err
-		}
+	bt := s3util.NewBatchTasks()
+	for i := range flush.L0Creates {
+		l0 := flush.L0Creates[i]
+		bt.AppendTask(func() error {
+			return sdb.loadFileFromS3(l0.ID, true)
+		})
+	}
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
+		return err
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
 		return err
@@ -602,11 +607,15 @@ func (sdb *ShardingDB) applyCompaction(shard *Shard, changeSet *protos.ShardChan
 	defer shard.markCompacting(false)
 	comp := changeSet.Compaction
 	if sdb.s3c != nil {
-		for _, tbl := range comp.TableCreates {
-			err := sdb.loadFileFromS3(tbl.ID, false)
-			if err != nil {
-				return err
-			}
+		bt := s3util.NewBatchTasks()
+		for i := range comp.TableCreates {
+			tbl := comp.TableCreates[i]
+			bt.AppendTask(func() error {
+				return sdb.loadFileFromS3(tbl.ID, false)
+			})
+		}
+		if err := sdb.s3c.BatchSchedule(bt); err != nil {
+			return err
 		}
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
@@ -676,17 +685,25 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 		return errShardWrongSplittingState
 	}
 	splitFiles := changeSet.SplitFiles
-	for _, tbl := range splitFiles.L0Creates {
-		err := sdb.loadFileFromS3(tbl.ID, true)
-		if err != nil {
-			return err
-		}
+	bt := s3util.NewBatchTasks()
+	for i := range splitFiles.L0Creates {
+		l0 := splitFiles.L0Creates[i]
+		bt.AppendTask(func() error {
+			return sdb.loadFileFromS3(l0.ID, true)
+		})
 	}
-	for _, tbl := range splitFiles.TableCreates {
-		err := sdb.loadFileFromS3(tbl.ID, false)
-		if err != nil {
-			return err
-		}
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
+		return err
+	}
+	bt = s3util.NewBatchTasks()
+	for i := range splitFiles.TableCreates {
+		tbl := splitFiles.TableCreates[i]
+		bt.AppendTask(func() error {
+			return sdb.loadFileFromS3(tbl.ID, false)
+		})
+	}
+	if err := sdb.s3c.BatchSchedule(bt); err != nil {
+		return err
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
 		return err

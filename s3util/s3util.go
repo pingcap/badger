@@ -27,12 +27,14 @@ type Options struct {
 
 type S3Client struct {
 	Options
+	*scheduler
 	cli *s3.S3
 }
 
 func NewS3Client(opts Options) *S3Client {
 	s3c := &S3Client{
-		Options: opts,
+		Options:   opts,
+		scheduler: newScheduler(256),
 	}
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -143,7 +145,7 @@ func (c *S3Client) ListFiles() (map[uint64]struct{}, error) {
 		}
 		for _, objInfo := range output.Contents {
 			var fid uint64
-			_, err = fmt.Sscanf((*objInfo.Key)[10:18], "%08x", &fid)
+			_, err = fmt.Sscanf((*objInfo.Key)[10:26], "%016x", &fid)
 			if err != nil {
 				return nil, err
 			}
