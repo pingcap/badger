@@ -264,13 +264,14 @@ func (m *ShardingManifest) applyFlush(cs *protos.ShardChangeSet, shardInfo *Shar
 	log.S().Infof("%d:%d apply flush", cs.ShardID, cs.ShardVer)
 	shardInfo.commitTS = cs.Flush.CommitTS
 	shardInfo.parent = nil
-	for _, create := range cs.Flush.L0Creates {
-		if create.Properties != nil {
-			for i, key := range create.Properties.Keys {
-				shardInfo.properties.set(key, create.Properties.Values[i])
+	l0 := cs.Flush.L0Create
+	if l0 != nil {
+		if l0.Properties != nil {
+			for i, key := range l0.Properties.Keys {
+				shardInfo.properties.set(key, l0.Properties.Values[i])
 			}
 		}
-		m.addFile(create.ID, -1, 0, create.Start, create.End, shardInfo)
+		m.addFile(l0.ID, -1, 0, l0.Start, l0.End, shardInfo)
 	}
 }
 
@@ -397,7 +398,7 @@ func (m *ShardingManifest) isDuplicatedChange(change *protos.ShardChangeSet) boo
 		if meta.parent != nil {
 			return false
 		}
-		if len(flush.L0Creates) == 0 {
+		if flush.L0Create == nil {
 			return meta.splitState >= change.State
 		}
 		return meta.commitTS >= flush.CommitTS

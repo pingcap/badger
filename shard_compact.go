@@ -574,10 +574,10 @@ func (sdb *ShardingDB) ApplyChangeSet(changeSet *protos.ShardChangeSet) error {
 func (sdb *ShardingDB) applyFlush(shard *Shard, changeSet *protos.ShardChangeSet) error {
 	flush := changeSet.Flush
 	bt := s3util.NewBatchTasks()
-	for i := range flush.L0Creates {
-		l0 := flush.L0Creates[i]
+	newL0 := flush.L0Create
+	if newL0 != nil {
 		bt.AppendTask(func() error {
-			return sdb.loadFileFromS3(l0.ID, true)
+			return sdb.loadFileFromS3(flush.L0Create.ID, true)
 		})
 	}
 	if err := sdb.s3c.BatchSchedule(bt); err != nil {
@@ -589,18 +589,16 @@ func (sdb *ShardingDB) applyFlush(shard *Shard, changeSet *protos.ShardChangeSet
 		}
 		return err
 	}
-	var newL0Tbls []*shardL0Table
-	for _, newL0 := range flush.L0Creates {
+	if newL0 != nil {
 		filename := sstable.NewFilename(newL0.ID, sdb.opt.Dir)
 		tbl, err := openShardL0Table(filename, newL0.ID)
 		if err != nil {
 			return err
 		}
-		newL0Tbls = append(newL0Tbls, tbl)
 		shard.addEstimatedSize(tbl.size)
+		atomicAddL0(shard, tbl)
+		atomicRemoveMemTable(shard.memTbls, 1)
 	}
-	atomicAddL0(shard, newL0Tbls...)
-	atomicRemoveMemTable(shard.memTbls, len(newL0Tbls))
 	shard.setSplitState(changeSet.State)
 	shard.setInitialFlushed()
 	return nil

@@ -72,7 +72,7 @@ message ShardCompaction {
 }
 
 message ShardFlush {
-  repeated L0Create l0Creates = 1;
+  L0Create l0Create = 1;
   uint64 commitTS = 2;
 }
 

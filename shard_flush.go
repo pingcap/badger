@@ -43,7 +43,7 @@ func (sdb *ShardingDB) runFlushMemTable(c *y.Closer) {
 				// TODO: handle S3 error by queue the failed operation and retry.
 				panic(err)
 			}
-			change.Flush.L0Creates = []*protos.L0Create{l0Table}
+			change.Flush.L0Create = l0Table
 		}
 		if task.preSplitFlush {
 			change.State = protos.SplitState_PRE_SPLIT_FLUSH_DONE
@@ -67,16 +67,16 @@ func (sdb *ShardingDB) flushFinishSplit(task *shardFlushTask) error {
 	for idx, memTbls := range task.finishSplitMemTbls {
 		flushChangeSet := newShardChangeSet(task.finishSplitShards[idx])
 		flushChangeSet.Flush = &protos.ShardFlush{CommitTS: task.commitTS}
-		for j, memTbl := range memTbls.tables {
+		y.Assert(len(memTbls.tables) <= 1)
+		if len(memTbls.tables) == 1 {
+			memTbl := memTbls.tables[0]
 			l0Table, err := sdb.flushMemTable(task.finishSplitShards[idx], memTbl, task.finishSplitProps[idx])
 			if err != nil {
 				// TODO: handle s3 error by queue the failed operation and retry.
 				panic(err)
 			}
-			if j == 0 {
-				l0Table.Properties = task.finishSplitProps[idx]
-			}
-			flushChangeSet.Flush.L0Creates = append(flushChangeSet.Flush.L0Creates, l0Table)
+			l0Table.Properties = task.finishSplitProps[idx]
+			flushChangeSet.Flush.L0Create = l0Table
 		}
 		if sdb.metaChangeListener != nil {
 			sdb.metaChangeListener.OnChange(flushChangeSet)
