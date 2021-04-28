@@ -351,10 +351,15 @@ func (m *ShardingManifest) applySplit(shardID uint64, split *protos.ShardSplit) 
 	}
 }
 
+var errDupChange = errors.New("duplicated change")
+
 func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet) error {
 	// Maybe we could use O_APPEND instead (on certain file systems)
 	m.appendLock.Lock()
 	defer m.appendLock.Unlock()
+	if m.isDuplicatedChange(changeSet) {
+		return errDupChange
+	}
 	changeSet.DataVer = m.orc.commitTs()
 	buf, err := changeSet.Marshal()
 	if err != nil {
@@ -381,6 +386,36 @@ func (m *ShardingManifest) writeChangeSet(changeSet *protos.ShardChangeSet) erro
 		return err
 	}
 	return nil
+}
+
+func (m *ShardingManifest) isDuplicatedChange(change *protos.ShardChangeSet) bool {
+	meta, ok := m.shards[change.ShardID]
+	if !ok {
+		return false
+	}
+	if flush := change.Flush; flush != nil {
+		if meta.parent != nil {
+			return false
+		}
+		if len(flush.L0Creates) == 0 {
+			return meta.splitState >= change.State
+		}
+		return meta.commitTS >= flush.CommitTS
+	}
+	if comp := change.Compaction; comp != nil {
+		// TODO: It is a temporary solution that can fail in very rare case.
+		// It is possible that a duplicated compaction's all new tables are removed by future compaction.
+		for _, tbl := range comp.TableCreates {
+			level, ok := meta.FileLevel(tbl.ID)
+			if ok && level > int(change.Compaction.Level) {
+				return true
+			}
+		}
+	}
+	if splitFiles := change.SplitFiles; splitFiles != nil {
+		return meta.splitState == change.State
+	}
+	return false
 }
 
 type fileMeta struct {

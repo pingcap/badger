@@ -584,6 +584,9 @@ func (sdb *ShardingDB) applyFlush(shard *Shard, changeSet *protos.ShardChangeSet
 		return err
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
+		if err == errDupChange {
+			return nil
+		}
 		return err
 	}
 	var newL0Tbls []*shardL0Table
@@ -619,6 +622,9 @@ func (sdb *ShardingDB) applyCompaction(shard *Shard, changeSet *protos.ShardChan
 		}
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
+		if err == errDupChange {
+			return nil
+		}
 		return err
 	}
 	del := &deletions{resources: map[uint64]epoch.Resource{}}
@@ -706,6 +712,9 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 		return err
 	}
 	if err := sdb.manifest.writeChangeSet(changeSet); err != nil {
+		if err == errDupChange {
+			return nil
+		}
 		return err
 	}
 	oldL0s := shard.loadL0Tables()
