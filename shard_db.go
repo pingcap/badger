@@ -106,7 +106,6 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		commits:    make(map[uint64]uint64),
 	}
 	manifest.orc = orc
-
 	blkCache, idxCache, err := createCache(opt)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create block cache")
@@ -213,7 +212,7 @@ func (sdb *ShardingDB) loadShard(shardInfo *ShardMeta) (*Shard, error) {
 		scf := shard.cfs[cf]
 		handler := scf.getLevelHandler(int(level))
 		filename := sstable.NewFilename(fid, sdb.opt.Dir)
-		reader, err := sstable.NewMMapFile(filename)
+		reader, err := newTableFileWithShardingDB(filename, sdb)
 		if err != nil {
 			return nil, err
 		}
@@ -239,6 +238,20 @@ func (sdb *ShardingDB) loadShard(shardInfo *ShardMeta) (*Shard, error) {
 	sdb.shardMap.Store(shard.ID, shard)
 	log.S().Infof("load shard %d ver %d", shard.ID, shard.Ver)
 	return shard, nil
+}
+
+func newTableFileWithShardingDB(filename string, sdb *ShardingDB) (sstable.TableFile, error) {
+	var reader sstable.TableFile
+	var err error
+	if sdb.blkCache != nil {
+		reader, err = sstable.NewLocalFile(filename, sdb.blkCache, sdb.idxCache)
+	} else {
+		reader, err = sstable.NewMMapFile(filename)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return reader, nil
 }
 
 // RecoverHandler handles recover a shard's mem-table data from another data source.

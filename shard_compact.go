@@ -529,7 +529,12 @@ func (sdb *ShardingDB) prepareCompactionDef(cf int, cd *CompactDef) error {
 func (sdb *ShardingDB) openTables(buildResults []*sstable.BuildResult) (newTables []table.Table, err error) {
 	for _, result := range buildResults {
 		var tbl table.Table
-		tbl, err = sstable.OpenMMapTable(result.FileName)
+		filename := result.FileName
+		reader, err := newTableFileWithShardingDB(filename, sdb)
+		if err != nil {
+			return nil, err
+		}
+		tbl, err = sstable.OpenTable(filename, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -661,7 +666,11 @@ func (sdb *ShardingDB) compactionUpdateLevelHandler(shard *Shard, cf, level int,
 			continue
 		}
 		filename := sstable.NewFilename(tbl.ID, sdb.opt.Dir)
-		tbl, err := sstable.OpenMMapTable(filename)
+		reader, err := newTableFileWithShardingDB(filename, sdb)
+		if err != nil {
+			return err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			return err
 		}
@@ -748,7 +757,11 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 			newHandlers[tbl.CF][tbl.Level-1] = newHandler
 		}
 		filename := sstable.NewFilename(tbl.ID, sdb.opt.Dir)
-		tbl, err := sstable.OpenMMapTable(filename)
+		reader, err := newTableFileWithShardingDB(filename, sdb)
+		if err != nil {
+			return err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			return err
 		}

@@ -522,8 +522,11 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]table.Table, er
 		if err != nil {
 			return nil, err
 		}
-		dataReader, err := sstable.NewMMapFile(filename)
-		tbl, err := sstable.OpenTable(filename, dataReader)
+		reader, err := newTableFile(filename, db)
+		if err != nil {
+			return nil, err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -941,21 +944,11 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 				return err
 			}
 		}
-		var tf sstable.TableFile
-		if db.blockCache != nil {
-			tf, err = sstable.NewLocalFile(filename, db.blockCache, db.indexCache)
-			if err != nil {
-				log.Info("error while mmap table", zap.Error(err))
-				return err
-			}
-		} else {
-			tf, err = sstable.NewMMapFile(filename)
-			if err != nil {
-				log.Info("error while mmap table", zap.Error(err))
-				return err
-			}
+		reader, err := newTableFile(filename, db)
+		if err != nil {
+			return err
 		}
-		tbl, err := sstable.OpenTable(filename, tf)
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			log.Info("error while opening table", zap.Error(err))
 			return err

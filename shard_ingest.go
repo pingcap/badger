@@ -82,11 +82,11 @@ func (sdb *ShardingDB) createIngestTreeLevelHandlers(ingestTree *IngestTree) (*s
 	for _, tblCreate := range snap.TableCreates {
 		handler := newHandlers[tblCreate.CF][tblCreate.Level-1]
 		filename := sstable.NewFilename(tblCreate.ID, sdb.opt.Dir)
-		file, err := sstable.NewMMapFile(filename)
+		reader, err := newTableFileWithShardingDB(filename, sdb)
 		if err != nil {
 			return nil, nil, err
 		}
-		tbl, err := sstable.OpenTable(filename, file)
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			return nil, nil, err
 		}
