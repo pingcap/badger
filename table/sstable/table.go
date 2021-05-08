@@ -30,6 +30,7 @@ import (
 	"unsafe"
 
 	"github.com/coocood/bbloom"
+	"github.com/pingcap/badger/buffer"
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/surf"
 	"github.com/pingcap/badger/y"
@@ -145,6 +146,7 @@ func (t *Table) Get(key y.Key, keyHash uint64) (y.ValueStruct, error) {
 	}
 	if !ok {
 		it := t.NewIterator(false)
+		defer it.Close()
 		it.Seek(key.UserKey)
 		if !it.Valid() {
 			return y.ValueStruct{}, nil
@@ -195,6 +197,7 @@ func (t *Table) pointGet(key y.Key, keyHash uint64) (y.Key, y.ValueStruct, bool,
 	}
 
 	it := t.newIterator(false)
+	defer it.Close()
 	it.seekFromOffset(int(blkIdx), int(offset), key.UserKey)
 
 	if !it.Valid() || !key.SameUserKey(it.Key()) {
@@ -274,34 +277,60 @@ type block struct {
 	offset  int
 	data    []byte
 	baseKey []byte
+
+	reference int32
+}
+
+func OnEvict(key uint64, value interface{}) {
+	if b, ok := value.(*block); ok {
+		b.done()
+	}
+}
+
+func (b *block) add() (ok bool) {
+	for {
+		old := atomic.LoadInt32(&b.reference)
+		if old == 0 {
+			return false
+		}
+		new := old + 1
+		if atomic.CompareAndSwapInt32(&b.reference, old, new) {
+			return true
+		}
+	}
+}
+
+func (b *block) done() {
+	if b != nil && atomic.AddInt32(&b.reference, -1) == 0 {
+		buffer.PutBuffer(b.data)
+		b.data = nil
+	}
 }
 
 func (b *block) size() int64 {
 	return int64(intSize + len(b.data))
 }
 
-func (t *Table) block(idx int, index *TableIndex) (block, error) {
+func (t *Table) block(idx int, index *TableIndex) (*block, error) {
 	y.Assert(idx >= 0)
 
 	if idx >= len(index.blockEndOffsets) {
-		return block{}, io.EOF
+		return &block{}, io.EOF
 	}
 	return t.loadBlock(idx, index)
 }
 
-func (t *Table) loadBlock(idx int, index *TableIndex) (block, error) {
+func (t *Table) loadBlock(idx int, index *TableIndex) (*block, error) {
 	var startOffset int
 	if idx > 0 {
 		startOffset = int(index.blockEndOffsets[idx-1])
 	}
-	blk := block{
-		offset: startOffset,
-	}
 	endOffset := int(index.blockEndOffsets[idx])
 	dataLen := endOffset - startOffset
+	var blk *block
 	var err error
-	if blk.data, err = t.file.ReadBlock(int64(blk.offset), int64(dataLen)); err != nil {
-		return block{}, errors.Wrapf(err,
+	if blk, err = t.file.readBlock(int64(startOffset), int64(dataLen)); err != nil {
+		return &block{}, errors.Wrapf(err,
 			"failed to read from file: %s at offset: %d, len: %d", t.filename, blk.offset, dataLen)
 	}
 	blk.baseKey = index.baseKeys.getEntry(idx)
@@ -385,6 +414,7 @@ func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 	// If there are errors occurred during seeking,
 	// we assume the table has overlapped with the range to prevent data loss.
 	it := t.newIteratorWithIdx(false, idx)
+	defer it.Close()
 	it.Seek(start.UserKey)
 	if !it.Valid() {
 		return it.Error() != nil

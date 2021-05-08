@@ -93,6 +93,7 @@ type Iterator interface {
 	Value() ValueStruct
 	FillValue(vs *ValueStruct)
 	Valid() bool
+	Close() error
 }
 
 // SeekToVersion seeks a valid Iterator to the version that <= the given version.

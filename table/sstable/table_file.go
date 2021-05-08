@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/pingcap/badger/buffer"
 	"github.com/pingcap/badger/cache"
 	"github.com/pingcap/badger/s3util"
 	"github.com/pingcap/badger/y"
@@ -13,7 +14,7 @@ import (
 )
 
 type TableFile interface {
-	ReadBlock(offset, length int64) ([]byte, error)
+	readBlock(offset, length int64) (*block, error)
 	ReadIndex() (*TableIndex, error)
 	LoadToMem() error
 	Close()
@@ -34,8 +35,12 @@ func NewInMemFile(blockData, indexData []byte) *InMemFile {
 	}
 }
 
-func (r *InMemFile) ReadBlock(offset, length int64) ([]byte, error) {
-	return r.blocksData[offset : offset+length], nil
+func (r *InMemFile) readBlock(offset, length int64) (*block, error) {
+	blk := &block{
+		offset: int(offset),
+		data:   r.blocksData[offset : offset+length],
+	}
+	return blk, nil
 }
 
 func (r *InMemFile) ReadIndex() (*TableIndex, error) {
@@ -170,19 +175,31 @@ func NewLocalFile(filename string, blockCache, indexCache *cache.Cache) (TableFi
 	return reader, nil
 }
 
-func (r *LocalFile) ReadBlock(offset, length int64) ([]byte, error) {
+func (r *LocalFile) readBlock(offset, length int64) (*block, error) {
 	if ptr := atomic.LoadPointer(&r.memReader); ptr != nil {
-		return (*InMemFile)(ptr).ReadBlock(offset, length)
+		return (*InMemFile)(ptr).readBlock(offset, length)
 	}
-	blockData, err := r.blockCache.GetOrCompute(blockCacheKey(r.fid, uint32(offset)), func() (interface{}, int64, error) {
-		data := make([]byte, length)
-		_, err := r.fd.ReadAt(data, offset)
-		return data, length, err
+	blk, err := r.blockCache.GetOrCompute(blockCacheKey(r.fid, uint32(offset)), func() (interface{}, int64, error) {
+		data := buffer.GetBuffer(int(length))
+		if _, err := r.fd.ReadAt(data, offset); err != nil {
+			buffer.PutBuffer(data)
+			return nil, 0, err
+		}
+		blk := &block{
+			offset:    int(offset),
+			data:      data,
+			reference: 1,
+		}
+		return blk, length, nil
 	})
 	if err != nil {
-		return nil, err
+		return &block{}, err
 	}
-	return blockData.([]byte), nil
+	b := blk.(*block)
+	if ok := b.add(); !ok {
+		return &block{}, errors.Errorf("block is evicted")
+	}
+	return b, nil
 }
 
 func (r *LocalFile) ReadIndex() (*TableIndex, error) {
@@ -209,6 +226,7 @@ func (r *LocalFile) Close() {
 }
 
 func (r *LocalFile) Delete() {
+	r.indexCache.Del(uint64(r.fid))
 	filename := r.fd.Name()
 	r.Close()
 	os.Remove(filename)

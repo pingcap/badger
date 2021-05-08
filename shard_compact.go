@@ -56,6 +56,7 @@ func newL0CreateByResult(result *sstable.BuildResult, props *protos.ShardPropert
 
 func debugTableCount(tbl table.Table) int {
 	it := tbl.NewIterator(false)
+	defer it.Close()
 	rowCnt := 0
 	for it.Rewind(); it.Valid(); it.Next() {
 		rowCnt++

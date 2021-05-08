@@ -108,6 +108,7 @@ func (sdb *ShardingDB) flushMemTable(shard *Shard, m *memtable.CFTable, props *p
 		for it.Rewind(); it.Valid(); y.NextAllVersion(it) {
 			builder.Add(cf, it.Key(), it.Value())
 		}
+		it.Close()
 	}
 	shardL0Data := builder.Finish()
 	_, err = writer.Write(shardL0Data)

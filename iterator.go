@@ -183,6 +183,7 @@ func (opts *IteratorOptions) OverlapMemTable(t *memtable.Table) bool {
 		return true
 	}
 	iter := t.NewIterator(false)
+	defer iter.Close()
 	iter.Seek(opts.StartKey.UserKey)
 	if !iter.Valid() {
 		return false
@@ -246,6 +247,8 @@ type Iterator struct {
 	itBuf Item
 	vs    y.ValueStruct
 	bound []byte
+
+	closed bool
 }
 
 // NewIterator returns a new iterator. Depending upon the options, either only keys, or both
@@ -310,6 +313,11 @@ func (it *Iterator) ValidForPrefix(prefix []byte) bool {
 
 // Close would close the iterator. It is important to call this when you're done with iteration.
 func (it *Iterator) Close() {
+	if it.closed {
+		return
+	}
+	it.closed = true
+	it.iitr.Close()
 	if it.txn != nil {
 		atomic.AddInt32(&it.txn.numIterators, -1)
 	}

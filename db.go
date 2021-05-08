@@ -394,6 +394,7 @@ func createCache(opt Options) (blkCache, idxCache *cache.Cache, err error) {
 			NumCounters: opt.MaxBlockCacheSize / int64(opt.TableBuilderOptions.BlockSize) * 10,
 			MaxCost:     opt.MaxBlockCacheSize,
 			BufferItems: 64,
+			OnEvict:     sstable.OnEvict,
 		})
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "failed to create block cache")
@@ -465,6 +466,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 			discardStats.collect(it.Value())
 		}
 		deletes[i] = tbl
+		it.Close()
 	}
 	guard.Delete(deletes)
 	guard.Done()
@@ -847,6 +849,7 @@ func arenaSize(opt Options) int64 {
 // WriteLevel0Table flushes memtable. It drops deleteValues.
 func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) (*sstable.BuildResult, error) {
 	iter := s.NewIterator(false)
+	defer iter.Close()
 	var (
 		numWrite, bytesWrite int
 		err                  error
