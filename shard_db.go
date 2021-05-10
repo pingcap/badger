@@ -13,9 +13,11 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"math"
+	"net/http"
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var ShardingDBDefaultOpt = Options{
@@ -147,6 +149,91 @@ func OpenShardingDB(opt Options) (db *ShardingDB, err error) {
 		go db.runShardInternalCompactionLoop(db.closers.compactors)
 	}
 	return db, nil
+}
+
+func (sdb *ShardingDB) DebugHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Time %s\n", time.Now().Format(time.RFC3339Nano))
+		fmt.Fprintf(w, "Manifest.shards %s\n", formatInt(len(sdb.manifest.shards)))
+		fmt.Fprintf(w, "Manifest.globalFiles %s\n", formatInt(len(sdb.manifest.globalFiles)))
+		keys := []int{}
+		MemTables := 0
+		MemTablesSize := 0
+		L0Tables := 0
+		L0TablesSize := 0
+		CFs := 0
+		Levels := 0
+		CFsSize := 0
+		sdb.shardMap.Range(func(key, value interface{}) bool {
+			keys = append(keys, int(key.(uint64)))
+			shard := value.(*Shard)
+			memTables := shard.loadMemTables()
+			l0Tables := shard.loadL0Tables()
+			MemTables += len(memTables.tables)
+			for _, t := range memTables.tables {
+				MemTablesSize += int(t.Size())
+			}
+			L0Tables += len(l0Tables.tables)
+			for _, t := range l0Tables.tables {
+				L0TablesSize += int(t.size)
+			}
+			CFs += len(shard.cfs)
+			for _, cf := range shard.cfs {
+				Levels += len(cf.levels)
+				for l := range cf.levels {
+					level := cf.getLevelHandler(l + 1)
+					CFsSize += int(level.totalSize)
+				}
+			}
+			return true
+		})
+		fmt.Fprintf(w, "MemTables %d, MemTablesSize %s\n", MemTables, formatInt(MemTablesSize))
+		fmt.Fprintf(w, "L0Tables %d, L0TablesSize %s\n", L0Tables, formatInt(L0TablesSize))
+		fmt.Fprintf(w, "CFs %d, Levels %d, CFsSize %s\n", CFs, Levels, formatInt(CFsSize))
+		fmt.Fprintf(w, "ShardMap %d\n", len(keys))
+		sort.Ints(keys)
+		for _, k := range keys {
+			key := uint64(k)
+			if value, ok := sdb.shardMap.Load(key); ok {
+				shard := value.(*Shard)
+				memTables := shard.loadMemTables()
+				l0Tables := shard.loadL0Tables()
+				fmt.Fprintf(w, "\tShard ID %d, Version %d, SplitState %s\n", key, shard.Ver, protos.SplitState_name[shard.splitState])
+				fmt.Fprintf(w, "\t\tMemTables %d\n", len(memTables.tables))
+				for i, t := range memTables.tables {
+					fmt.Fprintf(w, "\t\t\tMemTable %d, Size %s, Empty %t \n", i, formatInt(int(t.Size())), t.Empty())
+				}
+				fmt.Fprintf(w, "\t\tL0Tables %d\n", len(l0Tables.tables))
+				for i, t := range l0Tables.tables {
+					fmt.Fprintf(w, "\t\t\tL0Table %d, fid %d, cfs %d, size %s \n", i, t.fid, len(t.cfs), formatInt(int(t.size)))
+				}
+				fmt.Fprintf(w, "\t\tcfs %d\n", len(shard.cfs))
+				for i, cf := range shard.cfs {
+					fmt.Fprintf(w, "\t\t\tCF %d, levels %d \n", i, len(cf.levels))
+					for l := range cf.levels {
+						level := cf.getLevelHandler(l + 1)
+						fmt.Fprintf(w, "\t\t\t\tLevelHandler %d, level %d, tables %d, totalSize %s \n", l, level.level, len(level.tables), formatInt(int(level.totalSize)))
+					}
+				}
+			}
+		}
+	}
+}
+
+func formatInt(n int) string {
+	str := fmt.Sprintf("%d", n)
+	length := len(str)
+	if length <= 3 {
+		return str
+	}
+	separators := (length - 1) / 3
+	buf := make([]byte, length+separators)
+	for i := 0; i < separators; i++ {
+		buf[len(buf)-(i+1)*4] = ','
+		copy(buf[len(buf)-(i+1)*4+1:], str[length-(i+1)*3:length-i*3])
+	}
+	copy(buf, str[:length-separators*3])
+	return string(buf)
 }
 
 func (sdb *ShardingDB) loadShards() error {
