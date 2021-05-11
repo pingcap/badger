@@ -74,6 +74,7 @@ func TestEmpty(t *testing.T) {
 
 	it.Seek(key)
 	require.False(t, it.Valid())
+	it.Close()
 }
 
 // TestBasic tests single-threaded inserts and updates and gets.
@@ -256,6 +257,7 @@ func TestIteratorNext(t *testing.T) {
 	l := newSkiplist(arenaSize)
 	defer l.Delete()
 	it := l.NewIterator()
+	defer it.Close()
 	require.False(t, it.Valid())
 	it.SeekToFirst()
 	require.False(t, it.Valid())
@@ -279,6 +281,7 @@ func TestIteratorPrev(t *testing.T) {
 	l := newSkiplist(arenaSize)
 	defer l.Delete()
 	it := l.NewIterator()
+	defer it.Close()
 	require.False(t, it.Valid())
 	it.SeekToFirst()
 	require.False(t, it.Valid())
@@ -303,6 +306,7 @@ func TestIteratorSeek(t *testing.T) {
 	defer l.Delete()
 
 	it := l.NewIterator()
+	defer it.Close()
 
 	require.False(t, it.Valid())
 	it.SeekToFirst()
@@ -374,6 +378,7 @@ func TestPutWithHint(t *testing.T) {
 		cnt++
 	}
 	it := l.NewIterator()
+	defer it.Close()
 	var lastKey y.Key
 	cntGot := 0
 	for it.SeekToFirst(); it.Valid(); it.Next() {
@@ -471,6 +476,7 @@ func TestIterateMultiVersion(t *testing.T) {
 	keyVals := generateKeyValues("key", 4000)
 	skl := buildMultiVersionSkiopList(keyVals)
 	it := skl.NewIterator()
+	defer it.Close()
 	var lastKey y.Key
 	for it.SeekToFirst(); it.Valid(); it.Next() {
 		if !lastKey.IsEmpty() {
@@ -499,6 +505,7 @@ func TestIterateMultiVersion(t *testing.T) {
 		}
 	}
 	revIt := skl.NewUniIterator(true)
+	defer revIt.Close()
 	lastKey.Reset()
 	for revIt.Rewind(); revIt.Valid(); revIt.Next() {
 		if !lastKey.IsEmpty() {
