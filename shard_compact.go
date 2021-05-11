@@ -107,7 +107,7 @@ func newBuildHelper(db *ShardingDB, shard *Shard, l0Tbls *shardL0Tables, cf int)
 		for _, tbl := range l0Tbls.tables {
 			it := tbl.newIterator(cf, false)
 			if it != nil {
-				iters = append(iters, tbl.newIterator(cf, false))
+				iters = append(iters, it)
 			}
 		}
 	}
@@ -197,6 +197,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 	var shardSizeChange int64
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		helper := newBuildHelper(sdb, shard, l0Tbls, cf)
+		defer helper.iter.Close()
 		var results []*sstable.BuildResult
 		for {
 			result, err := helper.buildOne()

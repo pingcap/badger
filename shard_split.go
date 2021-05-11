@@ -140,6 +140,7 @@ func (sdb *ShardingDB) splitShardL0Table(shard *Shard, l0 *shardL0Table) ([]*pro
 		iters[cf] = l0.newIterator(cf, false)
 		if iters[cf] != nil {
 			it := iters[cf]
+			defer it.Close()
 			for it.Rewind(); it.Valid(); it.Next() {
 			}
 			it.Rewind()
