@@ -33,6 +33,8 @@ type singleKeyIterator struct {
 	latestVal []byte
 	oldVals   entrySlice
 	idx       int
+
+	oldBlock *block
 }
 
 func (ski *singleKeyIterator) set(oldOffset uint32, latestVal []byte) {
@@ -50,18 +52,26 @@ func (ski *singleKeyIterator) getVal() (val []byte) {
 	return oldEntry
 }
 
-func (ski *singleKeyIterator) loadOld(oldBlock []byte) {
-	numEntries := bytesToU32(oldBlock[ski.oldOffset:])
+func (ski *singleKeyIterator) loadOld(oldBlock *block) {
+	data := oldBlock.data
+	numEntries := bytesToU32(data[ski.oldOffset:])
 	endOffsStartIdx := ski.oldOffset + 4
 	endOffsEndIdx := endOffsStartIdx + 4*numEntries
-	ski.oldVals.endOffs = BytesToU32Slice(oldBlock[endOffsStartIdx:endOffsEndIdx])
+	ski.oldVals.endOffs = BytesToU32Slice(data[endOffsStartIdx:endOffsEndIdx])
 	valueEndOff := endOffsEndIdx + ski.oldVals.endOffs[numEntries-1]
-	ski.oldVals.data = oldBlock[endOffsEndIdx:valueEndOff]
+	ski.oldVals.data = data[endOffsEndIdx:valueEndOff]
 	ski.loaded = true
 }
 
 func (ski *singleKeyIterator) length() int {
 	return ski.oldVals.length() + 1
+}
+
+func (ski *singleKeyIterator) close() {
+	if ski.oldBlock != nil {
+		ski.oldBlock.done()
+		ski.oldBlock = nil
+	}
 }
 
 type blockIterator struct {
@@ -76,9 +86,13 @@ type blockIterator struct {
 
 	baseLen uint16
 	ski     singleKeyIterator
+
+	block *block
 }
 
-func (itr *blockIterator) setBlock(b block) {
+func (itr *blockIterator) setBlock(b *block) {
+	itr.block.done()
+	itr.block = b
 	itr.err = nil
 	itr.idx = 0
 	itr.key.Reset()
@@ -166,6 +180,11 @@ func (itr *blockIterator) next() {
 
 func (itr *blockIterator) prev() {
 	itr.setIdx(itr.idx - 1)
+}
+
+func (itr *blockIterator) close() {
+	itr.block.done()
+	itr.ski.close()
 }
 
 // Iterator is an iterator for a Table.
@@ -442,7 +461,7 @@ func (itr *Iterator) NextVersion() bool {
 	}
 	if !itr.bi.ski.loaded {
 		oldOffset := itr.t.tableSize - itr.t.oldBlockLen
-		oldBlock, err := itr.t.file.ReadBlock(oldOffset, itr.t.oldBlockLen)
+		oldBlock, err := itr.t.file.readBlock(oldOffset, itr.t.oldBlockLen)
 		if err != nil {
 			itr.err = err
 			return false
@@ -474,4 +493,10 @@ func (itr *Iterator) Seek(key []byte) {
 	} else {
 		itr.seekForPrev(key)
 	}
+}
+
+// Close closes the iterator (and it must be called).
+func (itr *Iterator) Close() error {
+	itr.bi.close()
+	return nil
 }

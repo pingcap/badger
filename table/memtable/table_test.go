@@ -35,12 +35,14 @@ func TestListNodeIterator(t *testing.T) {
 		key := newKey(i)
 		require.EqualValues(t, it.Key().UserKey, key)
 	}
+	it.Close()
 	it = ln.newIterator(false)
 	for i := 1; i < 100; i++ {
 		it.Next()
 		key := newKey(i)
 		require.EqualValues(t, it.Key().UserKey, key)
 	}
+	it.Close()
 }
 
 func newKey(i int) []byte {

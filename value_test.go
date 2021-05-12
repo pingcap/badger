@@ -365,6 +365,7 @@ func checkKeys(t *testing.T, kv *DB, keys [][]byte) {
 	i := 0
 	txn := kv.NewTransaction(false)
 	iter := txn.NewIterator(IteratorOptions{})
+	defer iter.Close()
 	for iter.Seek(keys[0]); iter.Valid(); iter.Next() {
 		require.Equal(t, iter.Item().Key(), keys[i])
 		i++

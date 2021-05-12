@@ -56,6 +56,7 @@ func newL0CreateByResult(result *sstable.BuildResult, props *protos.ShardPropert
 
 func debugTableCount(tbl table.Table) int {
 	it := tbl.NewIterator(false)
+	defer it.Close()
 	rowCnt := 0
 	for it.Rewind(); it.Valid(); it.Next() {
 		rowCnt++
@@ -106,7 +107,7 @@ func newBuildHelper(db *ShardingDB, shard *Shard, l0Tbls *shardL0Tables, cf int)
 		for _, tbl := range l0Tbls.tables {
 			it := tbl.newIterator(cf, false)
 			if it != nil {
-				iters = append(iters, tbl.newIterator(cf, false))
+				iters = append(iters, it)
 			}
 		}
 	}
@@ -196,6 +197,7 @@ func (sdb *ShardingDB) compactShardMultiCFL0(shard *Shard, guard *epoch.Guard) e
 	var shardSizeChange int64
 	for cf := 0; cf < sdb.numCFs; cf++ {
 		helper := newBuildHelper(sdb, shard, l0Tbls, cf)
+		defer helper.iter.Close()
 		var results []*sstable.BuildResult
 		for {
 			result, err := helper.buildOne()
@@ -529,7 +531,12 @@ func (sdb *ShardingDB) prepareCompactionDef(cf int, cd *CompactDef) error {
 func (sdb *ShardingDB) openTables(buildResults []*sstable.BuildResult) (newTables []table.Table, err error) {
 	for _, result := range buildResults {
 		var tbl table.Table
-		tbl, err = sstable.OpenMMapTable(result.FileName)
+		filename := result.FileName
+		reader, err := newTableFileWithShardingDB(filename, sdb)
+		if err != nil {
+			return nil, err
+		}
+		tbl, err = sstable.OpenTable(filename, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -661,7 +668,11 @@ func (sdb *ShardingDB) compactionUpdateLevelHandler(shard *Shard, cf, level int,
 			continue
 		}
 		filename := sstable.NewFilename(tbl.ID, sdb.opt.Dir)
-		tbl, err := sstable.OpenMMapTable(filename)
+		reader, err := newTableFileWithShardingDB(filename, sdb)
+		if err != nil {
+			return err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			return err
 		}
@@ -748,7 +759,11 @@ func (sdb *ShardingDB) applySplitFiles(shard *Shard, changeSet *protos.ShardChan
 			newHandlers[tbl.CF][tbl.Level-1] = newHandler
 		}
 		filename := sstable.NewFilename(tbl.ID, sdb.opt.Dir)
-		tbl, err := sstable.OpenMMapTable(filename)
+		reader, err := newTableFileWithShardingDB(filename, sdb)
+		if err != nil {
+			return err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			return err
 		}

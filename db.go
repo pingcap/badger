@@ -394,6 +394,7 @@ func createCache(opt Options) (blkCache, idxCache *cache.Cache, err error) {
 			NumCounters: opt.MaxBlockCacheSize / int64(opt.TableBuilderOptions.BlockSize) * 10,
 			MaxCost:     opt.MaxBlockCacheSize,
 			BufferItems: 64,
+			OnEvict:     sstable.OnEvict,
 		})
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "failed to create block cache")
@@ -465,6 +466,7 @@ func (db *DB) DeleteFilesInRange(start, end []byte) {
 			discardStats.collect(it.Value())
 		}
 		deletes[i] = tbl
+		it.Close()
 	}
 	guard.Delete(deletes)
 	guard.Done()
@@ -522,8 +524,11 @@ func (db *DB) prepareExternalFiles(specs []ExternalTableSpec) ([]table.Table, er
 		if err != nil {
 			return nil, err
 		}
-		dataReader, err := sstable.NewMMapFile(filename)
-		tbl, err := sstable.OpenTable(filename, dataReader)
+		reader, err := newTableFile(filename, db)
+		if err != nil {
+			return nil, err
+		}
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -844,6 +849,7 @@ func arenaSize(opt Options) int64 {
 // WriteLevel0Table flushes memtable. It drops deleteValues.
 func (db *DB) writeLevel0Table(s *memtable.Table, f *os.File) (*sstable.BuildResult, error) {
 	iter := s.NewIterator(false)
+	defer iter.Close()
 	var (
 		numWrite, bytesWrite int
 		err                  error
@@ -941,21 +947,11 @@ func (db *DB) runFlushMemTable(c *y.Closer) error {
 				return err
 			}
 		}
-		var tf sstable.TableFile
-		if db.blockCache != nil {
-			tf, err = sstable.NewLocalFile(filename, db.blockCache, db.indexCache)
-			if err != nil {
-				log.Info("error while mmap table", zap.Error(err))
-				return err
-			}
-		} else {
-			tf, err = sstable.NewMMapFile(filename)
-			if err != nil {
-				log.Info("error while mmap table", zap.Error(err))
-				return err
-			}
+		reader, err := newTableFile(filename, db)
+		if err != nil {
+			return err
 		}
-		tbl, err := sstable.OpenTable(filename, tf)
+		tbl, err := sstable.OpenTable(filename, reader)
 		if err != nil {
 			log.Info("error while opening table", zap.Error(err))
 			return err

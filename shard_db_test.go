@@ -129,6 +129,7 @@ func (sc *shardingCase) checkIterator(snap *Snapshot, begin, end int) {
 			i++
 		}
 		require.Equal(sc.t, end, i)
+		iter.Close()
 	}
 }
 

@@ -140,6 +140,7 @@ func (sdb *ShardingDB) splitShardL0Table(shard *Shard, l0 *shardL0Table) ([]*pro
 		iters[cf] = l0.newIterator(cf, false)
 		if iters[cf] != nil {
 			it := iters[cf]
+			defer it.Close()
 			for it.Rewind(); it.Valid(); it.Next() {
 			}
 			it.Rewind()
@@ -240,6 +241,7 @@ func (sdb *ShardingDB) splitTables(shard *Shard, cf int, level int, keys [][]byt
 		// append an end key to build the last table.
 		relatedKeys = append(relatedKeys, globalShardEndKey)
 		itr := tbl.NewIterator(false)
+		defer itr.Close()
 		itr.Rewind()
 		for _, relatedKey := range relatedKeys {
 			result, err := sdb.buildTableBeforeKey(itr, relatedKey, level, sdb.opt.TableBuilderOptions)

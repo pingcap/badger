@@ -91,18 +91,21 @@ func (t *Table) Size() int64 {
 
 func (t *Table) Smallest() y.Key {
 	it := t.NewIterator(false)
+	defer it.Close()
 	it.Rewind()
 	return it.Key()
 }
 
 func (t *Table) Biggest() y.Key {
 	it := t.NewIterator(true)
+	defer it.Close()
 	it.Rewind()
 	return it.Key()
 }
 
 func (t *Table) HasOverlap(start, end y.Key, includeEnd bool) bool {
 	it := t.NewIterator(false)
+	defer it.Close()
 	it.Seek(start.UserKey)
 	if !it.Valid() {
 		return false
@@ -289,3 +292,5 @@ func (it *listNodeIterator) Value() y.ValueStruct { return it.n.entries[it.idx].
 func (it *listNodeIterator) FillValue(vs *y.ValueStruct) { *vs = it.Value() }
 
 func (it *listNodeIterator) Valid() bool { return it.idx >= 0 && it.idx < len(it.n.latestOffs) }
+
+func (it *listNodeIterator) Close() error { return nil }
