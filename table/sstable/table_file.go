@@ -179,27 +179,31 @@ func (r *LocalFile) readBlock(offset, length int64) (*block, error) {
 	if ptr := atomic.LoadPointer(&r.memReader); ptr != nil {
 		return (*InMemFile)(ptr).readBlock(offset, length)
 	}
-	blk, err := r.blockCache.GetOrCompute(blockCacheKey(r.fid, uint32(offset)), func() (interface{}, int64, error) {
-		data := buffer.GetBuffer(int(length))
-		if _, err := r.fd.ReadAt(data, offset); err != nil {
-			buffer.PutBuffer(data)
-			return nil, 0, err
+	for {
+		blk, err := r.blockCache.GetOrCompute(blockCacheKey(r.fid, uint32(offset)), func() (interface{}, int64, error) {
+			data := buffer.GetBuffer(int(length))
+			if _, err := r.fd.ReadAt(data, offset); err != nil {
+				buffer.PutBuffer(data)
+				return nil, 0, err
+			}
+			blk := &block{
+				offset:    int(offset),
+				data:      data,
+				reference: 1,
+			}
+			return blk, length, nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		blk := &block{
-			offset:    int(offset),
-			data:      data,
-			reference: 1,
+		b := blk.(*block)
+		// When a block is evicted, the block counter fail to add reference.
+		if ok := b.add(); !ok {
+			// Add reference failed, so try to read block again until success.
+			continue
 		}
-		return blk, length, nil
-	})
-	if err != nil {
-		return &block{}, err
+		return b, nil
 	}
-	b := blk.(*block)
-	if ok := b.add(); !ok {
-		return &block{}, errors.Errorf("block is evicted")
-	}
-	return b, nil
 }
 
 func (r *LocalFile) ReadIndex() (*TableIndex, error) {
