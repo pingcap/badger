@@ -628,6 +628,10 @@ func (db *DB) Close() (err error) {
 		db.blockCache.Close()
 	}
 
+	if db.indexCache != nil {
+		db.indexCache.Close()
+	}
+
 	if db.dirLockGuard != nil {
 		if guardErr := db.dirLockGuard.release(); err == nil {
 			err = errors.Wrap(guardErr, "DB.Close")
