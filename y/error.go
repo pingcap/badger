@@ -30,9 +30,9 @@ package y
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
 )
 
 var debugMode = true
@@ -40,7 +40,7 @@ var debugMode = true
 // Check logs fatal if err != nil.
 func Check(err error) {
 	if err != nil {
-		log.Fatalf("%+v", Wrap(err))
+		log.S().Fatalf("%+v", Wrap(err))
 	}
 }
 
@@ -52,14 +52,14 @@ func Check2(_ interface{}, err error) {
 // AssertTrue asserts that b is true. Otherwise, it would log fatal.
 func Assert(b bool) {
 	if !b {
-		log.Fatalf("%+v", errors.Errorf("Assert failed"))
+		log.S().Fatalf("%+v", errors.Errorf("Assert failed"))
 	}
 }
 
 // AssertTruef is AssertTrue with extra info.
 func AssertTruef(b bool, format string, args ...interface{}) {
 	if !b {
-		log.Fatalf("%+v", errors.Errorf(format, args...))
+		log.S().Fatalf("%+v", errors.Errorf(format, args...))
 	}
 }
 
