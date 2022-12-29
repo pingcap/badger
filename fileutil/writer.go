@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/ncw/directio"
+	"github.com/pingcap/badger/directio"
 	"golang.org/x/time/rate"
 )
 
