@@ -1865,3 +1865,32 @@ func TestRemoteCompaction(t *testing.T) {
 		return nil
 	})
 }
+
+func TestNonDirectIO(t *testing.T) {
+	// if the dir is a tmpfs (or other file system which doesn't support directio), badger
+	// should still work
+	dir, err := ioutil.TempDir("", "badger")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+	remoteAddr := "127.0.0.1:4080"
+	compactionServer, err := NewCompactionServer(remoteAddr)
+	require.NoError(t, err)
+	go compactionServer.Run()
+	defer compactionServer.Close()
+	opts := getTestOptions(dir)
+	db, err := Open(opts)
+	require.NoError(t, err)
+	defer db.Close()
+
+	for i := 0; i < 512; i++ {
+		err = db.Update(func(txn *Txn) error {
+			key := []byte(fmt.Sprintf("key%03d", rand.Intn(128)))
+			val := make([]byte, 1024*4)
+			copy(val, key)
+			return txn.Set(key, val)
+		})
+		require.NoError(t, err)
+	}
+	// flushing memTable shouldn't hang forever even on file system which doesn't support directio
+	db.flushMemTable().Wait()
+}

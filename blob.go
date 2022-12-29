@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/ncw/directio"
+	"github.com/pingcap/badger/directio"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/fileutil"
 	"github.com/pingcap/badger/y"

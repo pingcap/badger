@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/ncw/directio"
+	"github.com/pingcap/badger/directio"
 	"github.com/stretchr/testify/require"
 )
 

@@ -23,7 +23,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/ncw/directio"
+	"github.com/pingcap/badger/directio"
 	"github.com/pingcap/badger/epoch"
 	"github.com/pingcap/badger/options"
 	"github.com/pingcap/badger/protos"
