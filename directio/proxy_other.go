@@ -1,4 +1,4 @@
-// Copyright 2022 PingCAP, Inc.
+// Copyright 2023 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,20 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// directio is a proxy package for github.com/pingcap/badger/directio
+//go:build !linux
+
 package directio
 
 import (
 	"github.com/ncw/directio"
 )
 
-const (
-	// AlignSize is the size to align the buffer to
-	AlignSize = directio.AlignSize
-	// BlockSize is the minimum block size
-	BlockSize = directio.BlockSize
-)
-
-// AlignedBlock returns []byte of size BlockSize aligned to a multiple
-// of AlignSize in memory (must be power of two)
-var AlignedBlock = directio.AlignedBlock
+// TODO: check the errors and fallback for the systems besides linux
+var OpenFile = directio.OpenFile

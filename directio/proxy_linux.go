@@ -1,4 +1,4 @@
-// Copyright 2022 PingCAP, Inc.
+// Copyright 2023 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,16 +16,21 @@
 package directio
 
 import (
+	"errors"
+	"os"
+
 	"github.com/ncw/directio"
+	"golang.org/x/sys/unix"
 )
 
-const (
-	// AlignSize is the size to align the buffer to
-	AlignSize = directio.AlignSize
-	// BlockSize is the minimum block size
-	BlockSize = directio.BlockSize
-)
+// OpenFile tries to open file in directio mode. If the file system doesn't support directio,
+// it will fallback to open the file directly (without O_DIRECT)
+func OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
+	file, err := directio.OpenFile(name, flag, perm)
 
-// AlignedBlock returns []byte of size BlockSize aligned to a multiple
-// of AlignSize in memory (must be power of two)
-var AlignedBlock = directio.AlignedBlock
+	if errors.Is(err, unix.EINVAL) {
+		return os.OpenFile(name, flag, perm)
+	}
+
+	return file, err
+}
