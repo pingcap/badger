@@ -8,7 +8,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.2
 	github.com/coocood/bbloom v0.0.0-20190830030839-58deb6228d64
 	github.com/coocood/rtutil v0.0.0-20190304133409-c84515f646f2
-	github.com/dgryski/go-farm v0.0.0-20190423205320-6a90982ecee2
+	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da
 	github.com/dustin/go-humanize v1.0.0
 	github.com/gogo/protobuf v1.2.1 // indirect
 	github.com/golang/protobuf v1.3.1
