@@ -1082,15 +1082,20 @@ var cacheConfig = cache.Config{
 }
 
 func BenchmarkPointGet(b *testing.B) {
+	fmt.Println("Updated BenchmarkPointGet!")
 	ns := []int{1000, 10000, 100000, 1000000, 5000000, 10000000, 15000000}
-	for _, n := range ns {
-		filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+	for i, n := range ns {
+		// filename := fmt.Sprintf("%s%s%d.sst", os.TempDir(), string(os.PathSeparator), rand.Uint32())
+		filename := fmt.Sprintf("%s%s%d.sst", "./tmp", string(os.PathSeparator), i)
 		f, err := y.OpenSyncedFile(filename, true)
 		builder := NewTableBuilder(f, nil, 0, defaultBuilderOpt)
 		keys := make([]y.Key, n)
 		y.Check(err)
 		for i := 0; i < n; i++ {
-			k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
+			// k := y.KeyWithTs([]byte(fmt.Sprintf("%016x", i)), 0)
+			bs := make([]byte, 4)
+			binary.BigEndian.PutUint32(bs, uint32(i))
+			k := y.KeyWithTs(bs, 0)
 			v := fmt.Sprintf("%d", i)
 			keys[i] = k
 			y.Check(builder.Add(k, y.ValueStruct{Value: []byte(v), Meta: 123, UserMeta: []byte{0}}))

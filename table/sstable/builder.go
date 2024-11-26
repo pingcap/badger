@@ -19,6 +19,7 @@ package sstable
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"reflect"
@@ -82,6 +83,7 @@ type Builder struct {
 
 	file          *os.File
 	w             tableWriter
+	mw            tableWriter
 	buf           []byte
 	writtenLen    int
 	rawWrittenLen int
@@ -156,6 +158,13 @@ func NewTableBuilder(f *os.File, limiter *rate.Limiter, level int, opt options.T
 		// add one byte so the offset would never be 0, so oldOffset is 0 means no old version.
 		oldBlock: []byte{0},
 	}
+	modFile, err := y.OpenTruncFile(ModelFilename(b.file.Name()), false)
+	if err != nil {
+		panic(err)
+	}
+	b.mw = fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter)
+	b.mw.Reset(modFile)
+
 	if f != nil {
 		b.w = fileutil.NewDirectWriter(f, opt.WriteBufferSize, limiter)
 	} else {
@@ -306,6 +315,14 @@ func (b *Builder) finishBlock() error {
 
 	// Add base key.
 	b.baseKeys.append(firstKey)
+
+	// By @spongedu
+	// For bourbon/plr we only support key length up to 4 byte as we need to cast key to uint32
+	if len(firstKey) <= 4 {
+		// only support key that can turn into uint
+		blockIndex := len(b.baseKeys.endOffs) - 1
+		b.mw.Write([]byte(fmt.Sprintf("%d,%d\n", binary.BigEndian.Uint32(firstKey), blockIndex)))
+	}
 
 	before := b.w.Offset()
 	if err := b.compression.Compress(b.w, b.buf); err != nil {
@@ -483,6 +500,9 @@ func (b *Builder) Finish() (*BuildResult, error) {
 	}
 	if b.file == nil {
 		result.IndexData = y.Copy(b.w.(*inMemWriter).Bytes())
+	}
+	if err = b.mw.Finish(); err != nil {
+		panic(err)
 	}
 	return result, nil
 }
